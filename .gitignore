@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+htmlcov/
+.pytest_cache/
+.coverage
+
+# Logs
+*.log
+logs/
+
+# ML model artifacts
+backend/app/models/artifacts/
+*.pkl
+*.pt
+*.joblib
+
+# Cache (BDL data, historical odds)
+backend/app/cache/
+
+# Sentry
+.sentryclirc
+
+# Misc
+*.bak
+*.tmp
+.windsurf/

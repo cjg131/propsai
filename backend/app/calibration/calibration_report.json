@@ -1,0 +1,558 @@
+{
+  "status": "completed",
+  "total_predictions": 629867,
+  "overall": {
+    "mae": 1.648,
+    "rmse": 2.819,
+    "bias": -0.141,
+    "bias_direction": "under-predicts",
+    "within_1": 0.5634,
+    "within_2": 0.7718,
+    "within_3": 0.8598,
+    "within_5": 0.9322,
+    "baseline_mae": 1.679,
+    "improvement_vs_baseline_pct": 1.8
+  },
+  "by_prop_type": {
+    "points": {
+      "count": 89981,
+      "mae": 4.903,
+      "rmse": 6.36,
+      "median_ae": 4.0,
+      "bias": -0.499,
+      "bias_direction": "under-predicts",
+      "within_1": 0.1417,
+      "within_2": 0.2725,
+      "within_3": 0.3964,
+      "within_5": 0.6072,
+      "baseline_mae": 4.98,
+      "improvement_vs_baseline": 1.5
+    },
+    "rebounds": {
+      "count": 89981,
+      "mae": 1.964,
+      "rmse": 2.58,
+      "median_ae": 1.6,
+      "bias": -0.159,
+      "bias_direction": "under-predicts",
+      "within_1": 0.3487,
+      "within_2": 0.6191,
+      "within_3": 0.8002,
+      "within_5": 0.9461,
+      "baseline_mae": 2.024,
+      "improvement_vs_baseline": 2.9
+    },
+    "assists": {
+      "count": 89981,
+      "mae": 1.434,
+      "rmse": 1.924,
+      "median_ae": 1.1,
+      "bias": -0.066,
+      "bias_direction": "neutral",
+      "within_1": 0.4736,
+      "within_2": 0.7744,
+      "within_3": 0.8983,
+      "within_5": 0.9792,
+      "baseline_mae": 1.462,
+      "improvement_vs_baseline": 1.9
+    },
+    "threes": {
+      "count": 89981,
+      "mae": 0.963,
+      "rmse": 1.317,
+      "median_ae": 0.7,
+      "bias": -0.077,
+      "bias_direction": "neutral",
+      "within_1": 0.6459,
+      "within_2": 0.8965,
+      "within_3": 0.9671,
+      "within_5": 0.9959,
+      "baseline_mae": 0.975,
+      "improvement_vs_baseline": 1.3
+    },
+    "steals": {
+      "count": 89981,
+      "mae": 0.754,
+      "rmse": 0.964,
+      "median_ae": 0.6,
+      "bias": -0.034,
+      "bias_direction": "neutral",
+      "within_1": 0.788,
+      "within_2": 0.9548,
+      "within_3": 0.9891,
+      "within_5": 0.9996,
+      "baseline_mae": 0.773,
+      "improvement_vs_baseline": 2.4
+    },
+    "blocks": {
+      "count": 89981,
+      "mae": 0.569,
+      "rmse": 0.77,
+      "median_ae": 0.4,
+      "bias": -0.014,
+      "bias_direction": "neutral",
+      "within_1": 0.8853,
+      "within_2": 0.9757,
+      "within_3": 0.9939,
+      "within_5": 0.9996,
+      "baseline_mae": 0.564,
+      "improvement_vs_baseline": -0.9
+    },
+    "turnovers": {
+      "count": 89981,
+      "mae": 0.949,
+      "rmse": 1.246,
+      "median_ae": 0.8,
+      "bias": -0.138,
+      "bias_direction": "under-predicts",
+      "within_1": 0.661,
+      "within_2": 0.9098,
+      "within_3": 0.9733,
+      "within_5": 0.9978,
+      "baseline_mae": 0.975,
+      "improvement_vs_baseline": 2.7
+    }
+  },
+  "mpg_analysis": {
+    "30+ mpg (stars)": {
+      "mae": 1.941,
+      "count": 185710
+    },
+    "18-24 mpg (rotation)": {
+      "mae": 1.472,
+      "count": 144879
+    },
+    "<18 mpg (bench)": {
+      "mae": 1.407,
+      "count": 129465
+    },
+    "24-30 mpg (starters)": {
+      "mae": 1.662,
+      "count": 169813
+    }
+  },
+  "games_played_analysis": {
+    "10-20 games": {
+      "mae": 1.56,
+      "count": 18998
+    },
+    "20-30 games": {
+      "mae": 1.556,
+      "count": 38066
+    },
+    "30-50 games": {
+      "mae": 1.58,
+      "count": 71778
+    },
+    "50+ games": {
+      "mae": 1.668,
+      "count": 501025
+    }
+  },
+  "splits": {
+    "home_mae": 1.649,
+    "away_mae": 1.647,
+    "home_count": 315224,
+    "away_count": 314643,
+    "b2b_mae": 1.677,
+    "rested_mae": 1.643,
+    "b2b_count": 95137,
+    "rested_count": 534730
+  },
+  "best_predicted_players": [
+    {
+      "player": "Nigel Hayes",
+      "mae": 0.6,
+      "predictions": 21
+    },
+    {
+      "player": "Drew Peterson",
+      "mae": 0.719,
+      "predictions": 21
+    },
+    {
+      "player": "Kennedy Chandler",
+      "mae": 0.736,
+      "predictions": 28
+    },
+    {
+      "player": "Hansen Yang",
+      "mae": 0.739,
+      "predictions": 28
+    },
+    {
+      "player": "Justin Minaya",
+      "mae": 0.814,
+      "predictions": 21
+    },
+    {
+      "player": "Reece Beekman",
+      "mae": 0.816,
+      "predictions": 56
+    },
+    {
+      "player": "Nathan Mensah",
+      "mae": 0.876,
+      "predictions": 21
+    },
+    {
+      "player": "Ryan Arcidiacono",
+      "mae": 0.889,
+      "predictions": 35
+    },
+    {
+      "player": "KZ Okpala",
+      "mae": 0.947,
+      "predictions": 98
+    },
+    {
+      "player": "Kevon Harris",
+      "mae": 0.957,
+      "predictions": 56
+    },
+    {
+      "player": "Killian Tillie",
+      "mae": 0.963,
+      "predictions": 98
+    },
+    {
+      "player": "Maxwell Lewis",
+      "mae": 0.982,
+      "predictions": 28
+    },
+    {
+      "player": "Isaiah Thomas",
+      "mae": 0.989,
+      "predictions": 28
+    },
+    {
+      "player": "Trey Jemison",
+      "mae": 0.996,
+      "predictions": 161
+    },
+    {
+      "player": "Khem Birch",
+      "mae": 0.998,
+      "predictions": 252
+    }
+  ],
+  "worst_predicted_players": [
+    {
+      "player": "Nikola Jokic",
+      "mae": 2.388,
+      "predictions": 2163
+    },
+    {
+      "player": "Luka Doncic",
+      "mae": 2.353,
+      "predictions": 1967
+    },
+    {
+      "player": "Stephen Curry",
+      "mae": 2.306,
+      "predictions": 2072
+    },
+    {
+      "player": "Kemba Walker",
+      "mae": 2.279,
+      "predictions": 196
+    },
+    {
+      "player": "Ethan Thompson",
+      "mae": 2.271,
+      "predictions": 21
+    },
+    {
+      "player": "Anthony Edwards",
+      "mae": 2.26,
+      "predictions": 2303
+    },
+    {
+      "player": "Victor Wembanyama",
+      "mae": 2.243,
+      "predictions": 973
+    },
+    {
+      "player": "Cade Cunningham",
+      "mae": 2.223,
+      "predictions": 1638
+    },
+    {
+      "player": "Tyrese Haliburton",
+      "mae": 2.219,
+      "predictions": 1764
+    },
+    {
+      "player": "Anthony Davis",
+      "mae": 2.217,
+      "predictions": 1498
+    },
+    {
+      "player": "Donovan Mitchell",
+      "mae": 2.215,
+      "predictions": 2079
+    },
+    {
+      "player": "Damian Lillard",
+      "mae": 2.209,
+      "predictions": 1393
+    },
+    {
+      "player": "LaMelo Ball",
+      "mae": 2.205,
+      "predictions": 1456
+    },
+    {
+      "player": "Tyrese Maxey",
+      "mae": 2.2,
+      "predictions": 2107
+    },
+    {
+      "player": "Trae Young",
+      "mae": 2.198,
+      "predictions": 1890
+    }
+  ],
+  "worst_individual_predictions": [
+    {
+      "prop_type": "points",
+      "predicted": 26.9,
+      "actual": 71.0,
+      "error": -44.1,
+      "abs_error": 44.1,
+      "player_name": "Damian Lillard",
+      "game_date": "2023-02-26",
+      "is_home": true,
+      "rest_days": 12,
+      "mpg": 36.3,
+      "games_played": 75,
+      "avg_stat": 28.53,
+      "last10": 36.1,
+      "baseline_error": -34.9
+    },
+    {
+      "prop_type": "points",
+      "predicted": 27.1,
+      "actual": 71.0,
+      "error": -43.9,
+      "abs_error": 43.9,
+      "player_name": "Donovan Mitchell",
+      "game_date": "2023-01-02",
+      "is_home": true,
+      "rest_days": 2,
+      "mpg": 34.9,
+      "games_played": 106,
+      "avg_stat": 26.52,
+      "last10": 25.7,
+      "baseline_error": -45.3
+    },
+    {
+      "prop_type": "points",
+      "predicted": 6.8,
+      "actual": 50.0,
+      "error": -43.2,
+      "abs_error": 43.2,
+      "player_name": "Malachi Flynn",
+      "game_date": "2024-04-03",
+      "is_home": false,
+      "rest_days": 2,
+      "mpg": 12.0,
+      "games_played": 163,
+      "avg_stat": 4.28,
+      "last10": 7.0,
+      "baseline_error": -43.0
+    },
+    {
+      "prop_type": "points",
+      "predicted": 32.8,
+      "actual": 73.0,
+      "error": -40.2,
+      "abs_error": 40.2,
+      "player_name": "Luka Doncic",
+      "game_date": "2024-01-26",
+      "is_home": false,
+      "rest_days": 2,
+      "mpg": 36.2,
+      "games_played": 182,
+      "avg_stat": 31.26,
+      "last10": 35.3,
+      "baseline_error": -37.7
+    },
+    {
+      "prop_type": "points",
+      "predicted": 22.4,
+      "actual": 62.0,
+      "error": -39.6,
+      "abs_error": 39.6,
+      "player_name": "Karl-Anthony Towns",
+      "game_date": "2024-01-22",
+      "is_home": true,
+      "rest_days": 2,
+      "mpg": 33.3,
+      "games_played": 149,
+      "avg_stat": 22.78,
+      "last10": 22.1,
+      "baseline_error": -39.9
+    },
+    {
+      "prop_type": "points",
+      "predicted": 21.9,
+      "actual": 61.0,
+      "error": -39.1,
+      "abs_error": 39.1,
+      "player_name": "Jalen Brunson",
+      "game_date": "2024-03-29",
+      "is_home": false,
+      "rest_days": 2,
+      "mpg": 33.9,
+      "games_played": 232,
+      "avg_stat": 22.16,
+      "last10": 28.3,
+      "baseline_error": -32.7
+    },
+    {
+      "prop_type": "points",
+      "predicted": 31.5,
+      "actual": 70.0,
+      "error": -38.5,
+      "abs_error": 38.5,
+      "player_name": "Joel Embiid",
+      "game_date": "2024-01-22",
+      "is_home": true,
+      "rest_days": 2,
+      "mpg": 34.4,
+      "games_played": 175,
+      "avg_stat": 31.91,
+      "last10": 37.6,
+      "baseline_error": -32.4
+    },
+    {
+      "prop_type": "points",
+      "predicted": 13.0,
+      "actual": 50.0,
+      "error": -37.0,
+      "abs_error": 37.0,
+      "player_name": "Aaron Gordon",
+      "game_date": "2025-10-23",
+      "is_home": false,
+      "rest_days": 205,
+      "mpg": 30.6,
+      "games_played": 262,
+      "avg_stat": 14.91,
+      "last10": 19.2,
+      "baseline_error": -30.8
+    },
+    {
+      "prop_type": "points",
+      "predicted": 23.2,
+      "actual": 60.0,
+      "error": -36.8,
+      "abs_error": 36.8,
+      "player_name": "Karl-Anthony Towns",
+      "game_date": "2022-03-14",
+      "is_home": false,
+      "rest_days": 2,
+      "mpg": 33.5,
+      "games_played": 62,
+      "avg_stat": 24.26,
+      "last10": 23.5,
+      "baseline_error": -36.5
+    },
+    {
+      "prop_type": "points",
+      "predicted": 23.9,
+      "actual": 60.0,
+      "error": -36.1,
+      "abs_error": 36.1,
+      "player_name": "De'Aaron Fox",
+      "game_date": "2024-11-15",
+      "is_home": true,
+      "rest_days": 2,
+      "mpg": 34.9,
+      "games_played": 210,
+      "avg_stat": 24.95,
+      "last10": 25.2,
+      "baseline_error": -34.8
+    },
+    {
+      "prop_type": "points",
+      "predicted": 8.6,
+      "actual": 44.0,
+      "error": -35.4,
+      "abs_error": 35.4,
+      "player_name": "Cam Thomas",
+      "game_date": "2023-02-04",
+      "is_home": true,
+      "rest_days": 3,
+      "mpg": 16.4,
+      "games_played": 101,
+      "avg_stat": 8.12,
+      "last10": 8.6,
+      "baseline_error": -35.4
+    },
+    {
+      "prop_type": "points",
+      "predicted": 20.0,
+      "actual": 55.0,
+      "error": -35.0,
+      "abs_error": 35.0,
+      "player_name": "Jamal Murray",
+      "game_date": "2025-02-12",
+      "is_home": true,
+      "rest_days": 2,
+      "mpg": 33.5,
+      "games_played": 165,
+      "avg_stat": 20.38,
+      "last10": 22.2,
+      "baseline_error": -32.8
+    },
+    {
+      "prop_type": "points",
+      "predicted": 16.2,
+      "actual": 51.0,
+      "error": -34.8,
+      "abs_error": 34.8,
+      "player_name": "Saddiq Bey",
+      "game_date": "2022-03-17",
+      "is_home": false,
+      "rest_days": 2,
+      "mpg": 33.8,
+      "games_played": 69,
+      "avg_stat": 15.83,
+      "last10": 16.4,
+      "baseline_error": -34.6
+    },
+    {
+      "prop_type": "points",
+      "predicted": 22.4,
+      "actual": 57.0,
+      "error": -34.6,
+      "abs_error": 34.6,
+      "player_name": "Julius Randle",
+      "game_date": "2023-03-20",
+      "is_home": true,
+      "rest_days": 2,
+      "mpg": 35.6,
+      "games_played": 144,
+      "avg_stat": 22.63,
+      "last10": 25.3,
+      "baseline_error": -31.7
+    },
+    {
+      "prop_type": "points",
+      "predicted": 9.2,
+      "actual": 43.0,
+      "error": -33.8,
+      "abs_error": 33.8,
+      "player_name": "Robert Covington",
+      "game_date": "2022-04-01",
+      "is_home": false,
+      "rest_days": 1,
+      "mpg": 27.5,
+      "games_played": 66,
+      "avg_stat": 7.95,
+      "last10": 9.5,
+      "baseline_error": -33.5
+    }
+  ]
+}

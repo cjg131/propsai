@@ -337,17 +337,26 @@ class KalshiAgent:
                 return results
 
             # Step 4: Price each parlay and find mispricings
+            stats = {"no_legs": 0, "no_fair_prob": 0, "low_confidence": 0, "no_edge": 0, "illiquid": 0, "traded": 0}
             for parlay_market in parlays:
                 try:
-                    signal = await self._evaluate_parlay(parlay_market, all_odds_events)
+                    signal = await self._evaluate_parlay(parlay_market, all_odds_events, stats)
                     if signal:
                         results.append(signal)
+                        stats["traded"] += 1
                 except Exception as e:
                     logger.warning(
                         "Parlay evaluation failed",
                         ticker=parlay_market.get("ticker"),
                         error=str(e),
                     )
+
+            edge_dist = f"edges: <1%={stats.get('edge_<1pct',0)} 1-3%={stats.get('edge_1-3pct',0)} 3-5%={stats.get('edge_3-5pct',0)} 5%+={stats.get('edge_5pct+',0)}"
+            self.engine.log_event(
+                "info",
+                f"Parlay filter: {len(parlays)} eval | illiq={stats['illiquid']} no_legs={stats['no_legs']} no_prob={stats['no_fair_prob']} low_conf={stats['low_confidence']} no_edge={stats['no_edge']} traded={stats['traded']} | {edge_dist}",
+                strategy="sports",
+            )
 
         except Exception as e:
             self.engine.log_event("error", f"Sports cycle failed: {e}", strategy="sports")
@@ -364,6 +373,7 @@ class KalshiAgent:
         self,
         parlay_market: dict[str, Any],
         odds_events: list[dict[str, Any]],
+        stats: dict[str, int] | None = None,
     ) -> dict[str, Any] | None:
         """Evaluate a single Kalshi parlay market against Odds API data."""
         ticker = parlay_market.get("ticker", "")
@@ -373,8 +383,12 @@ class KalshiAgent:
 
         # Safety filters
         if yes_ask <= 3 or no_ask <= 3:
+            if stats:
+                stats["illiquid"] += 1
             return None
         if parlay_market.get("volume", 0) < 10:
+            if stats:
+                stats["illiquid"] += 1
             return None
 
         # Parse legs
@@ -383,12 +397,16 @@ class KalshiAgent:
         if not legs:
             legs = parse_parlay_legs(title)
         if not legs:
+            if stats:
+                stats["no_legs"] += 1
             return None
 
         # Price the parlay
         pricing = price_parlay_legs(legs, odds_events)
         fair_prob = pricing.get("fair_prob")
         if fair_prob is None:
+            if stats:
+                stats["no_fair_prob"] += 1
             return None
 
         legs_priced = pricing.get("legs_priced", 0)
@@ -397,6 +415,8 @@ class KalshiAgent:
 
         # Require at least 50% of legs priced for a signal
         if confidence < 0.5:
+            if stats:
+                stats["low_confidence"] += 1
             return None
 
         # Compare fair value to Kalshi price
@@ -406,7 +426,33 @@ class KalshiAgent:
         yes_edge = fair_prob - kalshi_yes_prob
         no_edge = (1.0 - fair_prob) - kalshi_no_prob
 
-        min_edge = 0.08  # 8% minimum edge for parlays
+        min_edge = 0.03  # 3% minimum edge for parlays (sharp-priced)
+        best_edge = max(yes_edge, no_edge)
+        best_side = "yes" if yes_edge >= no_edge else "no"
+
+        # Track edge distribution in stats
+        if stats is not None:
+            if best_edge >= 0.05:
+                stats.setdefault("edge_5pct+", 0)
+                stats["edge_5pct+"] += 1
+            elif best_edge >= 0.03:
+                stats.setdefault("edge_3-5pct", 0)
+                stats["edge_3-5pct"] += 1
+            elif best_edge >= 0.01:
+                stats.setdefault("edge_1-3pct", 0)
+                stats["edge_1-3pct"] += 1
+            else:
+                stats.setdefault("edge_<1pct", 0)
+                stats["edge_<1pct"] += 1
+
+        # Log top edges for debugging
+        if best_edge >= 0.03:
+            self.engine.log_event(
+                "info",
+                f"Edge found: {ticker} {best_side} edge={best_edge:.1%} (fair={fair_prob:.1%} vs kalshi={kalshi_yes_prob:.1%}) legs={legs_priced}/{legs_total}",
+                strategy="sports",
+            )
+
         signal = None
 
         if yes_edge >= min_edge:
@@ -425,6 +471,8 @@ class KalshiAgent:
             }
 
         if not signal:
+            if stats:
+                stats["no_edge"] += 1
             return None
 
         # Record signal

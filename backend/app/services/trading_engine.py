@@ -52,7 +52,7 @@ class TradingEngine:
         max_bet_size: float = 40.0,
         max_bet_pct: float = 0.04,  # 4% of strategy bankroll per bet
         max_position_per_ticker: float = 60.0,  # Max $60 exposure per ticker
-        max_total_exposure_pct: float = 0.80,  # Never deploy more than 80% of bankroll
+        max_total_exposure_pct: float = 1.00,  # Allow full bankroll deployment when edge is strong
     ):
         self.bankroll = bankroll
         self.paper_mode = paper_mode

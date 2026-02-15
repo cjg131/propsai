@@ -17,7 +17,7 @@ from app.services.trading_engine import get_trading_engine, TradingEngine
 from app.services.weather_data import WeatherConsensus, CITY_CONFIGS
 from app.services.cross_market_sports import CrossMarketScanner, MONITORED_SPORTS
 from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs, categorize_market
-from app.services.parlay_pricer import price_parlay_legs
+from app.services.parlay_pricer import price_parlay_legs, teams_match
 
 logger = get_logger(__name__)
 
@@ -405,6 +405,8 @@ class KalshiAgent:
         title_lower = title.lower()
 
         # Find the matching Odds API event by team names in title
+        # Extract the two team names from the Kalshi title
+        # Formats: "TeamA vs TeamB Winner?" or "TeamB at TeamA: Totals" or "Will X win the Y vs Z match?"
         matched_event = None
         for event in events:
             home = event.get("home_team", "")
@@ -412,18 +414,12 @@ class KalshiAgent:
             if not home or not away:
                 continue
 
-            # Check if both teams appear in the title (fuzzy)
-            home_last = home.split()[-1].lower() if home else ""
-            away_last = away.split()[-1].lower() if away else ""
-            home_lower = home.lower()
-            away_lower = away.lower()
+            # Use teams_match which handles aliases (PSG, Inter, Atletico, etc.)
+            # Only match full team names — not individual words to avoid false positives
+            home_in_title = teams_match(home, title)
+            away_in_title = teams_match(away, title)
 
-            home_match = (home_last in title_lower or home_lower in title_lower or
-                          any(w.lower() in title_lower for w in home.split() if len(w) > 3))
-            away_match = (away_last in title_lower or away_lower in title_lower or
-                          any(w.lower() in title_lower for w in away.split() if len(w) > 3))
-
-            if home_match and away_match:
+            if home_in_title and away_in_title:
                 matched_event = event
                 break
 
@@ -545,7 +541,12 @@ class KalshiAgent:
             kalshi_implied = no_implied
 
         min_edge = 0.03  # 3% minimum edge
+        max_edge = 0.15  # 15% cap — anything higher is likely a bad match
         if edge < min_edge:
+            stats["no_edge"] += 1
+            return None
+        if edge > max_edge:
+            logger.info("Edge too high (likely bad match)", ticker=ticker, edge=f"{edge:.1%}", title=title[:60])
             stats["no_edge"] += 1
             return None
 

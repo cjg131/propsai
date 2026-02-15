@@ -15,6 +15,66 @@ from app.services.kalshi_api import KalshiClient
 
 logger = get_logger(__name__)
 
+# ── Single-game sports series — discovered from Kalshi API ───────
+# Maps Kalshi series tickers to Odds API sport keys and market types
+SINGLE_GAME_SERIES: dict[str, dict[str, str]] = {
+    # Basketball — NBA
+    "KXNBAGAME":      {"odds_sport": "basketball_nba", "market_type": "h2h"},
+    "KXNBASPREAD":    {"odds_sport": "basketball_nba", "market_type": "spreads"},
+    "KXNBATOTAL":     {"odds_sport": "basketball_nba", "market_type": "totals"},
+    "KXNBATEAMTOTAL": {"odds_sport": "basketball_nba", "market_type": "team_total"},
+    # Basketball — NCAAB
+    "KXNCAABGAME":    {"odds_sport": "basketball_ncaab", "market_type": "h2h"},
+    # Hockey — NHL
+    "KXNHLGAME":      {"odds_sport": "icehockey_nhl", "market_type": "h2h"},
+    "KXNHLSPREAD":    {"odds_sport": "icehockey_nhl", "market_type": "spreads"},
+    "KXNHLTOTAL":     {"odds_sport": "icehockey_nhl", "market_type": "totals"},
+    # Football — NFL
+    "KXNFLGAME":      {"odds_sport": "americanfootball_nfl", "market_type": "h2h"},
+    "KXNFLSPREAD":    {"odds_sport": "americanfootball_nfl", "market_type": "spreads"},
+    "KXNFLTOTAL":     {"odds_sport": "americanfootball_nfl", "market_type": "totals"},
+    "KXNFLTEAMTOTAL": {"odds_sport": "americanfootball_nfl", "market_type": "team_total"},
+    # Baseball — MLB
+    "KXMLBGAME":      {"odds_sport": "baseball_mlb", "market_type": "h2h"},
+    # Soccer — EPL
+    "KXEPLGAME":      {"odds_sport": "soccer_epl", "market_type": "h2h"},
+    "KXEPLSPREAD":    {"odds_sport": "soccer_epl", "market_type": "spreads"},
+    "KXEPLTOTAL":     {"odds_sport": "soccer_epl", "market_type": "totals"},
+    # Soccer — La Liga
+    "KXLALIGAGAME":   {"odds_sport": "soccer_spain_la_liga", "market_type": "h2h"},
+    "KXLALIGASPREAD": {"odds_sport": "soccer_spain_la_liga", "market_type": "spreads"},
+    "KXLALIGATOTAL":  {"odds_sport": "soccer_spain_la_liga", "market_type": "totals"},
+    # Soccer — Serie A
+    "KXSERIEAGAME":   {"odds_sport": "soccer_italy_serie_a", "market_type": "h2h"},
+    "KXSERIEASPREAD": {"odds_sport": "soccer_italy_serie_a", "market_type": "spreads"},
+    "KXSERIEATOTAL":  {"odds_sport": "soccer_italy_serie_a", "market_type": "totals"},
+    # Soccer — Bundesliga
+    "KXBUNDESLIGAGAME":   {"odds_sport": "soccer_germany_bundesliga", "market_type": "h2h"},
+    "KXBUNDESLIGASPREAD": {"odds_sport": "soccer_germany_bundesliga", "market_type": "spreads"},
+    "KXBUNDESLIGATOTAL":  {"odds_sport": "soccer_germany_bundesliga", "market_type": "totals"},
+    # Soccer — Ligue 1
+    "KXLIGUE1GAME":   {"odds_sport": "soccer_france_ligue_one", "market_type": "h2h"},
+    "KXLIGUE1SPREAD": {"odds_sport": "soccer_france_ligue_one", "market_type": "spreads"},
+    "KXLIGUE1TOTAL":  {"odds_sport": "soccer_france_ligue_one", "market_type": "totals"},
+    # Soccer — Champions League
+    "KXUCLGAME":      {"odds_sport": "soccer_uefa_champs_league", "market_type": "h2h"},
+    "KXUCLSPREAD":    {"odds_sport": "soccer_uefa_champs_league", "market_type": "spreads"},
+    "KXUCLTOTAL":     {"odds_sport": "soccer_uefa_champs_league", "market_type": "totals"},
+    # Tennis
+    "KXATPGAME":      {"odds_sport": "tennis_atp_french_open", "market_type": "h2h"},
+    "KXATPMATCH":     {"odds_sport": "tennis_atp_french_open", "market_type": "h2h"},
+    "KXWTAGAME":      {"odds_sport": "tennis_wta_french_open", "market_type": "h2h"},
+    "KXWTAMATCH":     {"odds_sport": "tennis_wta_french_open", "market_type": "h2h"},
+    # MMA / UFC
+    "KXUFCGAME":      {"odds_sport": "mma_mixed_martial_arts", "market_type": "h2h"},
+    "KXUFCROUNDS":    {"odds_sport": "mma_mixed_martial_arts", "market_type": "totals"},
+    # Additional soccer
+    "KXSOCCERSPREAD": {"odds_sport": "", "market_type": "spreads"},
+    "KXSOCCERTOTAL":  {"odds_sport": "", "market_type": "totals"},
+    # Unrivaled basketball
+    "KXUNRIVALEDGAME": {"odds_sport": "basketball_wba", "market_type": "h2h"},
+}
+
 # ── Weather series — confirmed from Kalshi API ───────────────────
 # Kalshi uses two naming conventions:
 #   Old: KXHIGH + 2-letter city (KXHIGHNY, KXHIGHCHI, etc.)
@@ -366,6 +426,61 @@ class KalshiScanner:
 
         logger.info("Parlay scan complete", found=len(parlays))
         return parlays
+
+    async def scan_single_game_markets(self, min_volume: int = 0) -> list[dict[str, Any]]:
+        """Scan all single-game sports series for tradeable markets."""
+        all_markets: list[dict[str, Any]] = []
+
+        for series_ticker, series_info in SINGLE_GAME_SERIES.items():
+            odds_sport = series_info.get("odds_sport", "")
+            market_type = series_info.get("market_type", "")
+            if not odds_sport:
+                continue
+
+            cursor = None
+            series_count = 0
+            for page in range(5):
+                if page > 0:
+                    await asyncio.sleep(0.5)
+                try:
+                    data = await self.kalshi.get_markets(
+                        status="open",
+                        series_ticker=series_ticker,
+                        limit=200,
+                        cursor=cursor,
+                    )
+                    markets = data.get("markets", [])
+                    for m in markets:
+                        vol = m.get("volume", 0) or 0
+                        yes_ask = m.get("yes_ask", 0) or 0
+                        no_ask = m.get("no_ask", 0) or 0
+
+                        if vol < min_volume:
+                            continue
+                        if yes_ask <= 2 or no_ask <= 2:
+                            continue
+
+                        enriched = self._enrich_market(m, "sports_single")
+                        if enriched:
+                            enriched["odds_sport"] = odds_sport
+                            enriched["kalshi_market_type"] = market_type
+                            all_markets.append(enriched)
+                            series_count += 1
+
+                    cursor = data.get("cursor")
+                    if not cursor or not markets:
+                        break
+                except Exception as e:
+                    logger.debug("Single game scan failed", series=series_ticker, error=str(e))
+                    break
+
+            if series_count > 0:
+                logger.info("Single game scan", series=series_ticker, found=series_count)
+
+            await asyncio.sleep(0.3)
+
+        logger.info("Single game scan complete", total=len(all_markets), series_checked=len(SINGLE_GAME_SERIES))
+        return all_markets
 
     def _enrich_market(self, market: dict[str, Any], category: str) -> dict[str, Any] | None:
         """Add parsed metadata to a raw Kalshi market."""

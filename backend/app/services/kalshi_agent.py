@@ -261,11 +261,11 @@ class KalshiAgent:
     async def run_sports_cycle(self) -> list[dict[str, Any]]:
         """
         Run one sports strategy cycle:
-        1. Scan Kalshi for open sports parlay markets with liquidity
-        2. Parse parlay legs from each market
-        3. Fetch sharp lines from The Odds API for matching sports
-        4. Price each parlay using sharp leg probabilities
-        5. Find mispricings and execute trades
+        1. Scan Kalshi for single-game sports markets (moneylines, spreads, totals)
+        2. Fetch sharp lines from The Odds API
+        3. Match each Kalshi market to its sharp line and calculate edge
+        4. Execute trades where edge exceeds threshold
+        5. Also scan parlays for additional opportunities
         """
         self.engine.log_event("info", "Sports cycle starting", strategy="sports")
         results: list[dict[str, Any]] = []
@@ -275,54 +275,37 @@ class KalshiAgent:
             return results
 
         try:
-            # Step 1: Scan Kalshi for sports parlays with liquidity
-            parlays = await self.scanner.scan_sports_parlays(min_volume=10)
+            # ── Step 1: Scan single-game markets ──────────────────
+            single_markets = await self.scanner.scan_single_game_markets(min_volume=0)
             self.engine.log_event(
                 "info",
-                f"Found {len(parlays)} liquid parlay markets",
+                f"Found {len(single_markets)} single-game markets",
                 strategy="sports",
             )
 
-            if not parlays:
-                return results
-
-            # Step 2: Determine which sports we need odds for
+            # ── Step 2: Fetch sharp odds for all relevant sports ──
+            # Collect which sports we need from the single-game markets
             sports_needed: set[str] = set()
-            for p in parlays:
-                parlay_info = p.get("parlay", {})
-                detected = parlay_info.get("sports_detected", [])
-                for s in detected:
-                    if s == "basketball":
-                        sports_needed.add("basketball_ncaab")
-                        sports_needed.add("basketball_nba")
-                    elif s == "soccer":
-                        sports_needed.update([
-                            "soccer_epl", "soccer_spain_la_liga",
-                            "soccer_germany_bundesliga", "soccer_italy_serie_a",
-                            "soccer_france_ligue_one", "soccer_uefa_champs_league",
-                        ])
-                    elif s == "tennis":
-                        sports_needed.update([
-                            "tennis_atp_french_open", "tennis_atp_us_open",
-                            "tennis_atp_wimbledon", "tennis_atp_australian_open",
-                        ])
-
-            # Also always check the main monitored sports
+            for m in single_markets:
+                sport = m.get("odds_sport", "")
+                if sport:
+                    sports_needed.add(sport)
             sports_needed.update(MONITORED_SPORTS)
 
-            # Step 3: Fetch odds from The Odds API
+            odds_by_sport: dict[str, list[dict[str, Any]]] = {}
             all_odds_events: list[dict[str, Any]] = []
             for sport in sports_needed:
                 try:
                     events = await self.sports.get_odds(sport, markets="h2h,spreads,totals")
                     if events:
+                        odds_by_sport[sport] = events
                         all_odds_events.extend(events)
                         self.engine.log_event(
                             "info",
                             f"{sport}: {len(events)} events with odds",
                             strategy="sports",
                         )
-                    await asyncio.sleep(0.5)  # Rate limit
+                    await asyncio.sleep(0.5)
                 except Exception as e:
                     logger.warning("Odds fetch failed", sport=sport, error=str(e))
 
@@ -336,25 +319,37 @@ class KalshiAgent:
                 self.engine.log_event("info", "No odds data available", strategy="sports")
                 return results
 
-            # Step 4: Price each parlay and find mispricings
-            stats = {"no_legs": 0, "no_fair_prob": 0, "low_confidence": 0, "no_edge": 0, "illiquid": 0, "traded": 0}
-            for parlay_market in parlays:
+            # ── Step 3: Evaluate single-game markets against sharp lines ──
+            single_stats = {"matched": 0, "no_match": 0, "no_edge": 0, "traded": 0}
+            for market in single_markets:
                 try:
-                    signal = await self._evaluate_parlay(parlay_market, all_odds_events, stats)
+                    signal = await self._evaluate_single_game(market, odds_by_sport, single_stats)
                     if signal:
                         results.append(signal)
-                        stats["traded"] += 1
                 except Exception as e:
-                    logger.warning(
-                        "Parlay evaluation failed",
-                        ticker=parlay_market.get("ticker"),
-                        error=str(e),
-                    )
+                    logger.debug("Single game eval failed", ticker=market.get("ticker"), error=str(e))
 
-            edge_dist = f"edges: <1%={stats.get('edge_<1pct',0)} 1-3%={stats.get('edge_1-3pct',0)} 3-5%={stats.get('edge_3-5pct',0)} 5%+={stats.get('edge_5pct+',0)}"
             self.engine.log_event(
                 "info",
-                f"Parlay filter: {len(parlays)} eval | illiq={stats['illiquid']} no_legs={stats['no_legs']} no_prob={stats['no_fair_prob']} low_conf={stats['low_confidence']} no_edge={stats['no_edge']} traded={stats['traded']} | {edge_dist}",
+                f"Single-game: {len(single_markets)} eval | matched={single_stats['matched']} no_match={single_stats['no_match']} no_edge={single_stats['no_edge']} traded={single_stats['traded']}",
+                strategy="sports",
+            )
+
+            # ── Step 4: Also evaluate parlays ──
+            parlays = await self.scanner.scan_sports_parlays(min_volume=10)
+            parlay_stats = {"no_legs": 0, "no_fair_prob": 0, "low_confidence": 0, "no_edge": 0, "illiquid": 0, "traded": 0}
+            for parlay_market in parlays:
+                try:
+                    signal = await self._evaluate_parlay(parlay_market, all_odds_events, parlay_stats)
+                    if signal:
+                        results.append(signal)
+                        parlay_stats["traded"] += 1
+                except Exception as e:
+                    logger.debug("Parlay eval failed", ticker=parlay_market.get("ticker"), error=str(e))
+
+            self.engine.log_event(
+                "info",
+                f"Parlays: {len(parlays)} eval | traded={parlay_stats['traded']} no_edge={parlay_stats['no_edge']}",
                 strategy="sports",
             )
 
@@ -368,6 +363,250 @@ class KalshiAgent:
             strategy="sports",
         )
         return results
+
+    async def _evaluate_single_game(
+        self,
+        market: dict[str, Any],
+        odds_by_sport: dict[str, list[dict[str, Any]]],
+        stats: dict[str, int],
+    ) -> dict[str, Any] | None:
+        """
+        Evaluate a single-game Kalshi market against sharp Odds API lines.
+
+        Kalshi market structure:
+        - Game Winner: ticker ends with team abbrev (-PSG, -ASM) or -TIE
+        - Totals: ticker ends with line number (-3, -4), floor_strike has actual line (3.5, 4.5)
+        - Spread: ticker ends with team+line (-BVB2), floor_strike has the spread line
+        """
+        ticker = market.get("ticker", "")
+        title = market.get("title", "")
+        odds_sport = market.get("odds_sport", "")
+        kalshi_type = market.get("kalshi_market_type", "")
+        yes_ask = market.get("yes_ask", 0)
+        no_ask = market.get("no_ask", 0)
+        floor_strike = market.get("floor_strike")
+
+        if not odds_sport or not title or not ticker:
+            stats["no_match"] += 1
+            return None
+
+        events = odds_by_sport.get(odds_sport, [])
+        if not events:
+            stats["no_match"] += 1
+            return None
+
+        # Parse the ticker suffix to understand what this contract represents
+        # Format: KXSERIES-DATECODETEAMS-OUTCOME
+        ticker_parts = ticker.rsplit("-", 1)
+        if len(ticker_parts) < 2:
+            stats["no_match"] += 1
+            return None
+        outcome_suffix = ticker_parts[1].upper()
+
+        # Extract team names from title (format: "TeamA vs TeamB Winner?" or "TeamB at TeamA: Totals")
+        title_lower = title.lower()
+
+        # Find the matching Odds API event by team names in title
+        matched_event = None
+        for event in events:
+            home = event.get("home_team", "")
+            away = event.get("away_team", "")
+            if not home or not away:
+                continue
+
+            # Check if both teams appear in the title (fuzzy)
+            home_last = home.split()[-1].lower() if home else ""
+            away_last = away.split()[-1].lower() if away else ""
+            home_lower = home.lower()
+            away_lower = away.lower()
+
+            home_match = (home_last in title_lower or home_lower in title_lower or
+                          any(w.lower() in title_lower for w in home.split() if len(w) > 3))
+            away_match = (away_last in title_lower or away_lower in title_lower or
+                          any(w.lower() in title_lower for w in away.split() if len(w) > 3))
+
+            if home_match and away_match:
+                matched_event = event
+                break
+
+        if not matched_event:
+            stats["no_match"] += 1
+            return None
+
+        # Extract sharp consensus for this event
+        consensus = self.sports.extract_sharp_consensus(matched_event)
+        if consensus.get("sharp_books_found", 0) == 0:
+            stats["no_match"] += 1
+            return None
+
+        sharp = consensus.get("sharp_consensus", {})
+        if not sharp:
+            stats["no_match"] += 1
+            return None
+
+        home_team = matched_event.get("home_team", "")
+        away_team = matched_event.get("away_team", "")
+
+        # Now match based on market type
+        sharp_prob = None
+        match_desc = ""
+
+        if kalshi_type == "h2h":
+            # Game Winner — outcome_suffix is team abbrev or TIE
+            if outcome_suffix == "TIE":
+                # Draw — look for "Draw" in h2h consensus
+                for key, prob in sharp.items():
+                    if key.startswith("h2h|") and "draw" in key.lower():
+                        sharp_prob = prob
+                        match_desc = f"h2h|Draw"
+                        break
+            else:
+                # Team win — match suffix to team name
+                for key, prob in sharp.items():
+                    if not key.startswith("h2h|"):
+                        continue
+                    team_name = key.split("|", 1)[1]
+                    # Check if the suffix matches the team (e.g., PSG matches "Paris Saint Germain")
+                    team_words = team_name.lower().split()
+                    suffix_lower = outcome_suffix.lower()
+                    if (suffix_lower in team_name.lower() or
+                        any(w.startswith(suffix_lower) for w in team_words) or
+                        team_name.lower().startswith(suffix_lower)):
+                        sharp_prob = prob
+                        match_desc = key
+                        break
+
+        elif kalshi_type == "totals":
+            # Totals — floor_strike has the actual line (e.g., 2.5, 3.5)
+            if floor_strike is not None:
+                target_line = float(floor_strike)
+                for key, prob in sharp.items():
+                    if not key.startswith("totals|"):
+                        continue
+                    parts = key.split("|")
+                    if len(parts) < 3:
+                        continue
+                    direction = parts[1]  # "Over" or "Under"
+                    try:
+                        line = float(parts[2])
+                    except ValueError:
+                        continue
+                    # Must match the exact line
+                    if abs(line - target_line) < 0.1 and direction.lower() == "over":
+                        sharp_prob = prob
+                        match_desc = key
+                        break
+
+        elif kalshi_type == "spreads":
+            # Spread — floor_strike has the spread line
+            if floor_strike is not None:
+                target_line = float(floor_strike)
+                for key, prob in sharp.items():
+                    if not key.startswith("spreads|"):
+                        continue
+                    parts = key.split("|")
+                    if len(parts) < 3:
+                        continue
+                    team_name = parts[1]
+                    try:
+                        line = float(parts[2])
+                    except ValueError:
+                        continue
+                    # Match team from suffix and line from floor_strike
+                    suffix_lower = outcome_suffix.lower()
+                    # Remove trailing digits from suffix to get team part
+                    team_part = suffix_lower.rstrip("0123456789")
+                    if (team_part in team_name.lower() or
+                        team_name.lower().startswith(team_part)):
+                        if abs(abs(line) - target_line) < 0.5:
+                            sharp_prob = prob
+                            match_desc = key
+                            break
+
+        if sharp_prob is None:
+            stats["no_match"] += 1
+            return None
+
+        # Calculate edge: Kalshi YES price vs sharp probability
+        kalshi_implied = yes_ask / 100.0 if yes_ask else 0
+        if kalshi_implied <= 0:
+            stats["no_edge"] += 1
+            return None
+
+        edge = sharp_prob - kalshi_implied
+        side = "yes"
+
+        # Also check NO side
+        no_implied = no_ask / 100.0 if no_ask else 0
+        no_sharp = 1.0 - sharp_prob
+        no_edge = no_sharp - no_implied
+        if no_edge > edge and no_implied > 0:
+            edge = no_edge
+            side = "no"
+            sharp_prob = no_sharp
+            kalshi_implied = no_implied
+
+        min_edge = 0.03  # 3% minimum edge
+        if edge < min_edge:
+            stats["no_edge"] += 1
+            return None
+
+        stats["matched"] += 1
+
+        self.engine.log_event(
+            "info",
+            f"Single-game edge: {ticker} {side} edge={edge:.1%} (sharp={sharp_prob:.1%} vs kalshi={kalshi_implied:.1%}) {match_desc} | {title[:60]}",
+            strategy="sports",
+        )
+
+        # Record signal
+        self.engine.record_signal(
+            strategy="sports",
+            ticker=ticker,
+            side=side,
+            our_prob=sharp_prob,
+            kalshi_prob=kalshi_implied,
+            market_title=title,
+            confidence=0.85,
+            signal_source="sharp_single_game",
+            details=f"sport={odds_sport} type={kalshi_type} match={match_desc} edge={edge:.4f}",
+        )
+
+        # Position sizing
+        price_cents = yes_ask if side == "yes" else no_ask
+        count = self.engine.calculate_position_size(
+            strategy="sports",
+            edge=edge,
+            price_cents=price_cents,
+            confidence=0.85,
+            ticker=ticker,
+        )
+
+        if count > 0:
+            trade = await self.engine.execute_trade(
+                strategy="sports",
+                ticker=ticker,
+                side=side,
+                count=count,
+                price_cents=price_cents,
+                our_prob=sharp_prob,
+                kalshi_prob=kalshi_implied,
+                market_title=title,
+                signal_source="sharp_single_game",
+            )
+            if trade:
+                stats["traded"] += 1
+                return {
+                    "ticker": ticker,
+                    "title": title,
+                    "side": side,
+                    "edge": edge,
+                    "sharp_prob": sharp_prob,
+                    "kalshi_implied": kalshi_implied,
+                    "trade": trade,
+                }
+
+        return None
 
     async def _evaluate_parlay(
         self,

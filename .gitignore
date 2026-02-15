@@ -51,6 +51,10 @@ backend/app/cache/
 # Sentry
 .sentryclirc
 
+# Kalshi private key
+*.key
+backend/kalshi.key
+
 # Misc
 *.bak
 *.tmp
@@ -58,3 +62,10 @@ backend/app/cache/
 
 # Local Netlify folder
 .netlify
+
+# Deploy secrets (env files with API keys, never commit)
+deploy/env/backend.env
+deploy/env/kalshi.key
+
+# SQLite database
+backend/app/data/*.db

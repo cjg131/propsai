@@ -43,6 +43,24 @@ class Settings(BaseSettings):
         default="", description="Twitter bearer token for injury news"
     )
 
+    # Tomorrow.io
+    tomorrow_io_api_key: str = Field(
+        default="", description="Tomorrow.io API key for weather forecasts (free tier)"
+    )
+
+    # Visual Crossing
+    visual_crossing_api_key: str = Field(
+        default="", description="Visual Crossing API key for weather data ($35/month)"
+    )
+
+    # Kalshi
+    kalshi_api_key_id: str = Field(
+        default="", description="Kalshi API key ID (UUID)"
+    )
+    kalshi_private_key_path: str = Field(
+        default="kalshi.key", description="Path to Kalshi RSA private key file"
+    )
+
     # Sentry
     sentry_dsn: str = Field(default="", description="Sentry DSN for error tracking")
 

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.logging_config import get_logger, setup_logging
-from app.api import health, predictions, players, odds, bets, data, settings as settings_router
+from app.api import health, predictions, players, odds, bets, data, settings as settings_router, kalshi, agent
 
 logger = get_logger(__name__)
 
@@ -57,6 +57,8 @@ def create_app() -> FastAPI:
     app.include_router(bets.router, prefix="/api/bets", tags=["Bets"])
     app.include_router(data.router, prefix="/api/data", tags=["Data"])
     app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"])
+    app.include_router(kalshi.router, prefix="/api/kalshi", tags=["Kalshi"])
+    app.include_router(agent.router, prefix="/api/kalshi/agent", tags=["Agent"])
 
     return app
 

@@ -13,6 +13,7 @@ COPY frontend/ ./
 
 # Build-time env: API calls go to same origin (nginx proxies /api to backend)
 ENV NEXT_PUBLIC_API_URL=""
+ENV DOCKER_BUILD="true"
 
 # Build the Next.js app
 RUN npm run build

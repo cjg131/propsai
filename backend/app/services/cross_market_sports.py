@@ -18,22 +18,79 @@ logger = get_logger(__name__)
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
-# Sports we monitor on The Odds API that also have Kalshi markets
+# ALL sports we monitor on The Odds API that also have Kalshi markets
 MONITORED_SPORTS = [
+    # Basketball
     "basketball_nba",
+    "basketball_nba_all_stars",
     "basketball_ncaab",
+    "basketball_wncaab",
+    "basketball_euroleague",
+    # Hockey
     "icehockey_nhl",
-    "mma_mixed_martial_arts",
+    "icehockey_ahl",
+    "icehockey_liiga",
+    "icehockey_sweden_hockey_league",
+    # Soccer — Major leagues
     "soccer_epl",
     "soccer_spain_la_liga",
     "soccer_germany_bundesliga",
     "soccer_italy_serie_a",
     "soccer_france_ligue_one",
     "soccer_uefa_champs_league",
-    "tennis_atp_french_open",
-    "tennis_atp_us_open",
-    "tennis_atp_wimbledon",
-    "tennis_atp_australian_open",
+    "soccer_uefa_champs_league_women",
+    "soccer_uefa_europa_league",
+    "soccer_uefa_europa_conference_league",
+    # Soccer — Secondary leagues
+    "soccer_efl_champ",
+    "soccer_england_efl_cup",
+    "soccer_fa_cup",
+    "soccer_spain_segunda_division",
+    "soccer_spain_copa_del_rey",
+    "soccer_italy_serie_b",
+    "soccer_germany_bundesliga2",
+    "soccer_france_ligue_two",
+    "soccer_netherlands_eredivisie",
+    "soccer_portugal_primeira_liga",
+    "soccer_spl",
+    "soccer_denmark_superliga",
+    "soccer_poland_ekstraklasa",
+    "soccer_greece_super_league",
+    "soccer_turkey_super_league",
+    "soccer_switzerland_superleague",
+    "soccer_austria_bundesliga",
+    "soccer_sweden_allsvenskan",
+    # Soccer — Americas & Asia
+    "soccer_usa_mls",
+    "soccer_mexico_ligamx",
+    "soccer_brazil_campeonato",
+    "soccer_argentina_primera_division",
+    "soccer_saudi_arabia_pro_league",
+    "soccer_japan_j_league",
+    "soccer_australia_aleague",
+    # Soccer — International
+    "soccer_fifa_world_cup",
+    "soccer_fifa_world_cup_qualifiers_europe",
+    # Football
+    "americanfootball_nfl",
+    "americanfootball_ncaaf",
+    # Tennis
+    "tennis_atp_qatar_open",
+    "tennis_wta_dubai",
+    # MMA / Boxing
+    "mma_mixed_martial_arts",
+    "boxing_boxing",
+    # Baseball
+    "baseball_mlb",
+    "baseball_ncaa",
+    # Cricket
+    "cricket_ipl",
+    "cricket_t20_world_cup",
+    # Rugby
+    "rugbyunion_six_nations",
+    "rugbyleague_nrl",
+    # Lacrosse
+    "lacrosse_ncaa",
 ]
 
 # Sharp bookmakers — these set the "true" line

@@ -283,14 +283,12 @@ class KalshiAgent:
                 strategy="sports",
             )
 
-            # ── Step 2: Fetch sharp odds for all relevant sports ──
-            # Collect which sports we need from the single-game markets
+            # ── Step 2: Fetch sharp odds only for sports with open Kalshi markets ──
             sports_needed: set[str] = set()
             for m in single_markets:
                 sport = m.get("odds_sport", "")
                 if sport:
                     sports_needed.add(sport)
-            sports_needed.update(MONITORED_SPORTS)
 
             odds_by_sport: dict[str, list[dict[str, Any]]] = {}
             all_odds_events: list[dict[str, Any]] = []

@@ -15,64 +15,263 @@ from app.services.kalshi_api import KalshiClient
 
 logger = get_logger(__name__)
 
-# ── Single-game sports series — discovered from Kalshi API ───────
-# Maps Kalshi series tickers to Odds API sport keys and market types
+# ── Single-game sports series — comprehensive mapping ─────────────
+# Maps Kalshi series tickers to Odds API sport keys and market types.
+# Covers ALL sports categories on Kalshi: Basketball, Hockey, Soccer,
+# Tennis, Golf, Football, MMA, Cricket, Baseball, Boxing, Esports,
+# Lacrosse, Motorsport, Olympics, Rugby, Darts, Chess, etc.
+
+def _sg(sport: str, mtype: str) -> dict[str, str]:
+    return {"odds_sport": sport, "market_type": mtype}
+
 SINGLE_GAME_SERIES: dict[str, dict[str, str]] = {
-    # Basketball — NBA
-    "KXNBAGAME":      {"odds_sport": "basketball_nba", "market_type": "h2h"},
-    "KXNBASPREAD":    {"odds_sport": "basketball_nba", "market_type": "spreads"},
-    "KXNBATOTAL":     {"odds_sport": "basketball_nba", "market_type": "totals"},
-    "KXNBATEAMTOTAL": {"odds_sport": "basketball_nba", "market_type": "team_total"},
-    # Basketball — NCAAB
-    "KXNCAABGAME":    {"odds_sport": "basketball_ncaab", "market_type": "h2h"},
-    # Hockey — NHL
-    "KXNHLGAME":      {"odds_sport": "icehockey_nhl", "market_type": "h2h"},
-    "KXNHLSPREAD":    {"odds_sport": "icehockey_nhl", "market_type": "spreads"},
-    "KXNHLTOTAL":     {"odds_sport": "icehockey_nhl", "market_type": "totals"},
-    # Football — NFL
-    "KXNFLGAME":      {"odds_sport": "americanfootball_nfl", "market_type": "h2h"},
-    "KXNFLSPREAD":    {"odds_sport": "americanfootball_nfl", "market_type": "spreads"},
-    "KXNFLTOTAL":     {"odds_sport": "americanfootball_nfl", "market_type": "totals"},
-    "KXNFLTEAMTOTAL": {"odds_sport": "americanfootball_nfl", "market_type": "team_total"},
-    # Baseball — MLB
-    "KXMLBGAME":      {"odds_sport": "baseball_mlb", "market_type": "h2h"},
-    # Soccer — EPL
-    "KXEPLGAME":      {"odds_sport": "soccer_epl", "market_type": "h2h"},
-    "KXEPLSPREAD":    {"odds_sport": "soccer_epl", "market_type": "spreads"},
-    "KXEPLTOTAL":     {"odds_sport": "soccer_epl", "market_type": "totals"},
-    # Soccer — La Liga
-    "KXLALIGAGAME":   {"odds_sport": "soccer_spain_la_liga", "market_type": "h2h"},
-    "KXLALIGASPREAD": {"odds_sport": "soccer_spain_la_liga", "market_type": "spreads"},
-    "KXLALIGATOTAL":  {"odds_sport": "soccer_spain_la_liga", "market_type": "totals"},
-    # Soccer — Serie A
-    "KXSERIEAGAME":   {"odds_sport": "soccer_italy_serie_a", "market_type": "h2h"},
-    "KXSERIEASPREAD": {"odds_sport": "soccer_italy_serie_a", "market_type": "spreads"},
-    "KXSERIEATOTAL":  {"odds_sport": "soccer_italy_serie_a", "market_type": "totals"},
-    # Soccer — Bundesliga
-    "KXBUNDESLIGAGAME":   {"odds_sport": "soccer_germany_bundesliga", "market_type": "h2h"},
-    "KXBUNDESLIGASPREAD": {"odds_sport": "soccer_germany_bundesliga", "market_type": "spreads"},
-    "KXBUNDESLIGATOTAL":  {"odds_sport": "soccer_germany_bundesliga", "market_type": "totals"},
-    # Soccer — Ligue 1
-    "KXLIGUE1GAME":   {"odds_sport": "soccer_france_ligue_one", "market_type": "h2h"},
-    "KXLIGUE1SPREAD": {"odds_sport": "soccer_france_ligue_one", "market_type": "spreads"},
-    "KXLIGUE1TOTAL":  {"odds_sport": "soccer_france_ligue_one", "market_type": "totals"},
-    # Soccer — Champions League
-    "KXUCLGAME":      {"odds_sport": "soccer_uefa_champs_league", "market_type": "h2h"},
-    "KXUCLSPREAD":    {"odds_sport": "soccer_uefa_champs_league", "market_type": "spreads"},
-    "KXUCLTOTAL":     {"odds_sport": "soccer_uefa_champs_league", "market_type": "totals"},
-    # Tennis
-    "KXATPGAME":      {"odds_sport": "tennis_atp_french_open", "market_type": "h2h"},
-    "KXATPMATCH":     {"odds_sport": "tennis_atp_french_open", "market_type": "h2h"},
-    "KXWTAGAME":      {"odds_sport": "tennis_wta_french_open", "market_type": "h2h"},
-    "KXWTAMATCH":     {"odds_sport": "tennis_wta_french_open", "market_type": "h2h"},
-    # MMA / UFC
-    "KXUFCGAME":      {"odds_sport": "mma_mixed_martial_arts", "market_type": "h2h"},
-    "KXUFCROUNDS":    {"odds_sport": "mma_mixed_martial_arts", "market_type": "totals"},
-    # Additional soccer
-    "KXSOCCERSPREAD": {"odds_sport": "", "market_type": "spreads"},
-    "KXSOCCERTOTAL":  {"odds_sport": "", "market_type": "totals"},
-    # Unrivaled basketball
-    "KXUNRIVALEDGAME": {"odds_sport": "basketball_wba", "market_type": "h2h"},
+    # ── Basketball ────────────────────────────────────────────────
+    # NBA (All-Star break Feb 2026, resumes ~Feb 20)
+    "KXNBAGAME":        _sg("basketball_nba", "h2h"),
+    "KXNBASPREAD":      _sg("basketball_nba", "spreads"),
+    "KXNBATOTAL":       _sg("basketball_nba", "totals"),
+    "KXNBATEAMTOTAL":   _sg("basketball_nba", "team_total"),
+    "KXNBA1HWINNER":    _sg("basketball_nba", "h2h"),
+    "KXNBA1HSPREAD":    _sg("basketball_nba", "spreads"),
+    "KXNBA1HTOTAL":     _sg("basketball_nba", "totals"),
+    "KXNBA2HWINNER":    _sg("basketball_nba", "h2h"),
+    "KXNBA2HSPREAD":    _sg("basketball_nba", "spreads"),
+    "KXNBA2HTOTAL":     _sg("basketball_nba", "totals"),
+    "KXNBA1QWINNER":    _sg("basketball_nba", "h2h"),
+    "KXNBA1QSPREAD":    _sg("basketball_nba", "spreads"),
+    "KXNBA1QTOTAL":     _sg("basketball_nba", "totals"),
+    "KXNBA2QWINNER":    _sg("basketball_nba", "h2h"),
+    "KXNBA2QSPREAD":    _sg("basketball_nba", "spreads"),
+    "KXNBA2QTOTAL":     _sg("basketball_nba", "totals"),
+    "KXNBA3QWINNER":    _sg("basketball_nba", "h2h"),
+    "KXNBA3QSPREAD":    _sg("basketball_nba", "spreads"),
+    "KXNBA3QTOTAL":     _sg("basketball_nba", "totals"),
+    "KXNBA4QWINNER":    _sg("basketball_nba", "h2h"),
+    "KXNBA4QSPREAD":    _sg("basketball_nba", "spreads"),
+    "KXNBA4QTOTAL":     _sg("basketball_nba", "totals"),
+    "KXNBAALLSTARGAME": _sg("basketball_nba_all_stars", "h2h"),
+    # NCAAB — Men's College Basketball
+    "KXNCAABGAME":      _sg("basketball_ncaab", "h2h"),
+    "KXNCAAMBSPREAD":   _sg("basketball_ncaab", "spreads"),
+    "KXNCAAMBTOTAL":    _sg("basketball_ncaab", "totals"),
+    # NCAAB — Women's College Basketball
+    "KXNCAAWBGAME":     _sg("basketball_wncaab", "h2h"),
+    "KXNCAAWBSPREAD":   _sg("basketball_wncaab", "spreads"),
+    "KXNCAAWBTOTAL":    _sg("basketball_wncaab", "totals"),
+    # Euroleague / Eurocup
+    "KXEUROLEAGUEGAME": _sg("basketball_euroleague", "h2h"),
+    "KXEUROCUPGAME":    _sg("basketball_euroleague", "h2h"),
+    # Unrivaled
+    "KXUNRIVALEDGAME":  _sg("basketball_wba", "h2h"),
+
+    # ── Hockey ────────────────────────────────────────────────────
+    "KXNHLGAME":        _sg("icehockey_nhl", "h2h"),
+    "KXNHLSPREAD":      _sg("icehockey_nhl", "spreads"),
+    "KXNHLTOTAL":       _sg("icehockey_nhl", "totals"),
+    "KXAHLGAME":        _sg("icehockey_ahl", "h2h"),
+    "KXSHLGAME":        _sg("icehockey_sweden_hockey_league", "h2h"),
+    "KXLIIGAGAME":      _sg("icehockey_liiga", "h2h"),
+    "KXKHLGAME":        _sg("icehockey_nhl", "h2h"),  # KHL not on Odds API, skip
+    "KXDELGAME":        _sg("icehockey_nhl", "h2h"),  # DEL not on Odds API
+    "KXELHGAME":        _sg("icehockey_nhl", "h2h"),  # ELH not on Odds API
+    "KXIIHFGAME":       _sg("icehockey_nhl", "h2h"),  # IIHF not on Odds API
+
+    # ── Soccer (30+ leagues) ──────────────────────────────────────
+    # England
+    "KXEPLGAME":              _sg("soccer_epl", "h2h"),
+    "KXEPLSPREAD":            _sg("soccer_epl", "spreads"),
+    "KXEPLTOTAL":             _sg("soccer_epl", "totals"),
+    "KXEPLBTTS":              _sg("soccer_epl", "btts"),
+    "KXEFLCHAMPIONSHIPGAME":  _sg("soccer_efl_champ", "h2h"),
+    "KXEFLCUPGAME":           _sg("soccer_england_efl_cup", "h2h"),
+    "KXEFLCUPTOTAL":          _sg("soccer_england_efl_cup", "totals"),
+    "KXFACUPGAME":            _sg("soccer_fa_cup", "h2h"),
+    "KXFACUPSPREAD":          _sg("soccer_fa_cup", "spreads"),
+    "KXFACUPTOTAL":           _sg("soccer_fa_cup", "totals"),
+    "KXEWSLGAME":             _sg("soccer_epl", "h2h"),  # Women's Super League
+    # Spain
+    "KXLALIGAGAME":           _sg("soccer_spain_la_liga", "h2h"),
+    "KXLALIGASPREAD":         _sg("soccer_spain_la_liga", "spreads"),
+    "KXLALIGATOTAL":          _sg("soccer_spain_la_liga", "totals"),
+    "KXLALIGA2GAME":          _sg("soccer_spain_segunda_division", "h2h"),
+    "KXCOPADELREYGAME":       _sg("soccer_spain_copa_del_rey", "h2h"),
+    "KXCOPADELREYTOTAL":      _sg("soccer_spain_copa_del_rey", "totals"),
+    # Italy
+    "KXSERIEAGAME":           _sg("soccer_italy_serie_a", "h2h"),
+    "KXSERIEASPREAD":         _sg("soccer_italy_serie_a", "spreads"),
+    "KXSERIEATOTAL":          _sg("soccer_italy_serie_a", "totals"),
+    "KXSERIEBGAME":           _sg("soccer_italy_serie_b", "h2h"),
+    # Germany
+    "KXBUNDESLIGAGAME":       _sg("soccer_germany_bundesliga", "h2h"),
+    "KXBUNDESLIGASPREAD":     _sg("soccer_germany_bundesliga", "spreads"),
+    "KXBUNDESLIGATOTAL":      _sg("soccer_germany_bundesliga", "totals"),
+    "KXBUNDESLIGA2GAME":      _sg("soccer_germany_bundesliga2", "h2h"),
+    "KXDFBPOKALGAME":         _sg("soccer_germany_bundesliga", "h2h"),  # DFB Pokal
+    # France
+    "KXLIGUE1GAME":           _sg("soccer_france_ligue_one", "h2h"),
+    "KXLIGUE1SPREAD":         _sg("soccer_france_ligue_one", "spreads"),
+    "KXLIGUE1TOTAL":          _sg("soccer_france_ligue_one", "totals"),
+    "KXCOUPEDEFRANCEGAME":    _sg("soccer_france_ligue_one", "h2h"),
+    "KXCOUPEDEFRANCETOTAL":   _sg("soccer_france_ligue_one", "totals"),
+    # UEFA
+    "KXUCLGAME":              _sg("soccer_uefa_champs_league", "h2h"),
+    "KXUCLSPREAD":            _sg("soccer_uefa_champs_league", "spreads"),
+    "KXUCLTOTAL":             _sg("soccer_uefa_champs_league", "totals"),
+    "KXUCLBTTS":              _sg("soccer_uefa_champs_league", "btts"),
+    "KXUCLWGAME":             _sg("soccer_uefa_champs_league_women", "h2h"),
+    "KXUELGAME":              _sg("soccer_uefa_europa_league", "h2h"),
+    "KXUECLGAME":             _sg("soccer_uefa_europa_conference_league", "h2h"),
+    "KXUEFAGAME":             _sg("soccer_uefa_champs_league", "h2h"),
+    # Netherlands
+    "KXEREDIVISIEGAME":       _sg("soccer_netherlands_eredivisie", "h2h"),
+    # Portugal
+    "KXLIGAPORTUGALGAME":     _sg("soccer_portugal_primeira_liga", "h2h"),
+    "KXTACAPORTGAME":         _sg("soccer_portugal_primeira_liga", "h2h"),
+    "KXTACAPORTSPREAD":       _sg("soccer_portugal_primeira_liga", "spreads"),
+    "KXTACAPORTTOTAL":        _sg("soccer_portugal_primeira_liga", "totals"),
+    # Scotland
+    "KXSCOTTISHPREMGAME":     _sg("soccer_spl", "h2h"),
+    # Denmark
+    "KXDANISHSUPERLIGAGAME":  _sg("soccer_denmark_superliga", "h2h"),
+    "KXDENSUPERLIGAGAME":     _sg("soccer_denmark_superliga", "h2h"),
+    # Poland
+    "KXEKSTRAKLASAGAME":      _sg("soccer_poland_ekstraklasa", "h2h"),
+    # Greece
+    "KXSLGREECEGAME":         _sg("soccer_greece_super_league", "h2h"),
+    # Turkey
+    "KXSUPERLIGGAME":         _sg("soccer_turkey_super_league", "h2h"),
+    # Switzerland
+    "KXSWISSLEAGUEGAME":      _sg("soccer_switzerland_superleague", "h2h"),
+    # Austria
+    "KXAUSTRIABUNDESLIGAGAME": _sg("soccer_austria_bundesliga", "h2h"),
+    # Saudi Arabia
+    "KXSAUDIPLGAME":          _sg("soccer_saudi_arabia_pro_league", "h2h"),
+    "KXSAUDIPLSPREAD":        _sg("soccer_saudi_arabia_pro_league", "spreads"),
+    "KXSAUDIPLTOTAL":         _sg("soccer_saudi_arabia_pro_league", "totals"),
+    # Brazil
+    "KXBRASILEIROGAME":       _sg("soccer_brazil_campeonato", "h2h"),
+    "KXBRASILEIROTOTAL":      _sg("soccer_brazil_campeonato", "totals"),
+    # Argentina
+    "KXARGENTINAGAME":        _sg("soccer_argentina_primera_division", "h2h"),
+    # Mexico
+    "KXLIGAMXGAME":           _sg("soccer_mexico_ligamx", "h2h"),
+    "KXLIGAMXSPREAD":         _sg("soccer_mexico_ligamx", "spreads"),
+    "KXLIGAMXTOTAL":          _sg("soccer_mexico_ligamx", "totals"),
+    # MLS
+    "KXMLSGAME":              _sg("soccer_usa_mls", "h2h"),
+    "KXMLSSPREAD":            _sg("soccer_usa_mls", "spreads"),
+    "KXMLSTOTAL":             _sg("soccer_usa_mls", "totals"),
+    # Japan
+    "KXJLEAGUEGAME":          _sg("soccer_japan_j_league", "h2h"),
+    # Korea
+    "KXKLEAGUEGAME":          _sg("soccer_japan_j_league", "h2h"),  # K League not on Odds API
+    # Australia
+    "KXALEAGUEGAME":          _sg("soccer_australia_aleague", "h2h"),
+    "KXALEAGUETOTAL":         _sg("soccer_australia_aleague", "totals"),
+    # Croatia
+    "KXHNLGAME":              _sg("soccer_epl", "h2h"),  # HNL not on Odds API
+    # Sweden
+    "KXALLSVENSKANGAME":      _sg("soccer_sweden_allsvenskan", "h2h"),
+    # FIFA / International
+    "KXFIFAGAME":             _sg("soccer_fifa_world_cup", "h2h"),
+    "KXINTLFRIENDLYGAME":     _sg("soccer_fifa_world_cup", "h2h"),
+    "KXWCGAME":               _sg("soccer_fifa_world_cup", "h2h"),
+    # Generic soccer (catch-all)
+    "KXSOCCERSPREAD":         _sg("soccer_epl", "spreads"),
+    "KXSOCCERTOTAL":          _sg("soccer_epl", "totals"),
+
+    # ── Football (NFL) ────────────────────────────────────────────
+    "KXNFLGAME":        _sg("americanfootball_nfl", "h2h"),
+    "KXNFLSPREAD":      _sg("americanfootball_nfl", "spreads"),
+    "KXNFLTOTAL":       _sg("americanfootball_nfl", "totals"),
+    "KXNFLTEAMTOTAL":   _sg("americanfootball_nfl", "team_total"),
+    "KXNFL1HWINNER":    _sg("americanfootball_nfl", "h2h"),
+    "KXNFL1HSPREAD":    _sg("americanfootball_nfl", "spreads"),
+    "KXNFL1HTOTAL":     _sg("americanfootball_nfl", "totals"),
+    "KXNFL2HWINNER":    _sg("americanfootball_nfl", "h2h"),
+    "KXNFL2HSPREAD":    _sg("americanfootball_nfl", "spreads"),
+    "KXNFL2HTOTAL":     _sg("americanfootball_nfl", "totals"),
+    "KXNFL1QWINNER":    _sg("americanfootball_nfl", "h2h"),
+    "KXNFL1QSPREAD":    _sg("americanfootball_nfl", "spreads"),
+    "KXNFL1QTOTAL":     _sg("americanfootball_nfl", "totals"),
+    "KXNFL2QWINNER":    _sg("americanfootball_nfl", "h2h"),
+    "KXNFL2QSPREAD":    _sg("americanfootball_nfl", "spreads"),
+    "KXNFL2QTOTAL":     _sg("americanfootball_nfl", "totals"),
+    "KXNFL3QWINNER":    _sg("americanfootball_nfl", "h2h"),
+    "KXNFL3QSPREAD":    _sg("americanfootball_nfl", "spreads"),
+    "KXNFL3QTOTAL":     _sg("americanfootball_nfl", "totals"),
+    "KXNFL4QWINNER":    _sg("americanfootball_nfl", "h2h"),
+    "KXNFL4QSPREAD":    _sg("americanfootball_nfl", "spreads"),
+    "KXNFL4QTOTAL":     _sg("americanfootball_nfl", "totals"),
+    # College Football
+    "KXNCAAFGAME":      _sg("americanfootball_ncaaf", "h2h"),
+    "KXNCAAFSPREAD":    _sg("americanfootball_ncaaf", "spreads"),
+    "KXNCAAFTOTAL":     _sg("americanfootball_ncaaf", "totals"),
+    "KXNCAAFTEAMTOTAL": _sg("americanfootball_ncaaf", "team_total"),
+    "KXNCAAFCSGAME":    _sg("americanfootball_ncaaf", "h2h"),
+    "KXNCAAF1HWINNER":  _sg("americanfootball_ncaaf", "h2h"),
+
+    # ── Tennis ────────────────────────────────────────────────────
+    "KXATPGAME":              _sg("tennis_atp_qatar_open", "h2h"),
+    "KXATPMATCH":             _sg("tennis_atp_qatar_open", "h2h"),
+    "KXATPTOTALSETS":         _sg("tennis_atp_qatar_open", "totals"),
+    "KXWTAGAME":              _sg("tennis_wta_dubai", "h2h"),
+    "KXWTAMATCH":             _sg("tennis_wta_dubai", "h2h"),
+    "KXWTACHALLENGERMATCH":   _sg("tennis_wta_dubai", "h2h"),
+    "KXWTADOUBLES":           _sg("tennis_wta_dubai", "h2h"),
+    "KXDAVISCUPMATCH":        _sg("tennis_atp_qatar_open", "h2h"),
+    "KXUNITEDCUPMATCH":       _sg("tennis_atp_qatar_open", "h2h"),
+    "KXTENNISEXHIBITION":     _sg("tennis_atp_qatar_open", "h2h"),
+
+    # ── MMA / Boxing ──────────────────────────────────────────────
+    "KXUFCGAME":        _sg("mma_mixed_martial_arts", "h2h"),
+    "KXUFCMATCH":       _sg("mma_mixed_martial_arts", "h2h"),
+    "KXUFCROUNDS":      _sg("mma_mixed_martial_arts", "totals"),
+    "KXUFCMOF":         _sg("mma_mixed_martial_arts", "h2h"),
+    "KXBOXINGMATCH":    _sg("boxing_boxing", "h2h"),
+    "KXBOXINGKNOCKOUT": _sg("boxing_boxing", "h2h"),
+
+    # ── Baseball ──────────────────────────────────────────────────
+    "KXMLBGAME":        _sg("baseball_mlb", "h2h"),
+    "KXMLBSPREAD":      _sg("baseball_mlb", "spreads"),
+    "KXMLBTOTAL":       _sg("baseball_mlb", "totals"),
+    "KXNCAABBGAME":     _sg("baseball_ncaa", "h2h"),
+    "KXNCAABBSPREAD":   _sg("baseball_ncaa", "spreads"),
+    "KXNCAABBTOTAL":    _sg("baseball_ncaa", "totals"),
+
+    # ── Cricket ───────────────────────────────────────────────────
+    "KXIPLGAME":        _sg("cricket_ipl", "h2h"),
+    "KXT20MATCH":       _sg("cricket_t20_world_cup", "h2h"),
+    "KXWPLGAME":        _sg("cricket_ipl", "h2h"),
+
+    # ── Rugby ─────────────────────────────────────────────────────
+    "KXSIXNATIONSMATCH":  _sg("rugbyunion_six_nations", "h2h"),
+    "KXRUGBYNRLMATCH":    _sg("rugbyleague_nrl", "h2h"),
+
+    # ── Lacrosse ──────────────────────────────────────────────────
+    "KXLAXGAME":        _sg("lacrosse_ncaa", "h2h"),
+
+    # ── Esports ───────────────────────────────────────────────────
+    "KXLOLGAME":        _sg("", "h2h"),  # No Odds API match
+    "KXLOLGAMES":       _sg("", "h2h"),
+    "KXCS2GAME":        _sg("", "h2h"),
+    "KXVALORANTGAME":   _sg("", "h2h"),
+    "KXDOTA2GAME":      _sg("", "h2h"),
+
+    # ── Darts ─────────────────────────────────────────────────────
+    "KXDARTSMATCH":     _sg("", "h2h"),  # No Odds API match
+
+    # ── Golf ──────────────────────────────────────────────────────
+    "KXPGAGAME":        _sg("golf_pga_championship_winner", "h2h"),
+    "KXTGLMATCH":       _sg("", "h2h"),
+
+    # ── Motorsport ────────────────────────────────────────────────
+    "KXF1RACE":         _sg("", "h2h"),  # No Odds API match
+
+    # ── Olympics ──────────────────────────────────────────────────
+    "KXWOCURLGAME":     _sg("", "h2h"),
+    "KXWOMHOCKEYSPREAD": _sg("icehockey_nhl", "spreads"),
+    "KXWOMHOCKEYTOTAL": _sg("icehockey_nhl", "totals"),
 }
 
 # ── Weather series — confirmed from Kalshi API ───────────────────

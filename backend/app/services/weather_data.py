@@ -446,7 +446,8 @@ class WeatherConsensus:
         else:
             return {"error": f"Invalid strike_type={strike_type} or missing strikes"}
 
-        our_prob_yes = max(0.0, min(1.0, our_prob_yes))
+        # Clamp to [0.02, 0.98] — no forecast is ever 0% or 100% certain
+        our_prob_yes = max(0.02, min(0.98, our_prob_yes))
 
         return {
             "city": forecasts.get("city", ""),
@@ -471,6 +472,7 @@ class WeatherConsensus:
         kalshi_yes_price: int,
         kalshi_no_price: int,
         min_edge: float = 0.08,
+        max_edge: float = 0.25,
         min_confidence: float = 0.3,
         min_sources: int = 2,
     ) -> dict[str, Any] | None:
@@ -501,7 +503,7 @@ class WeatherConsensus:
 
         signal = None
 
-        if yes_edge >= min_edge and kalshi_yes_price > 0:
+        if yes_edge >= min_edge and yes_edge <= max_edge and kalshi_yes_price > 0:
             signal = {
                 "side": "yes",
                 "our_prob": round(our_prob_yes, 4),
@@ -512,7 +514,7 @@ class WeatherConsensus:
                 "consensus_temp": consensus.get("mean_high_f"),
                 "label": consensus.get("label", ""),
             }
-        elif no_edge >= min_edge and kalshi_no_price > 0:
+        elif no_edge >= min_edge and no_edge <= max_edge and kalshi_no_price > 0:
             signal = {
                 "side": "no",
                 "our_prob": round(our_prob_no, 4),

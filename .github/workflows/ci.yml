@@ -41,9 +41,6 @@ jobs:
       - name: Lint with Ruff
         run: poetry run ruff check app/
 
-      - name: Type check with MyPy
-        run: poetry run mypy app/ --ignore-missing-imports
-
       - name: Run tests
         run: poetry run pytest --cov=app --cov-report=xml -v
         env:

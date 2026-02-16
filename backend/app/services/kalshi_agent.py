@@ -804,16 +804,23 @@ class KalshiAgent:
                     no_ask = market.get("no_ask", 0) or 0
                     mkt_status = market.get("status", "")
 
-                    # Mark-to-market: use last_price (most recent trade)
-                    # Kalshi's last_price is always YES price; flip for NO
-                    # Fallback: use ask (what it costs), not bid (lowball offers)
+                    # Mark-to-market: use same-side bid (what we'd get if we exit).
+                    # Fallback: last_price (flipped for NO), then ask, then entry.
                     last_price = market.get("last_price", 0) or 0
-                    if last_price > 0:
-                        mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
-                    elif pos["side"] == "yes":
-                        mark_price = yes_ask if yes_ask > 0 else (yes_bid if yes_bid > 0 else pos["avg_entry_cents"])
+                    if pos["side"] == "yes":
+                        if yes_bid > 0:
+                            mark_price = yes_bid
+                        elif last_price > 0:
+                            mark_price = last_price
+                        else:
+                            mark_price = yes_ask if yes_ask > 0 else pos["avg_entry_cents"]
                     else:
-                        mark_price = no_ask if no_ask > 0 else (no_bid if no_bid > 0 else pos["avg_entry_cents"])
+                        if no_bid > 0:
+                            mark_price = no_bid
+                        elif last_price > 0:
+                            mark_price = 100 - last_price
+                        else:
+                            mark_price = no_ask if no_ask > 0 else pos["avg_entry_cents"]
                     entry_price = pos["avg_entry_cents"]
 
                     mark_value = pos["contracts"] * mark_price / 100.0
@@ -956,17 +963,23 @@ class KalshiAgent:
                 pos["current_no_bid"] = no_bid
                 pos["current_no_ask"] = no_ask
 
-                # Mark-to-market: use last_price (most recent trade).
-                # Kalshi's last_price is always the YES price.
-                # For NO positions, the mark is 100 - last_price.
-                # Fallback: use ask (what it costs to buy), not bid (lowball offers).
+                # Mark-to-market: use same-side bid (what we'd get if we exit).
+                # Fallback: last_price (flipped for NO), then ask, then entry.
                 last_price = market.get("last_price", 0) or 0
-                if last_price > 0:
-                    mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
-                elif pos["side"] == "yes":
-                    mark_price = yes_ask if yes_ask > 0 else (yes_bid if yes_bid > 0 else pos["avg_entry_cents"])
+                if pos["side"] == "yes":
+                    if yes_bid > 0:
+                        mark_price = yes_bid
+                    elif last_price > 0:
+                        mark_price = last_price
+                    else:
+                        mark_price = yes_ask if yes_ask > 0 else pos["avg_entry_cents"]
                 else:
-                    mark_price = no_ask if no_ask > 0 else (no_bid if no_bid > 0 else pos["avg_entry_cents"])
+                    if no_bid > 0:
+                        mark_price = no_bid
+                    elif last_price > 0:
+                        mark_price = 100 - last_price
+                    else:
+                        mark_price = no_ask if no_ask > 0 else pos["avg_entry_cents"]
 
                 pos["mark_price_cents"] = mark_price
                 mark_value = pos["contracts"] * mark_price / 100.0

@@ -1,10 +1,13 @@
 from __future__ import annotations
+
 import csv
 import io
 import json as json_lib
+
 from fastapi import APIRouter, BackgroundTasks
 from fastapi.responses import StreamingResponse
-from app.schemas.data import DataStatusResponse, DataLoadResponse
+
+from app.schemas.data import DataLoadResponse, DataStatusResponse
 from app.services.data_manager import get_data_manager
 
 router = APIRouter()
@@ -51,8 +54,9 @@ async def prefetch_bdl(background_tasks: BackgroundTasks):
     Runs slowly (~10-15 min) to avoid 429s. Stores to file cache.
     Call this once, then predictions run instantly from cache.
     """
-    from app.services.balldontlie import get_balldontlie
     import asyncio
+
+    from app.services.balldontlie import get_balldontlie
 
     bdl = get_balldontlie()
     loop = asyncio.get_event_loop()
@@ -71,6 +75,7 @@ async def get_news_sentiment():
     Returns articles from RSS feeds + NewsAPI, plus player sentiment map.
     """
     import asyncio
+
     from app.services.news_sentiment import get_news_sentiment as get_news_svc
     from app.services.supabase_client import get_supabase
 
@@ -141,10 +146,11 @@ async def get_player_correlations():
     """
     import asyncio
     import json
+    from datetime import date
     from pathlib import Path
+
     from app.services.correlation_engine import build_all_player_correlations, find_correlated_parlays
     from app.services.supabase_client import get_supabase
-    from datetime import date
 
     loop = asyncio.get_event_loop()
     cache_dir = Path(__file__).parent.parent / "cache"
@@ -205,8 +211,9 @@ async def get_player_correlations():
 @router.get("/export/{format}")
 async def export_data(format: str):
     """Export predictions and bets as a downloadable CSV or JSON file."""
-    from app.services.supabase_client import get_supabase
     from datetime import date
+
+    from app.services.supabase_client import get_supabase
 
     sb = get_supabase()
     today_str = date.today().isoformat()

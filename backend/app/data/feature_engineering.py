@@ -5,13 +5,13 @@ Feature engineering pipeline for NBA player prop predictions.
 Transforms raw player/game data into ML-ready features.
 """
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
-from datetime import date, timedelta
 
-from app.utils.travel import get_travel_distance, get_timezone_change, calculate_fatigue_score
-from app.utils.fantasy import calculate_fantasy_score
 from app.logging_config import get_logger
+from app.utils.travel import get_timezone_change, get_travel_distance
 
 logger = get_logger(__name__)
 
@@ -51,8 +51,8 @@ def compute_home_away_splits(game_log: pd.DataFrame, stat_columns: list[str]) ->
     if "is_home" not in game_log.columns:
         return splits
 
-    home_games = game_log[game_log["is_home"] == True]
-    away_games = game_log[game_log["is_home"] == False]
+    home_games = game_log[game_log["is_home"]]
+    away_games = game_log[not game_log["is_home"]]
 
     for col in stat_columns:
         splits[f"home_avg_{col}"] = home_games[col].mean() if len(home_games) > 0 else 0.0
@@ -72,7 +72,7 @@ def compute_matchup_features(
     for col in stat_cols:
         if col in vs_opponent.columns:
             features[f"vs_opp_avg_{col}"] = vs_opponent[col].mean() if len(vs_opponent) > 0 else 0.0
-            features[f"vs_opp_games"] = len(vs_opponent)
+            features["vs_opp_games"] = len(vs_opponent)
     return features
 
 

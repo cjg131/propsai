@@ -5,9 +5,6 @@ Finds mispricings where Kalshi retail traders are slow to react to sharp line mo
 """
 from __future__ import annotations
 
-import asyncio
-import re
-from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import httpx
@@ -313,14 +310,14 @@ class CrossMarketScanner:
         Returns list of mispricings with edge > min_edge.
         """
         mispricings = []
-        consensus = sharp_consensus.get("sharp_consensus", {})
+        sharp_consensus.get("sharp_consensus", {})
 
         for kalshi_market in kalshi_markets:
             ticker = kalshi_market.get("ticker", "")
             title = kalshi_market.get("title", "")
-            yes_bid = kalshi_market.get("yes_bid", 0)
+            kalshi_market.get("yes_bid", 0)
             yes_ask = kalshi_market.get("yes_ask", 0)
-            no_bid = kalshi_market.get("no_bid", 0)
+            kalshi_market.get("no_bid", 0)
             no_ask = kalshi_market.get("no_ask", 0)
             volume = kalshi_market.get("volume", 0)
 
@@ -381,8 +378,8 @@ class CrossMarketScanner:
         Uses team names and market type to find the right match.
         """
         title = kalshi_market.get("title", "").lower()
-        home = sharp_consensus.get("home_team", "").lower()
-        away = sharp_consensus.get("away_team", "").lower()
+        sharp_consensus.get("home_team", "").lower()
+        sharp_consensus.get("away_team", "").lower()
         consensus = sharp_consensus.get("sharp_consensus", {})
 
         # Try h2h (moneyline) matching

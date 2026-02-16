@@ -9,10 +9,12 @@ Provides:
 from __future__ import annotations
 
 import json
-import httpx
+from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
-from collections import defaultdict
+
+import httpx
+
 from app.config import get_settings
 from app.logging_config import get_logger
 

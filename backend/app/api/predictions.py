@@ -1,11 +1,17 @@
 from __future__ import annotations
+
 import hashlib
-from fastapi import APIRouter, Query, HTTPException
+
+from fastapi import APIRouter, HTTPException, Query
+
+from app.logging_config import get_logger
 from app.schemas.predictions import (
-    PredictionResponse, PredictionListResponse, PredictionDetail, GameInfo,
+    GameInfo,
+    PredictionDetail,
+    PredictionListResponse,
+    PredictionResponse,
 )
 from app.services.supabase_client import get_supabase
-from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -21,8 +27,8 @@ async def get_today_predictions(
     """Get today's prop predictions with optional filters, grouped by game."""
     sb = get_supabase()
     try:
-        from datetime import date
         from collections import Counter
+        from datetime import date
         today = date.today().isoformat()
 
         query = sb.table("predictions").select("*").gte("created_at", today)
@@ -168,14 +174,15 @@ async def generate_predictions():
     6. Batch insert predictions to database
     """
     sb = get_supabase()
-    from datetime import date as date_cls
     from collections import defaultdict
+    from datetime import date as date_cls
 
     try:
         import asyncio
+
         from app.services.nba_data import get_nba_data
         from app.services.odds_api import get_odds_api
-        from app.services.smart_predictor import get_smart_predictor, PROP_STAT_MAP
+        from app.services.smart_predictor import PROP_STAT_MAP, get_smart_predictor
 
         # ── Step 1: Refresh real odds from The Odds API ──────────────
         # This is the source of truth: if a sportsbook has lines for a
@@ -361,7 +368,7 @@ async def generate_predictions():
         # rest features, and consistency metrics.
         logger.info("Step 3: Fetching BallDontLie game logs for active players...")
         from app.services.balldontlie import get_balldontlie
-        from app.utils.travel import get_travel_distance, get_timezone_change, calculate_fatigue_score
+        from app.utils.travel import calculate_fatigue_score, get_timezone_change, get_travel_distance
 
         bdl = get_balldontlie()
 
@@ -768,7 +775,7 @@ async def generate_predictions():
                 best_odds = real_over if recommended_bet == "over" else real_under
 
                 # No-vig fair odds calculation
-                from app.services.line_tracker import remove_vig, compute_true_ev
+                from app.services.line_tracker import compute_true_ev, remove_vig
                 novig = remove_vig(real_over, real_under)
                 our_prob = over_prob if recommended_bet == "over" else under_prob
                 fair_prob = novig["fair_over_prob"] if recommended_bet == "over" else novig["fair_under_prob"]
@@ -901,6 +908,7 @@ async def evaluate_yesterday():
 async def evaluate_date(eval_date: str):
     """Evaluate predictions for a specific date (YYYY-MM-DD)."""
     from datetime import date as d
+
     from app.services.evaluation import evaluate_predictions
     try:
         target = d.fromisoformat(eval_date)
@@ -924,6 +932,7 @@ async def snapshot_lines():
 async def get_clv(clv_date: str):
     """Compute Closing Line Value for predictions on a specific date."""
     from datetime import date as d
+
     from app.services.line_tracker import compute_clv_for_date
     try:
         target = d.fromisoformat(clv_date)
@@ -946,7 +955,9 @@ async def run_backtest_endpoint(
     Run a historical backtest simulation against real game data.
     Returns equity curve, hit rates, ROI, and full bet log.
     """
-    from datetime import date as d, timedelta
+    from datetime import date as d
+    from datetime import timedelta
+
     from app.services.backtesting import run_backtest
 
     # Parse dates
@@ -1013,6 +1024,7 @@ async def run_calibration_endpoint(
     Results saved to /calibration-report when done.
     """
     import asyncio
+
     from app.services.calibration_engine import run_calibration
 
     global _calibration_task, _calibration_progress

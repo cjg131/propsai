@@ -1,11 +1,13 @@
 from __future__ import annotations
+
 """Logistic Regression prediction model for player props."""
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
-from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
+
 from app.models.base import BasePredictor
 
 

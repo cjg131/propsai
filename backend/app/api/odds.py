@@ -1,9 +1,10 @@
 from __future__ import annotations
+
 from fastapi import APIRouter, Query
-from app.schemas.odds import OddsComparisonResponse, OddsComparison, BookOdds
-from app.services.supabase_client import get_supabase
-from app.services.sportsdataio import get_sportsdataio
+
 from app.logging_config import get_logger
+from app.schemas.odds import BookOdds, OddsComparison, OddsComparisonResponse
+from app.services.supabase_client import get_supabase
 
 logger = get_logger(__name__)
 router = APIRouter()

@@ -1,5 +1,7 @@
 from __future__ import annotations
-from supabase import create_client, Client
+
+from supabase import Client, create_client
+
 from app.config import get_settings
 from app.logging_config import get_logger
 

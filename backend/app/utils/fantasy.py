@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """Fantasy scoring calculations for DraftKings, FanDuel, and Yahoo."""
 
 

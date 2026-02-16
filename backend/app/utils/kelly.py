@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """Kelly Criterion and bankroll management utilities."""
 
 

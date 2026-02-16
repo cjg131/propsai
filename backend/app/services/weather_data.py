@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import httpx
@@ -69,7 +68,7 @@ class NWSClient:
             # Find today's daytime period for high temp
             result: dict[str, Any] = {"source": "nws", "city": city_key}
             for period in periods[:4]:
-                name = period.get("name", "").lower()
+                period.get("name", "").lower()
                 temp = period.get("temperature")
                 if temp is None:
                     continue
@@ -330,24 +329,27 @@ class WeatherConsensus:
         self.visual_crossing = VisualCrossingClient(api_key=visual_crossing_key)
 
     async def get_all_forecasts(self, city_key: str) -> dict[str, Any]:
-        """Fetch forecasts from all available sources for a city."""
-        results = await asyncio.gather(
-            self.nws.get_forecast(city_key),
-            self.open_meteo.get_ensemble_forecast(city_key),
-            self.tomorrow_io.get_forecast(city_key),
-            self.visual_crossing.get_forecast(city_key),
-            return_exceptions=True,
-        )
-
+        """Fetch forecasts from all available sources for a city.
+        Staggers calls to avoid 429 rate limits on paid APIs."""
         forecasts: dict[str, Any] = {"city": city_key, "sources": {}}
-        source_names = ["nws", "open_meteo", "tomorrow_io", "visual_crossing"]
 
-        for name, result in zip(source_names, results):
-            if isinstance(result, Exception):
-                logger.warning("Forecast source failed", source=name, city=city_key, error=str(result))
-                continue
-            if result is not None:
-                forecasts["sources"][name] = result
+        # NWS is free/unlimited — call first
+        calls = [
+            ("nws", self.nws.get_forecast(city_key)),
+            ("open_meteo", self.open_meteo.get_ensemble_forecast(city_key)),
+            ("tomorrow_io", self.tomorrow_io.get_forecast(city_key)),
+            ("visual_crossing", self.visual_crossing.get_forecast(city_key)),
+        ]
+
+        for name, coro in calls:
+            try:
+                result = await coro
+                if result is not None:
+                    forecasts["sources"][name] = result
+            except Exception as e:
+                logger.warning("Forecast source failed", source=name, city=city_key, error=str(e))
+            # Small delay between API calls to respect rate limits
+            await asyncio.sleep(0.3)
 
         return forecasts
 

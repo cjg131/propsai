@@ -1,13 +1,15 @@
 from __future__ import annotations
+
 from contextlib import asynccontextmanager
 
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api import agent, bets, data, health, kalshi, odds, players, predictions
+from app.api import settings as settings_router
 from app.config import get_settings
 from app.logging_config import get_logger, setup_logging
-from app.api import health, predictions, players, odds, bets, data, settings as settings_router, kalshi, agent
 
 logger = get_logger(__name__)
 

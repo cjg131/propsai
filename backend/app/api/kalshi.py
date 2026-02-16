@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from app.services.kalshi_api import get_kalshi_client
+
 from app.logging_config import get_logger
+from app.services.kalshi_api import get_kalshi_client
 
 logger = get_logger(__name__)
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
+
 from fastapi import APIRouter, HTTPException
+
+from app.logging_config import get_logger
 from app.schemas.settings import (
     AppSettingsResponse,
     AppSettingsUpdate,
-    ModelPresetResponse,
     ModelPresetCreate,
+    ModelPresetResponse,
 )
 from app.services.supabase_client import get_supabase
-from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()

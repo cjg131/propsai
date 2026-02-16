@@ -237,8 +237,9 @@ async def run_calibration(
 
     No lines involved — pure prediction accuracy vs reality.
     """
-    from app.services.smart_predictor import get_smart_predictor
     import random
+
+    from app.services.smart_predictor import get_smart_predictor
 
     predictor = get_smart_predictor()
     if not predictor.is_trained:

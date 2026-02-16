@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 from app.logging_config import get_logger
 from app.services.supabase_client import get_supabase
@@ -112,7 +111,7 @@ async def get_paper_trading_status() -> dict:
 
 async def place_paper_trades(
     min_confidence: float = MIN_CONFIDENCE,
-    target_date: Optional[date] = None,
+    target_date: date | None = None,
 ) -> dict:
     """
     Auto-place virtual bets on high-confidence predictions.
@@ -160,7 +159,7 @@ async def place_paper_trades(
     predictions = [p for p in predictions if (p.get("created_at", "") or "")[:10] == latest_date]
 
     # Build player name + team lookup (predictions table doesn't store player_name)
-    player_ids = list(set(str(p.get("player_id", "")) for p in predictions if p.get("player_id")))
+    list(set(str(p.get("player_id", "")) for p in predictions if p.get("player_id")))
     players_map: dict[str, dict] = {}
     teams_map: dict[str, str] = {}
     try:
@@ -264,7 +263,7 @@ async def place_paper_trades(
     }
 
 
-async def resolve_paper_trades(target_date: Optional[date] = None) -> dict:
+async def resolve_paper_trades(target_date: date | None = None) -> dict:
     """
     Resolve pending paper trades by comparing to actual game results.
     Uses BDL cached data for actuals.

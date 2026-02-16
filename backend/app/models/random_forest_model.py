@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 """Random Forest prediction model for player props."""
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 from sklearn.ensemble import RandomForestRegressor
+
 from app.models.base import BasePredictor
 
 

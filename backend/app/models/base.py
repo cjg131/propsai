@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 """Base class for all prediction models in the ensemble."""
 
 from abc import ABC, abstractmethod
+
 import numpy as np
 import pandas as pd
 

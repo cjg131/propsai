@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 """Bayesian prediction model using PyMC for uncertainty quantification."""
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 from sklearn.linear_model import BayesianRidge
+
 from app.models.base import BasePredictor
 
 

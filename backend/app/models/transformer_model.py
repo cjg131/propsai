@@ -1,11 +1,14 @@
 from __future__ import annotations
+
 """Transformer prediction model for long-range pattern detection."""
+
+import math
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import math
+
 from app.models.base import BasePredictor
 
 

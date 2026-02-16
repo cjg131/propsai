@@ -10,6 +10,7 @@ This is data NO consumer betting tool provides.
 from __future__ import annotations
 
 from collections import defaultdict
+
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)

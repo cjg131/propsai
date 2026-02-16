@@ -5,7 +5,6 @@ and calculates the fair value of the full parlay to find mispricings.
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from app.logging_config import get_logger

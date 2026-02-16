@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """Travel distance and fatigue calculations for NBA teams."""
 
 import math

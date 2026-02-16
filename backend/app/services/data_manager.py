@@ -5,11 +5,12 @@ Data management service — orchestrates data loading, refreshing,
 caching, API quota tracking, and model retraining.
 """
 
-from datetime import datetime, date
-from app.services.supabase_client import get_supabase
-from app.services.sportsdataio import get_sportsdataio
-from app.services.injury_scraper import get_injury_scraper
+from datetime import date, datetime
+
 from app.logging_config import get_logger
+from app.services.injury_scraper import get_injury_scraper
+from app.services.sportsdataio import get_sportsdataio
+from app.services.supabase_client import get_supabase
 
 logger = get_logger(__name__)
 
@@ -197,8 +198,8 @@ class DataManager:
 
     async def retrain_models(self) -> dict:
         """Retrain all SmartPredictor models with latest enriched data."""
-        from app.services.smart_predictor import SmartPredictor
         from app.services.nba_data import get_nba_data
+        from app.services.smart_predictor import SmartPredictor
 
         training_id = None
         try:

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timezone
 from typing import Any
 
 from app.logging_config import get_logger
@@ -328,8 +327,6 @@ WEATHER_SERIES_ALL: dict[str, dict[str, str]] = {
     # High temperature — additional discovered
     "KXHIGHAUS":  {"city_code": "AUS", "type": "high_temp"},
     "KXHIGHTNOLA": {"city_code": "NOL", "type": "high_temp"},
-    # Low temperature — additional
-    "KXLOWTLAX":  {"city_code": "LAX", "type": "low_temp"},
     "KXLOWTPHL":  {"city_code": "PHL", "type": "low_temp"},
     "KXLOWTDC":   {"city_code": "DCA", "type": "low_temp"},
     "KXLOWTATL":  {"city_code": "ATL", "type": "low_temp"},
@@ -550,7 +547,7 @@ class KalshiScanner:
 
     async def scan_weather_markets(self) -> list[dict[str, Any]]:
         """Scan all confirmed Kalshi weather series for active markets.
-        
+
         NOTE: Kalshi uses status='active' for live tradeable markets,
         but the API filter accepts 'open' which returns active markets.
         We fetch without status filter and check locally to be safe.

@@ -6,18 +6,17 @@ Runs on a schedule: weather 4x/day, sports every 2-5 minutes.
 from __future__ import annotations
 
 import asyncio
-import re
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from app.config import get_settings
 from app.logging_config import get_logger
-from app.services.kalshi_api import get_kalshi_client, KalshiClient
-from app.services.trading_engine import get_trading_engine, TradingEngine
-from app.services.weather_data import WeatherConsensus, CITY_CONFIGS
-from app.services.cross_market_sports import CrossMarketScanner, MONITORED_SPORTS
-from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs, categorize_market
+from app.services.cross_market_sports import CrossMarketScanner
+from app.services.kalshi_api import get_kalshi_client
+from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs
 from app.services.parlay_pricer import price_parlay_legs, teams_match
+from app.services.trading_engine import get_trading_engine
+from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
 
 logger = get_logger(__name__)
 
@@ -86,7 +85,7 @@ class KalshiAgent:
                 if city_code:
                     by_city.setdefault(city_code, []).append(m)
 
-            for city_key, city_markets in by_city.items():
+            for i, (city_key, city_markets) in enumerate(by_city.items()):
                 if city_key not in CITY_CONFIGS:
                     self.engine.log_event(
                         "warning",
@@ -94,6 +93,10 @@ class KalshiAgent:
                         strategy="weather",
                     )
                     continue
+
+                # Rate-limit: pause between cities to avoid 429s
+                if i > 0:
+                    await asyncio.sleep(2.0)
 
                 # Get forecasts from all sources
                 forecasts = await self.weather.get_all_forecasts(city_key)
@@ -174,7 +177,7 @@ class KalshiAgent:
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 hours_until_close = (close_dt - now).total_seconds() / 3600
                 if hours_until_close < 2:
                     return None
@@ -402,7 +405,7 @@ class KalshiAgent:
         outcome_suffix = ticker_parts[1].upper()
 
         # Extract team names from title (format: "TeamA vs TeamB Winner?" or "TeamB at TeamA: Totals")
-        title_lower = title.lower()
+        title.lower()
 
         # Find the matching Odds API event by team names in title
         # Extract the two team names from the Kalshi title
@@ -438,8 +441,8 @@ class KalshiAgent:
             stats["no_match"] += 1
             return None
 
-        home_team = matched_event.get("home_team", "")
-        away_team = matched_event.get("away_team", "")
+        matched_event.get("home_team", "")
+        matched_event.get("away_team", "")
 
         # Now match based on market type
         sharp_prob = None
@@ -452,7 +455,7 @@ class KalshiAgent:
                 for key, prob in sharp.items():
                     if key.startswith("h2h|") and "draw" in key.lower():
                         sharp_prob = prob
-                        match_desc = f"h2h|Draw"
+                        match_desc = "h2h|Draw"
                         break
             else:
                 # Team win — match suffix to team name
@@ -821,7 +824,7 @@ class KalshiAgent:
                         mark_price = bid
                     else:
                         mark_price = pos["avg_entry_cents"]
-                    entry_price = pos["avg_entry_cents"]
+                    pos["avg_entry_cents"]
 
                     mark_value = pos["contracts"] * mark_price / 100.0
                     unrealized_pnl = round(mark_value - pos["total_cost"] - pos["total_fees"], 2)
@@ -839,7 +842,7 @@ class KalshiAgent:
 
                     # ── DECISION 1: EXIT — edge has flipped significantly ──
                     if current_edge < -0.05 and mark_price > 0:
-                        exit_result = await self.engine.exit_trade(
+                        await self.engine.exit_trade(
                             strategy=pos["strategy"],
                             ticker=ticker,
                             side=pos["side"],
@@ -862,7 +865,7 @@ class KalshiAgent:
                         profit_pct = unrealized_pnl / max_profit
                         # Take profit if we've captured >50% of max profit
                         if profit_pct > 0.50 and mark_price > 0:
-                            exit_result = await self.engine.exit_trade(
+                            await self.engine.exit_trade(
                                 strategy=pos["strategy"],
                                 ticker=ticker,
                                 side=pos["side"],

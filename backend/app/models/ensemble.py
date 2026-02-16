@@ -1,24 +1,26 @@
 from __future__ import annotations
+
 """
 Ensemble prediction engine combining all base models.
 Uses stacked generalization with performance-weighted fallback.
 """
 
-import numpy as np
-import pandas as pd
-import joblib
 import signal
 from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
 from sklearn.linear_model import Ridge
 
+from app.logging_config import get_logger
 from app.models.base import BasePredictor
-from app.models.xgboost_model import XGBoostPredictor
-from app.models.random_forest_model import RandomForestPredictor
+from app.models.bayesian_model import BayesianPredictor
 from app.models.logistic_model import LogisticPredictor
 from app.models.lstm_model import LSTMPredictor
+from app.models.random_forest_model import RandomForestPredictor
 from app.models.transformer_model import TransformerPredictor
-from app.models.bayesian_model import BayesianPredictor
-from app.logging_config import get_logger
+from app.models.xgboost_model import XGBoostPredictor
 
 logger = get_logger(__name__)
 

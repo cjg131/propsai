@@ -4,12 +4,10 @@ Handles order placement, bankroll management, risk limits, and paper trading.
 """
 from __future__ import annotations
 
-import json
 import math
 import sqlite3
-import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -167,7 +165,7 @@ class TradingEngine:
         c = conn.cursor()
         c.execute(
             "INSERT INTO agent_log (timestamp, level, strategy, message, details) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), level, strategy, message, details),
+            (datetime.now(UTC).isoformat(), level, strategy, message, details),
         )
         conn.commit()
         conn.close()
@@ -179,7 +177,7 @@ class TradingEngine:
 
     def get_today_pnl(self, strategy: str | None = None) -> float:
         """Get today's P&L, optionally filtered by strategy."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         if strategy:
@@ -198,7 +196,7 @@ class TradingEngine:
 
     def get_today_trade_count(self, strategy: str | None = None) -> int:
         """Get today's trade count."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         if strategy:
@@ -362,7 +360,7 @@ class TradingEngine:
         """Record a trading signal. Returns signal ID."""
         signal_id = str(uuid.uuid4())[:12]
         edge = our_prob - kalshi_prob if side == "no" else kalshi_prob - our_prob
-        # For "no" side: edge = (1-our_prob) - (1-kalshi_prob) = kalshi_prob - our_prob... 
+        # For "no" side: edge = (1-our_prob) - (1-kalshi_prob) = kalshi_prob - our_prob...
         # Actually: if we buy NO, edge = our_prob_no - kalshi_prob_no
         # Let's keep it simple: edge is always positive when we have an advantage
         edge = abs(our_prob - kalshi_prob)
@@ -370,13 +368,13 @@ class TradingEngine:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute(
-            """INSERT INTO signals 
-            (id, timestamp, strategy, ticker, market_title, side, our_prob, kalshi_prob, 
+            """INSERT INTO signals
+            (id, timestamp, strategy, ticker, market_title, side, our_prob, kalshi_prob,
              edge, confidence, recommended_size, recommended_price, signal_source, details)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal_id,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 strategy,
                 ticker,
                 market_title,
@@ -480,7 +478,7 @@ class TradingEngine:
         # Record trade
         trade = {
             "id": trade_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "strategy": strategy,
             "ticker": ticker,
             "market_title": market_title,
@@ -504,8 +502,8 @@ class TradingEngine:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute(
-            """INSERT INTO trades 
-            (id, timestamp, strategy, ticker, market_title, side, action, count, 
+            """INSERT INTO trades
+            (id, timestamp, strategy, ticker, market_title, side, action, count,
              price_cents, cost, fee, order_type, paper_mode, order_id, status,
              our_prob, kalshi_prob, edge, signal_source, notes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -574,7 +572,7 @@ class TradingEngine:
             # Lost: lose cost plus fee
             pnl = -cost - fee
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         c.execute(
             "UPDATE trades SET result = ?, pnl = ?, settled_at = ?, status = 'settled' WHERE id = ?",
             (result, pnl, now, trade_id),
@@ -623,7 +621,7 @@ class TradingEngine:
         c = conn.cursor()
 
         c.execute("""
-            SELECT 
+            SELECT
                 ticker,
                 market_title,
                 side,
@@ -747,7 +745,7 @@ class TradingEngine:
 
         trade = {
             "id": trade_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "strategy": strategy,
             "ticker": ticker,
             "market_title": "",
@@ -771,8 +769,8 @@ class TradingEngine:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute(
-            """INSERT INTO trades 
-            (id, timestamp, strategy, ticker, market_title, side, action, count, 
+            """INSERT INTO trades
+            (id, timestamp, strategy, ticker, market_title, side, action, count,
              price_cents, cost, fee, order_type, paper_mode, order_id, status,
              our_prob, kalshi_prob, edge, signal_source, notes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -878,7 +876,7 @@ class TradingEngine:
 
         # Overall stats
         c.execute("""
-            SELECT 
+            SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN pnl <= 0 AND status = 'settled' THEN 1 ELSE 0 END) as losses,
@@ -891,7 +889,7 @@ class TradingEngine:
 
         # Per-strategy stats
         c.execute("""
-            SELECT 
+            SELECT
                 strategy,
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,

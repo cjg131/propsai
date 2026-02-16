@@ -19,16 +19,17 @@ Feature groups:
 """
 from __future__ import annotations
 
+import statistics as stats_module
+from datetime import date as date_cls
+from pathlib import Path
+
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
-from pathlib import Path
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import BayesianRidge, Ridge
 from xgboost import XGBRegressor
 
-import statistics as stats_module
-from datetime import date as date_cls
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -256,7 +257,7 @@ class SmartPredictor:
         This gives us ~10,000+ training rows instead of ~400.
         """
         from app.services.balldontlie import get_balldontlie
-        from app.utils.travel import get_travel_distance, get_timezone_change, calculate_fatigue_score
+        from app.utils.travel import calculate_fatigue_score, get_timezone_change, get_travel_distance
 
         bdl = get_balldontlie()
 
@@ -323,7 +324,6 @@ class SmartPredictor:
 
         # ── Pre-compute per-player arrays for ALL stat types (vectorized) ──
         # This avoids recomputing rolling averages from scratch for every game.
-        import numpy as np_train
 
         # Build team lookup for enriched data
         team_abbr_to_enriched: dict[str, dict] = {}
@@ -336,7 +336,6 @@ class SmartPredictor:
         # For each game, we know what the opponent scored. By aggregating
         # across all games for a team in a season, we get "points allowed per game" etc.
         # This lets us have real opponent defense features during training.
-        from collections import Counter
         team_season_allowed: dict[tuple, dict] = defaultdict(lambda: {
             "pts": 0, "reb": 0, "ast": 0, "fg3m": 0, "stl": 0, "blk": 0, "turnover": 0,
             "games": 0, "wins": 0, "total_pts_scored": 0,
@@ -552,8 +551,8 @@ class SmartPredictor:
                 # Matchup history: group by opponent
                 opp_stats: dict[int, list[float]] = defaultdict(list)
 
-                team_pace = enriched.get("team_pace", 100)
-                team_win_pct = enriched.get("team_win_pct", 0.5)
+                enriched.get("team_pace", 100)
+                enriched.get("team_win_pct", 0.5)
 
                 for i in range(3, n_total):
                     actual_stat = stat_vals[i]
@@ -791,7 +790,7 @@ class SmartPredictor:
             split = int(len(rows) * 0.85)
             X_train, X_test = X.iloc[:split], X.iloc[split:]
             y_train, y_test = y[:split], y[split:]
-            w_train, w_test = season_weights[:split], season_weights[split:]
+            w_train, _w_test = season_weights[:split], season_weights[split:]
 
             models = {
                 "xgboost": XGBRegressor(

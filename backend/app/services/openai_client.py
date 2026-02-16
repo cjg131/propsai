@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from openai import AsyncOpenAI
+
 from app.config import get_settings
 from app.logging_config import get_logger
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 """XGBoost prediction model for player props."""
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 from xgboost import XGBRegressor
+
 from app.models.base import BasePredictor
 
 

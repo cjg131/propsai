@@ -8,8 +8,8 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.logging_config import get_logger
-from app.services.trading_engine import get_trading_engine
 from app.services.kalshi_agent import get_kalshi_agent
+from app.services.trading_engine import get_trading_engine
 
 logger = get_logger(__name__)
 

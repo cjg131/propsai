@@ -11,11 +11,12 @@ for the ML prediction pipeline:
 """
 from __future__ import annotations
 
-import httpx
 from datetime import date, timedelta
-from collections import defaultdict
-from app.logging_config import get_logger
+
+import httpx
+
 from app.config import get_settings
+from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 

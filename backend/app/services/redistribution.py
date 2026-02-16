@@ -12,6 +12,7 @@ Example: When LeBron sits, AD's rebounds go up 3.2 but his assists drop 1.1.
 from __future__ import annotations
 
 from collections import defaultdict
+
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)

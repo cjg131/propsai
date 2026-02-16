@@ -1,12 +1,17 @@
 from __future__ import annotations
-from fastapi import APIRouter, Query, HTTPException
-from app.schemas.players import (
-    PlayerResponse, PlayerListResponse, PlayerDetail,
-    PlayerStats, ScoutingReportResponse,
-)
-from app.services.supabase_client import get_supabase
-from app.services.openai_client import get_openai_client
+
+from fastapi import APIRouter, HTTPException, Query
+
 from app.logging_config import get_logger
+from app.schemas.players import (
+    PlayerDetail,
+    PlayerListResponse,
+    PlayerResponse,
+    PlayerStats,
+    ScoutingReportResponse,
+)
+from app.services.openai_client import get_openai_client
+from app.services.supabase_client import get_supabase
 
 logger = get_logger(__name__)
 router = APIRouter()

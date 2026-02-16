@@ -9,9 +9,8 @@ If your picks consistently beat the closing line, you have real edge.
 """
 from __future__ import annotations
 
-import math
-from datetime import datetime, date, timedelta
 from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 from app.logging_config import get_logger
 

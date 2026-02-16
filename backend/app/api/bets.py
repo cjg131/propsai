@@ -1,8 +1,10 @@
 from __future__ import annotations
-from fastapi import APIRouter, Query, HTTPException
-from app.schemas.bets import BetCreate, BetResponse, BetDetail, BetListResponse, BetSummaryResponse
-from app.services.supabase_client import get_supabase
+
+from fastapi import APIRouter, HTTPException, Query
+
 from app.logging_config import get_logger
+from app.schemas.bets import BetCreate, BetDetail, BetListResponse, BetResponse, BetSummaryResponse
+from app.services.supabase_client import get_supabase
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -126,8 +128,9 @@ async def paper_trading_place(
     target_date: str | None = Query(None, description="Date to place bets for (YYYY-MM-DD). Defaults to today."),
 ):
     """Auto-place virtual bets on high-confidence predictions for a given date."""
-    from app.services.paper_trading import place_paper_trades
     from datetime import date as d
+
+    from app.services.paper_trading import place_paper_trades
     td = None
     if target_date:
         try:
@@ -140,8 +143,9 @@ async def paper_trading_place(
 @router.post("/paper-trading/resolve")
 async def paper_trading_resolve(target_date: str | None = Query(None)):
     """Resolve pending paper trades using actual game results."""
-    from app.services.paper_trading import resolve_paper_trades
     from datetime import date as d
+
+    from app.services.paper_trading import resolve_paper_trades
     td = None
     if target_date:
         try:

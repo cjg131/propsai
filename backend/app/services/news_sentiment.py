@@ -16,10 +16,11 @@ Produces per-player sentiment scores that feed into the prediction model:
 from __future__ import annotations
 
 import re
-import httpx
-import feedparser
-from datetime import datetime, timedelta
 from collections import defaultdict
+from datetime import datetime, timedelta
+
+import feedparser
+import httpx
 
 from app.config import get_settings
 from app.logging_config import get_logger

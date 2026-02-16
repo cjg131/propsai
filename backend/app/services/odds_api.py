@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 import asyncio
-import os
+
 import httpx
+
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)

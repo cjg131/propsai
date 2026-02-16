@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 """LSTM prediction model for sequential game-to-game patterns."""
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+
 from app.models.base import BasePredictor
 
 

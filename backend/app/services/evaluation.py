@@ -10,10 +10,9 @@ After games finish, this service:
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
 from collections import defaultdict
+from datetime import date, timedelta
 
-from app.config import get_settings
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +50,7 @@ async def evaluate_predictions(target_date: date | None = None) -> dict:
     in Supabase, and computes accuracy metrics.
     """
     import asyncio
+
     from app.services.balldontlie import get_balldontlie
     from app.services.supabase_client import get_supabase
 

@@ -804,23 +804,23 @@ class KalshiAgent:
                     no_ask = market.get("no_ask", 0) or 0
                     mkt_status = market.get("status", "")
 
-                    # Mark-to-market: use same-side bid (what we'd get if we exit).
-                    # Fallback: last_price (flipped for NO), then ask, then entry.
+                    # Mark-to-market: use same-side bid if spread is tight.
+                    # Wide spread = bid is garbage lowball, use last_price or ask.
                     last_price = market.get("last_price", 0) or 0
                     if pos["side"] == "yes":
-                        if yes_bid > 0:
-                            mark_price = yes_bid
-                        elif last_price > 0:
-                            mark_price = last_price
-                        else:
-                            mark_price = yes_ask if yes_ask > 0 else pos["avg_entry_cents"]
+                        bid, ask = yes_bid, yes_ask
                     else:
-                        if no_bid > 0:
-                            mark_price = no_bid
-                        elif last_price > 0:
-                            mark_price = 100 - last_price
-                        else:
-                            mark_price = no_ask if no_ask > 0 else pos["avg_entry_cents"]
+                        bid, ask = no_bid, no_ask
+                    if bid > 0 and ask > 0 and bid >= ask * 0.5:
+                        mark_price = bid  # tight spread — bid is real
+                    elif last_price > 0:
+                        mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
+                    elif ask > 0:
+                        mark_price = ask  # wide spread, no trades — ask is best proxy
+                    elif bid > 0:
+                        mark_price = bid
+                    else:
+                        mark_price = pos["avg_entry_cents"]
                     entry_price = pos["avg_entry_cents"]
 
                     mark_value = pos["contracts"] * mark_price / 100.0
@@ -963,23 +963,23 @@ class KalshiAgent:
                 pos["current_no_bid"] = no_bid
                 pos["current_no_ask"] = no_ask
 
-                # Mark-to-market: use same-side bid (what we'd get if we exit).
-                # Fallback: last_price (flipped for NO), then ask, then entry.
+                # Mark-to-market: use same-side bid if spread is tight.
+                # Wide spread = bid is garbage lowball, use last_price or ask.
                 last_price = market.get("last_price", 0) or 0
                 if pos["side"] == "yes":
-                    if yes_bid > 0:
-                        mark_price = yes_bid
-                    elif last_price > 0:
-                        mark_price = last_price
-                    else:
-                        mark_price = yes_ask if yes_ask > 0 else pos["avg_entry_cents"]
+                    bid, ask = yes_bid, yes_ask
                 else:
-                    if no_bid > 0:
-                        mark_price = no_bid
-                    elif last_price > 0:
-                        mark_price = 100 - last_price
-                    else:
-                        mark_price = no_ask if no_ask > 0 else pos["avg_entry_cents"]
+                    bid, ask = no_bid, no_ask
+                if bid > 0 and ask > 0 and bid >= ask * 0.5:
+                    mark_price = bid  # tight spread — bid is real
+                elif last_price > 0:
+                    mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
+                elif ask > 0:
+                    mark_price = ask  # wide spread, no trades — ask is best proxy
+                elif bid > 0:
+                    mark_price = bid
+                else:
+                    mark_price = pos["avg_entry_cents"]
 
                 pos["mark_price_cents"] = mark_price
                 mark_value = pos["contracts"] * mark_price / 100.0

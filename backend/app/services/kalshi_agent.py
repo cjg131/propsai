@@ -804,32 +804,16 @@ class KalshiAgent:
                     no_ask = market.get("no_ask", 0) or 0
                     mkt_status = market.get("status", "")
 
-                    # Mark-to-market: same-side midpoint or ask
-                    if pos["side"] == "yes":
-                        if yes_bid > 0 and yes_ask > 0:
-                            if yes_bid < yes_ask * 0.1:
-                                mark_price = yes_ask
-                            else:
-                                mark_price = (yes_bid + yes_ask) // 2
-                        elif yes_ask > 0:
-                            mark_price = yes_ask
-                        elif yes_bid > 0:
-                            mark_price = yes_bid
-                        else:
-                            mark_price = pos["avg_entry_cents"]
+                    # Mark-to-market: use last_price (most recent trade)
+                    # Kalshi's last_price is always YES price; flip for NO
+                    # Fallback: use ask (what it costs), not bid (lowball offers)
+                    last_price = market.get("last_price", 0) or 0
+                    if last_price > 0:
+                        mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
+                    elif pos["side"] == "yes":
+                        mark_price = yes_ask if yes_ask > 0 else (yes_bid if yes_bid > 0 else pos["avg_entry_cents"])
                     else:
-                        if no_bid > 0 and no_ask > 0:
-                            if no_bid < no_ask * 0.1:
-                                mark_price = no_ask
-                            else:
-                                mark_price = (no_bid + no_ask) // 2
-                        elif no_ask > 0:
-                            mark_price = no_ask
-                        elif no_bid > 0:
-                            mark_price = no_bid
-                        else:
-                            mark_price = pos["avg_entry_cents"]
-                    mark_price = max(mark_price, 0)
+                        mark_price = no_ask if no_ask > 0 else (no_bid if no_bid > 0 else pos["avg_entry_cents"])
                     entry_price = pos["avg_entry_cents"]
 
                     mark_value = pos["contracts"] * mark_price / 100.0
@@ -972,38 +956,20 @@ class KalshiAgent:
                 pos["current_no_bid"] = no_bid
                 pos["current_no_ask"] = no_ask
 
-                # Mark-to-market: use same-side midpoint or ask as proxy.
-                # We can't use 100-opposite_ask because 3-way soccer markets
-                # have yes+no that don't sum to 100 (each outcome is separate).
-                # Midpoint of bid/ask is the fairest mark. If bid is 0 or
-                # unreasonably low (<10% of ask), use ask as conservative mark.
-                if pos["side"] == "yes":
-                    if yes_bid > 0 and yes_ask > 0:
-                        if yes_bid < yes_ask * 0.1:  # bid is <10% of ask = empty book
-                            mark_price = yes_ask  # use ask (conservative)
-                        else:
-                            mark_price = (yes_bid + yes_ask) // 2
-                    elif yes_ask > 0:
-                        mark_price = yes_ask
-                    elif yes_bid > 0:
-                        mark_price = yes_bid
-                    else:
-                        mark_price = pos["avg_entry_cents"]
+                # Mark-to-market: use last_price (most recent trade).
+                # Kalshi's last_price is always the YES price.
+                # For NO positions, the mark is 100 - last_price.
+                # Fallback: use ask (what it costs to buy), not bid (lowball offers).
+                last_price = market.get("last_price", 0) or 0
+                if last_price > 0:
+                    mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
+                elif pos["side"] == "yes":
+                    mark_price = yes_ask if yes_ask > 0 else (yes_bid if yes_bid > 0 else pos["avg_entry_cents"])
                 else:
-                    if no_bid > 0 and no_ask > 0:
-                        if no_bid < no_ask * 0.1:
-                            mark_price = no_ask
-                        else:
-                            mark_price = (no_bid + no_ask) // 2
-                    elif no_ask > 0:
-                        mark_price = no_ask
-                    elif no_bid > 0:
-                        mark_price = no_bid
-                    else:
-                        mark_price = pos["avg_entry_cents"]
+                    mark_price = no_ask if no_ask > 0 else (no_bid if no_bid > 0 else pos["avg_entry_cents"])
 
-                pos["mark_price_cents"] = max(mark_price, 0)
-                mark_value = pos["contracts"] * max(mark_price, 0) / 100.0
+                pos["mark_price_cents"] = mark_price
+                mark_value = pos["contracts"] * mark_price / 100.0
                 pos["unrealized_pnl"] = round(mark_value - pos["total_cost"] - pos["total_fees"], 2)
 
                 if pos["side"] == "yes" and yes_ask > 0:

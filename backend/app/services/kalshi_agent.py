@@ -97,11 +97,8 @@ class KalshiAgent:
 
         self._running = False
         self._weather_task: asyncio.Task | None = None
-        self._sports_task: asyncio.Task | None = None
+        self._main_task: asyncio.Task | None = None
         self._crypto_task: asyncio.Task | None = None
-        self._finance_task: asyncio.Task | None = None
-        self._econ_task: asyncio.Task | None = None
-        self._nba_props_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
 
     # ── Cross-Strategy Correlation Helpers ────────────────────────────
@@ -275,6 +272,117 @@ class KalshiAgent:
 
         return result
 
+    # ── Weather City Code Map ─────────────────────────────────────
+    WEATHER_CITY_CODES: dict[str, str] = {
+        "NYC": "New York", "MIA": "Miami", "LAX": "Los Angeles", "CHI": "Chicago",
+        "AUS": "Austin", "DFW": "Dallas", "PHL": "Philadelphia", "DEN": "Denver",
+        "SEA": "Seattle", "SFO": "San Francisco", "DCA": "Washington DC",
+        "SLC": "Salt Lake City", "ATL": "Atlanta", "HOU": "Houston", "BOS": "Boston",
+        "LAS": "Las Vegas", "PHX": "Phoenix", "MSP": "Minneapolis", "NOL": "New Orleans",
+        "DET": "Detroit", "NOLA": "New Orleans",
+    }
+
+    @staticmethod
+    def _enrich_weather_title(ticker: str, title: str) -> str:
+        """Prepend city name to weather market title if not already present."""
+        # Extract city code from ticker: KXHIGHTBOS-... or KXHIGHMIA-... or KXHIGHDEN-...
+        # Pattern: KX(HIGH|LOW)(T?)<CITY>-...
+        m = re.match(r'KX(?:HIGH|LOW)T?([A-Z]{2,4})-', ticker)
+        if not m:
+            return title
+        city_code = m.group(1)
+        city_name = KalshiAgent.WEATHER_CITY_CODES.get(city_code, "")
+        if not city_name:
+            return title
+        # Only prepend if city name isn't already in the title
+        if city_name.lower() in title.lower():
+            return title
+        return f"[{city_name}] {title}"
+
+    # ── Global Signal Ranking & Execution ──────────────────────────
+
+    async def execute_ranked_signals(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Rank all candidates globally by edge * confidence, then execute
+        the top ones until 80% of bankroll is deployed this cycle.
+        Reserve 20% for DCA / next cycle.
+        """
+        if not candidates:
+            return []
+
+        # Sort by edge * confidence descending
+        candidates.sort(key=lambda c: c.get("edge", 0) * c.get("confidence", 0), reverse=True)
+
+        deploy_target = self.engine.bankroll * 0.80
+        total_exposure = self.engine.get_total_exposure()
+        remaining_budget = max(0, deploy_target - total_exposure)
+
+        self.engine.log_event(
+            "info",
+            f"Global ranking: {len(candidates)} candidates, "
+            f"deploy target=${deploy_target:.0f}, current exposure=${total_exposure:.2f}, "
+            f"remaining budget=${remaining_budget:.2f}",
+        )
+
+        traded: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if remaining_budget <= 0:
+                break
+
+            strategy = candidate.get("strategy", "")
+            ticker = candidate.get("ticker", "")
+            edge = candidate.get("edge", 0)
+            confidence = candidate.get("confidence", 0)
+            price_cents = candidate.get("price_cents", 0)
+
+            if not ticker or price_cents <= 0:
+                continue
+
+            # Position sizing (respects per-strategy and per-ticker caps)
+            count = self.engine.calculate_position_size(
+                strategy=strategy,
+                edge=edge,
+                price_cents=price_cents,
+                confidence=confidence,
+                ticker=ticker,
+            )
+            if count <= 0:
+                continue
+
+            cost_estimate = count * price_cents / 100.0
+            if cost_estimate > remaining_budget:
+                # Reduce count to fit budget
+                count = int(remaining_budget / (price_cents / 100.0))
+                if count <= 0:
+                    continue
+
+            trade = await self.engine.execute_trade(
+                strategy=strategy,
+                ticker=ticker,
+                side=candidate.get("side", "yes"),
+                count=count,
+                price_cents=price_cents,
+                our_prob=candidate.get("our_prob", 0),
+                kalshi_prob=candidate.get("kalshi_prob", 0),
+                market_title=candidate.get("title", ""),
+                signal_source=candidate.get("signal_source", ""),
+                signal_id=candidate.get("signal_id", ""),
+                notes=candidate.get("notes", ""),
+            )
+
+            if trade and trade.get("status") not in ("blocked", "error", "timeout"):
+                actual_cost = trade.get("cost", 0) + trade.get("fee", 0)
+                remaining_budget -= actual_cost
+                candidate["trade"] = trade
+                traded.append(candidate)
+
+        self.engine.log_event(
+            "info",
+            f"Global execution: {len(traded)}/{len(candidates)} traded, "
+            f"remaining budget=${remaining_budget:.2f}",
+        )
+        return traded
+
     # ── Weather Strategy ───────────────────────────────────────────
 
     async def run_weather_cycle(self) -> list[dict[str, Any]]:
@@ -351,45 +459,18 @@ class KalshiAgent:
             self.engine.log_event("error", f"Weather cycle failed: {e}", strategy="weather")
             logger.error("Weather cycle error", error=str(e))
 
-        # Rank by edge * confidence and only trade top 10 per cycle
-        MAX_WEATHER_TRADES_PER_CYCLE = 10
-        if len(results) > MAX_WEATHER_TRADES_PER_CYCLE:
-            results.sort(key=lambda s: s.get("edge", 0) * s.get("confidence", 0), reverse=True)
-            skipped = len(results) - MAX_WEATHER_TRADES_PER_CYCLE
-            results = results[:MAX_WEATHER_TRADES_PER_CYCLE]
-            self.engine.log_event(
-                "info",
-                f"Weather: ranked {skipped + MAX_WEATHER_TRADES_PER_CYCLE} candidates, trading top {MAX_WEATHER_TRADES_PER_CYCLE} (skipped {skipped})",
-                strategy="weather",
-            )
-
-        # Execute trades for the top candidates
-        traded = []
-        for candidate in results:
-            if candidate.get("action") == "skip":
-                traded.append(candidate)
-                continue
-            trade = await self.engine.execute_trade(
-                strategy="weather",
-                ticker=candidate["ticker"],
-                side=candidate["side"],
-                count=candidate["count"],
-                price_cents=candidate["price_cents"],
-                our_prob=candidate["our_prob"],
-                kalshi_prob=candidate["kalshi_prob"],
-                market_title=candidate.get("title", ""),
-                signal_source="weather_consensus",
-                signal_id=candidate.get("signal_id", ""),
-            )
-            candidate["trade"] = trade
-            traded.append(candidate)
+        # Enrich titles with city names and tag strategy
+        for r in results:
+            if r.get("action") != "skip":
+                r["title"] = self._enrich_weather_title(r.get("ticker", ""), r.get("title", ""))
+                r["strategy"] = "weather"
 
         self.engine.log_event(
             "info",
-            f"Weather cycle complete: {len(traded)} signals",
+            f"Weather cycle complete: {len(results)} candidates",
             strategy="weather",
         )
-        return traded
+        return results
 
     async def _evaluate_weather_market(
         self,
@@ -475,15 +556,16 @@ class KalshiAgent:
         if not signal:
             return None
 
-        # Record signal
+        # Record signal (with enriched city title)
         label = consensus.get("label", "")
+        enriched_title = self._enrich_weather_title(market["ticker"], market["title"])
         signal_id = self.engine.record_signal(
             strategy="weather",
             ticker=market["ticker"],
             side=signal["side"],
             our_prob=signal["our_prob"],
             kalshi_prob=signal["kalshi_prob"],
-            market_title=market["title"],
+            market_title=enriched_title,
             confidence=signal["confidence"],
             signal_source="weather_consensus",
             details=f"consensus={consensus.get('mean_high_f')}°F {label} sources={signal['source_count']}",
@@ -575,7 +657,7 @@ class KalshiAgent:
                 return results
 
             # ── Step 3: Evaluate single-game markets against sharp lines ──
-            single_stats = {"matched": 0, "no_match": 0, "no_edge": 0, "traded": 0}
+            single_stats = {"matched": 0, "no_odds": 0, "cheap_skip": 0, "no_team_match": 0, "no_sharp": 0, "no_edge": 0}
             for market in single_markets:
                 try:
                     signal = await self._evaluate_single_game(market, odds_by_sport, single_stats)
@@ -586,7 +668,10 @@ class KalshiAgent:
 
             self.engine.log_event(
                 "info",
-                f"Single-game: {len(single_markets)} eval | matched={single_stats['matched']} no_match={single_stats['no_match']} no_edge={single_stats['no_edge']} traded={single_stats['traded']}",
+                f"Single-game: {len(single_markets)} scanned | {single_stats['matched']} matched, "
+                f"{single_stats['no_odds']} no_odds, {single_stats['cheap_skip']} cheap, "
+                f"{single_stats['no_team_match']} no_team, {single_stats['no_sharp']} no_sharp, "
+                f"{single_stats['no_edge']} no_edge",
                 strategy="sports",
             )
 
@@ -642,25 +727,25 @@ class KalshiAgent:
         floor_strike = market.get("floor_strike")
 
         if not odds_sport or not title or not ticker:
-            stats["no_match"] += 1
+            stats["no_odds"] += 1
             return None
 
         # Safety filter: skip very cheap contracts (< 10c on either side)
         # These are long-shot bets with high loss rates even with edge
         if min(yes_ask, no_ask) < 10:
-            stats["no_match"] += 1
+            stats["cheap_skip"] += 1
             return None
 
         events = odds_by_sport.get(odds_sport, [])
         if not events:
-            stats["no_match"] += 1
+            stats["no_odds"] += 1
             return None
 
         # Parse the ticker suffix to understand what this contract represents
         # Format: KXSERIES-DATECODETEAMS-OUTCOME
         ticker_parts = ticker.rsplit("-", 1)
         if len(ticker_parts) < 2:
-            stats["no_match"] += 1
+            stats["no_odds"] += 1
             return None
         outcome_suffix = ticker_parts[1].upper()
 
@@ -687,18 +772,18 @@ class KalshiAgent:
                 break
 
         if not matched_event:
-            stats["no_match"] += 1
+            stats["no_team_match"] += 1
             return None
 
         # Extract sharp consensus for this event
         consensus = self.sports.extract_sharp_consensus(matched_event)
         if consensus.get("sharp_books_found", 0) == 0:
-            stats["no_match"] += 1
+            stats["no_sharp"] += 1
             return None
 
         sharp = consensus.get("sharp_consensus", {})
         if not sharp:
-            stats["no_match"] += 1
+            stats["no_sharp"] += 1
             return None
 
         matched_event.get("home_team", "")
@@ -781,7 +866,7 @@ class KalshiAgent:
                             break
 
         if sharp_prob is None:
-            stats["no_match"] += 1
+            stats["no_sharp"] += 1
             return None
 
         # Calculate edge: Kalshi YES price vs sharp probability
@@ -835,42 +920,20 @@ class KalshiAgent:
             details=f"sport={odds_sport} type={kalshi_type} match={match_desc} edge={edge:.4f}",
         )
 
-        # Position sizing
+        # Return candidate for global ranking (execution happens later)
         price_cents = yes_ask if side == "yes" else no_ask
-        count = self.engine.calculate_position_size(
-            strategy="sports",
-            edge=edge,
-            price_cents=price_cents,
-            confidence=0.85,
-            ticker=ticker,
-        )
-
-        if count > 0:
-            # DCA allowed — per-ticker limit handles overexposure
-            trade = await self.engine.execute_trade(
-                strategy="sports",
-                ticker=ticker,
-                side=side,
-                count=count,
-                price_cents=price_cents,
-                our_prob=sharp_prob,
-                kalshi_prob=kalshi_implied,
-                market_title=title,
-                signal_source="sharp_single_game",
-            )
-            if trade:
-                stats["traded"] += 1
-                return {
-                    "ticker": ticker,
-                    "title": title,
-                    "side": side,
-                    "edge": edge,
-                    "sharp_prob": sharp_prob,
-                    "kalshi_implied": kalshi_implied,
-                    "trade": trade,
-                }
-
-        return None
+        return {
+            "strategy": "sports",
+            "ticker": ticker,
+            "title": title,
+            "side": side,
+            "edge": edge,
+            "confidence": 0.85,
+            "our_prob": sharp_prob,
+            "kalshi_prob": kalshi_implied,
+            "price_cents": price_cents,
+            "signal_source": "sharp_single_game",
+        }
 
     async def _evaluate_parlay(
         self,
@@ -997,45 +1060,21 @@ class KalshiAgent:
             details=f"legs={legs_priced}/{legs_total} fair={fair_prob:.4f}",
         )
 
-        # Position sizing
+        # Return candidate for global ranking (execution happens later)
         price_cents = yes_ask if signal["side"] == "yes" else no_ask
-        count = self.engine.calculate_position_size(
-            strategy="sports",
-            edge=signal["edge"],
-            price_cents=price_cents,
-            confidence=confidence,
-            ticker=ticker,
-        )
-
-        result: dict[str, Any] = {
-            **signal,
+        return {
+            "strategy": "sports",
             "ticker": ticker,
             "title": title,
-            "legs_priced": legs_priced,
-            "legs_total": legs_total,
+            "side": signal["side"],
+            "edge": signal["edge"],
             "confidence": confidence,
+            "our_prob": signal["our_prob"],
+            "kalshi_prob": signal["kalshi_prob"],
+            "price_cents": price_cents,
+            "signal_source": "parlay_pricer",
+            "signal_id": signal_id,
         }
-
-        if count > 0:
-            # DCA allowed — per-ticker limit handles overexposure
-            trade = await self.engine.execute_trade(
-                strategy="sports",
-                ticker=ticker,
-                side=signal["side"],
-                count=count,
-                price_cents=price_cents,
-                our_prob=signal["our_prob"],
-                kalshi_prob=signal["kalshi_prob"],
-                market_title=title,
-                signal_source="parlay_pricer",
-                signal_id=signal_id,
-            )
-            result["trade"] = trade
-        else:
-            result["action"] = "skip"
-            result["reason"] = "position_size_zero"
-
-        return result
 
     # ── Crypto Strategy ──────────────────────────────────────────────
 
@@ -1249,40 +1288,18 @@ class KalshiAgent:
         # Apply cross-strategy correlation adjustment
         confidence = self._apply_correlation_adjustment("crypto", ticker, confidence)
 
-        # Position sizing
-        count = self.engine.calculate_position_size(
-            strategy="crypto",
-            edge=edge,
-            price_cents=price_cents,
-            confidence=confidence,
-            ticker=ticker,
-        )
-
-        if count <= 0:
-            return None
-
-        # Execute trade
-        trade = await self.engine.execute_trade(
-            strategy="crypto",
-            ticker=ticker,
-            side=side,
-            count=count,
-            price_cents=price_cents,
-            our_prob=our_prob,
-            kalshi_prob=kalshi_prob,
-            market_title=title,
-            signal_source="crypto_momentum",
-        )
-
+        # Return candidate for global ranking (execution happens later)
         return {
+            "strategy": "crypto",
             "ticker": ticker,
             "title": title,
-            "coin": coin,
             "side": side,
             "edge": edge,
-            "our_prob": our_prob,
             "confidence": confidence,
-            "trade": trade,
+            "our_prob": our_prob,
+            "kalshi_prob": kalshi_prob,
+            "price_cents": price_cents,
+            "signal_source": "crypto_momentum",
         }
 
     # ── Finance Strategy (S&P / Nasdaq) ─────────────────────────────
@@ -1451,24 +1468,18 @@ class KalshiAgent:
 
         confidence = self._apply_correlation_adjustment("finance", ticker, confidence)
 
-        count = self.engine.calculate_position_size(
-            strategy="finance", edge=edge, price_cents=price_cents,
-            confidence=confidence, ticker=ticker,
-        )
-
-        if count <= 0:
-            return None
-
-        trade = await self.engine.execute_trade(
-            strategy="finance", ticker=ticker, side=side, count=count,
-            price_cents=price_cents, our_prob=our_prob, kalshi_prob=kalshi_prob,
-            market_title=title, signal_source="finance_momentum",
-        )
-
+        # Return candidate for global ranking (execution happens later)
         return {
-            "ticker": ticker, "title": title, "index": index,
-            "side": side, "edge": edge, "our_prob": our_prob,
-            "confidence": confidence, "trade": trade,
+            "strategy": "finance",
+            "ticker": ticker,
+            "title": title,
+            "side": side,
+            "edge": edge,
+            "confidence": confidence,
+            "our_prob": our_prob,
+            "kalshi_prob": kalshi_prob,
+            "price_cents": price_cents,
+            "signal_source": "finance_momentum",
         }
 
     # ── Econ Strategy (CPI / Fed / Gas / Jobs) ───────────────────────
@@ -1653,24 +1664,18 @@ class KalshiAgent:
 
         confidence = self._apply_correlation_adjustment("econ", ticker, confidence)
 
-        count = self.engine.calculate_position_size(
-            strategy="econ", edge=edge, price_cents=price_cents,
-            confidence=confidence, ticker=ticker,
-        )
-
-        if count <= 0:
-            return None
-
-        trade = await self.engine.execute_trade(
-            strategy="econ", ticker=ticker, side=side, count=count,
-            price_cents=price_cents, our_prob=our_prob, kalshi_prob=kalshi_prob,
-            market_title=title, signal_source=f"econ_{econ_type}",
-        )
-
+        # Return candidate for global ranking (execution happens later)
         return {
-            "ticker": ticker, "title": title, "econ_type": econ_type,
-            "side": side, "edge": edge, "our_prob": our_prob,
-            "confidence": confidence, "trade": trade,
+            "strategy": "econ",
+            "ticker": ticker,
+            "title": title,
+            "side": side,
+            "edge": edge,
+            "confidence": confidence,
+            "our_prob": our_prob,
+            "kalshi_prob": kalshi_prob,
+            "price_cents": price_cents,
+            "signal_source": f"econ_{econ_type}",
         }
 
     # ── NBA Props Strategy ─────────────────────────────────────────
@@ -1787,6 +1792,28 @@ class KalshiAgent:
         if not prop_type or not player_name:
             return None
 
+        # 12-hour time gate: parse game date from ticker and skip if >12hrs away
+        # Ticker format: KXNBAPTS-26FEB19PHXSAS-...  (26FEB19 = Feb 19, 2026)
+        try:
+            ticker_date_match = re.search(r'(\d{2})([A-Z]{3})(\d{2})', ticker)
+            if ticker_date_match:
+                yr = int("20" + ticker_date_match.group(1))
+                mon_str = ticker_date_match.group(2)
+                day = int(ticker_date_match.group(3))
+                months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                          "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+                mon = months.get(mon_str, 0)
+                if mon > 0:
+                    from zoneinfo import ZoneInfo
+                    # NBA games typically start 7pm ET, use that as reference
+                    game_dt = datetime(yr, mon, day, 19, 0, tzinfo=ZoneInfo("America/New_York"))
+                    now = datetime.now(ZoneInfo("America/New_York"))
+                    hours_until_game = (game_dt - now).total_seconds() / 3600
+                    if hours_until_game > 12:
+                        return None
+        except Exception:
+            pass  # If parsing fails, proceed anyway
+
         # Match player name to our data
         player_key = player_name.lower().strip()
         player = name_to_player.get(player_key)
@@ -1840,15 +1867,17 @@ class KalshiAgent:
             our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_ask
 
         nba_thresh = self.adaptive.get_thresholds("nba_props")
-        if edge < nba_thresh["min_edge"] or confidence < nba_thresh["min_confidence"]:
-            return None
 
+        # Log prediction details for every evaluated prop (debug NO bias)
         self.engine.log_event(
             "info",
-            f"NBA prop edge: {ticker} {side} edge={edge:.1%} (our={our_prob:.1%} vs kalshi={kalshi_prob:.1%}) "
-            f"{player_name} {prop_type} line={line} pred={predicted_value} conf={confidence:.2f} | {title[:60]}",
+            f"NBA pred: {player_name} {prop_type} line={line} pred={predicted_value:.1f} "
+            f"over_p={over_prob:.2f} → {side} edge={edge:.1%} conf={confidence:.2f} | {title[:50]}",
             strategy="nba_props",
         )
+
+        if edge < nba_thresh["min_edge"] or confidence < nba_thresh["min_confidence"]:
+            return None
 
         self.engine.record_signal(
             strategy="nba_props", ticker=ticker, side=side,
@@ -1863,27 +1892,19 @@ class KalshiAgent:
 
         confidence = self._apply_correlation_adjustment("nba_props", ticker, confidence)
 
-        count = self.engine.calculate_position_size(
-            strategy="nba_props", edge=edge, price_cents=price_cents,
-            confidence=confidence, ticker=ticker,
-        )
-
-        if count <= 0:
-            return None
-
-        trade = await self.engine.execute_trade(
-            strategy="nba_props", ticker=ticker, side=side, count=count,
-            price_cents=price_cents, our_prob=our_prob, kalshi_prob=kalshi_prob,
-            market_title=title, signal_source="smart_predictor",
-            notes=f"{player_name} {prop_type} line={line} pred={predicted_value}",
-        )
-
+        # Return candidate for global ranking (execution happens later)
         return {
-            "ticker": ticker, "title": title,
-            "player": player_name, "prop_type": prop_type,
-            "line": line, "predicted_value": predicted_value,
-            "side": side, "edge": edge, "our_prob": our_prob,
-            "confidence": confidence, "trade": trade,
+            "strategy": "nba_props",
+            "ticker": ticker,
+            "title": title,
+            "side": side,
+            "edge": edge,
+            "confidence": confidence,
+            "our_prob": our_prob,
+            "kalshi_prob": kalshi_prob,
+            "price_cents": price_cents,
+            "signal_source": "smart_predictor",
+            "notes": f"{player_name} {prop_type} line={line} pred={predicted_value}",
         }
 
     async def run_monitor_cycle(self) -> list[dict[str, Any]]:
@@ -2337,17 +2358,14 @@ class KalshiAgent:
         self._weather_task = asyncio.create_task(self._staggered_loop(self._weather_loop, 0))
         self._monitor_task = asyncio.create_task(self._staggered_loop(self._monitor_loop, 20))
         self._crypto_task = asyncio.create_task(self._staggered_loop(self._crypto_loop, 60))
-        self._sports_task = asyncio.create_task(self._staggered_loop(self._sports_loop, 180))
-        self._finance_task = asyncio.create_task(self._staggered_loop(self._finance_loop, 300))
-        self._econ_task = asyncio.create_task(self._staggered_loop(self._econ_loop, 420))
-        self._nba_props_task = asyncio.create_task(self._staggered_loop(self._nba_props_loop, 540))
+        self._main_task = asyncio.create_task(self._staggered_loop(self._main_strategy_loop, 180))
 
     async def stop(self) -> None:
         """Stop the autonomous agent loops."""
         self._running = False
         self.engine.log_event("info", "Agent stopping")
 
-        for task in [self._weather_task, self._sports_task, self._crypto_task, self._finance_task, self._econ_task, self._nba_props_task, self._monitor_task]:
+        for task in [self._weather_task, self._main_task, self._crypto_task, self._monitor_task]:
             if task:
                 task.cancel()
 
@@ -2359,39 +2377,32 @@ class KalshiAgent:
         logger.info("Kalshi agent stopped")
 
     async def _weather_loop(self) -> None:
-        """Weather strategy loop — runs every 4 hours."""
+        """Weather strategy loop — runs every 1 hour. Collects candidates and executes via global ranking."""
         while self._running:
             try:
                 if not self.engine.kill_switch:
-                    await self.run_weather_cycle()
+                    candidates = await self.run_weather_cycle()
+                    # Filter out skips
+                    tradeable = [c for c in candidates if c.get("action") != "skip"]
+                    if tradeable:
+                        await self.execute_ranked_signals(tradeable)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self.engine.log_event("error", f"Weather loop error: {e}", strategy="weather")
                 logger.error("Weather loop error", error=str(e))
 
-            await asyncio.sleep(4 * 60 * 60)
-
-    async def _sports_loop(self) -> None:
-        """Sports strategy loop — runs every 5 minutes."""
-        while self._running:
-            try:
-                if not self.engine.kill_switch:
-                    await self.run_sports_cycle()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.engine.log_event("error", f"Sports loop error: {e}", strategy="sports")
-                logger.error("Sports loop error", error=str(e))
-
-            await asyncio.sleep(5 * 60)
+            await asyncio.sleep(60 * 60)
 
     async def _crypto_loop(self) -> None:
-        """Crypto strategy loop — runs every 2 minutes (15-min markets need fast reaction)."""
+        """Crypto strategy loop — runs every 2 minutes (15-min markets need fast reaction).
+        Crypto runs on its own fast loop and executes via global ranking."""
         while self._running:
             try:
                 if not self.engine.kill_switch:
-                    await self.run_crypto_cycle()
+                    candidates = await self.run_crypto_cycle()
+                    if candidates:
+                        await self.execute_ranked_signals(candidates)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -2399,20 +2410,6 @@ class KalshiAgent:
                 logger.error("Crypto loop error", error=str(e))
 
             await asyncio.sleep(2 * 60)
-
-    async def _nba_props_loop(self) -> None:
-        """NBA props strategy loop — runs every 15 minutes."""
-        while self._running:
-            try:
-                if not self.engine.kill_switch:
-                    await self.run_nba_props_cycle()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.engine.log_event("error", f"NBA props loop error: {e}", strategy="nba_props")
-                logger.error("NBA props loop error", error=str(e))
-
-            await asyncio.sleep(15 * 60)
 
     @staticmethod
     def _is_us_market_hours() -> bool:
@@ -2423,39 +2420,57 @@ class KalshiAgent:
             return False
         return 9 <= now_et.hour < 17
 
-    async def _finance_loop(self) -> None:
-        """Finance strategy loop — runs every 10 minutes during US market hours only."""
+    async def _main_strategy_loop(self) -> None:
+        """
+        Unified strategy loop for sports, finance, econ, NBA props.
+        Runs every 5 minutes. Collects candidates from all strategies,
+        ranks them globally, and executes the best ones.
+        """
         while self._running:
             try:
                 if not self.engine.kill_switch:
+                    all_candidates: list[dict[str, Any]] = []
+
+                    # Sports — always run
+                    try:
+                        sports_candidates = await self.run_sports_cycle()
+                        all_candidates.extend(sports_candidates)
+                    except Exception as e:
+                        self.engine.log_event("error", f"Sports cycle error: {e}", strategy="sports")
+
+                    # Finance — only during market hours
                     if self._is_us_market_hours():
-                        await self.run_finance_cycle()
-                    else:
-                        logger.debug("Finance loop: outside market hours, skipping")
+                        try:
+                            finance_candidates = await self.run_finance_cycle()
+                            all_candidates.extend(finance_candidates)
+                        except Exception as e:
+                            self.engine.log_event("error", f"Finance cycle error: {e}", strategy="finance")
+
+                        # Econ — also during market hours
+                        try:
+                            econ_candidates = await self.run_econ_cycle()
+                            all_candidates.extend(econ_candidates)
+                        except Exception as e:
+                            self.engine.log_event("error", f"Econ cycle error: {e}", strategy="econ")
+
+                    # NBA props — always run (has its own 12hr time gate)
+                    try:
+                        nba_candidates = await self.run_nba_props_cycle()
+                        all_candidates.extend(nba_candidates)
+                    except Exception as e:
+                        self.engine.log_event("error", f"NBA props cycle error: {e}", strategy="nba_props")
+
+                    # Global ranking and execution
+                    if all_candidates:
+                        await self.execute_ranked_signals(all_candidates)
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.engine.log_event("error", f"Finance loop error: {e}", strategy="finance")
-                logger.error("Finance loop error", error=str(e))
+                self.engine.log_event("error", f"Main strategy loop error: {e}")
+                logger.error("Main strategy loop error", error=str(e))
 
-            await asyncio.sleep(10 * 60)
-
-    async def _econ_loop(self) -> None:
-        """Econ strategy loop — runs every 30 minutes during US business hours only."""
-        while self._running:
-            try:
-                if not self.engine.kill_switch:
-                    if self._is_us_market_hours():
-                        await self.run_econ_cycle()
-                    else:
-                        logger.debug("Econ loop: outside market hours, skipping")
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.engine.log_event("error", f"Econ loop error: {e}", strategy="econ")
-                logger.error("Econ loop error", error=str(e))
-
-            await asyncio.sleep(30 * 60)
+            await asyncio.sleep(5 * 60)
 
     async def _monitor_loop(self) -> None:
         """Position monitor + settlement loop — runs every 2 minutes."""

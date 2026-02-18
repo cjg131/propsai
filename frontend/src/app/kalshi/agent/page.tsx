@@ -725,15 +725,17 @@ export default function AgentPage() {
                           {(trade.edge * 100).toFixed(1)}%
                         </td>
                         <td className="py-2 pr-3 text-right">
-                          {trade.status === "settled" ? (
+                          {trade.pnl != null && trade.pnl !== 0 ? (
                             <PnlDisplay value={trade.pnl} />
+                          ) : trade.status === "settled" ? (
+                            <PnlDisplay value={trade.pnl ?? 0} />
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
                         </td>
                         <td className="py-2">
-                          {trade.status === "settled" ? (
-                            trade.pnl > 0 ? (
+                          {trade.action === "sell" || trade.status === "settled" ? (
+                            (trade.pnl ?? 0) > 0 ? (
                               <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                             ) : (
                               <XCircle className="h-4 w-4 text-red-500" />

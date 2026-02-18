@@ -214,21 +214,25 @@ class TradingEngine:
         return result
 
     def get_total_exposure(self, strategy: str | None = None) -> float:
-        """Get total capital currently deployed in open (filled, unsettled) trades."""
+        """Get total capital currently deployed in open (filled, unsettled) positions.
+        
+        Nets buy cost against sell proceeds so that exited positions free up capital.
+        buy cost is positive, sell cost is negative (proceeds), so SUM(cost) gives net.
+        """
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         if strategy:
             c.execute(
-                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND action = 'buy' AND strategy = ?",
+                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND strategy = ?",
                 (strategy,),
             )
         else:
             c.execute(
-                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND action = 'buy'"
+                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled'"
             )
         result = c.fetchone()[0]
         conn.close()
-        return result
+        return max(0, result)  # Floor at 0 in case sell proceeds exceed buy cost
 
     def has_open_position(self, ticker: str) -> bool:
         """Check if we already have an open (unsettled) position on this ticker."""
@@ -246,16 +250,16 @@ class TradingEngine:
         return row is not None and (row[0] or 0) > 0
 
     def get_ticker_exposure(self, ticker: str) -> float:
-        """Get total capital deployed on a specific ticker."""
+        """Get net capital deployed on a specific ticker (buys minus sell proceeds)."""
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute(
-            "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND action = 'buy' AND ticker = ?",
+            "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND ticker = ?",
             (ticker,),
         )
         result = c.fetchone()[0]
         conn.close()
-        return result
+        return max(0, result)
 
     def get_remaining_capital(self, strategy: str = "") -> float:
         """Get remaining deployable capital, respecting per-strategy caps.
@@ -889,21 +893,26 @@ class TradingEngine:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
 
-        # Look up average entry price from buy trades for this ticker+side
+        # Look up average entry cost+fee from buy trades for this ticker+side
         c.execute(
-            """SELECT SUM(count) as total_count, SUM(cost) as total_cost, SUM(fee) as total_fees
+            """SELECT SUM(count) as total_count, SUM(cost) as total_cost, SUM(fee) as total_fees,
+                      MAX(market_title) as market_title
             FROM trades WHERE ticker = ? AND side = ? AND action = 'buy'
             AND status = 'filled' AND paper_mode = ?""",
             (ticker, side, 1 if self.paper_mode else 0),
         )
         entry_row = c.fetchone()
         entry_cost_per_contract = 0.0
+        entry_fee_per_contract = 0.0
+        original_market_title = ""
         if entry_row and entry_row["total_count"] and entry_row["total_count"] > 0:
             entry_cost_per_contract = entry_row["total_cost"] / entry_row["total_count"]
+            entry_fee_per_contract = entry_row["total_fees"] / entry_row["total_count"]
+            original_market_title = entry_row["market_title"] or ""
 
-        # P&L = (exit_price - entry_price) * count - exit_fee
+        # P&L = exit_proceeds - entry_cost - entry_fees(proportional) - exit_fee
         exit_price_per = price_cents / 100.0
-        pnl = (exit_price_per - entry_cost_per_contract) * count - fee
+        pnl = (exit_price_per - entry_cost_per_contract) * count - (entry_fee_per_contract * count) - fee
 
         now = datetime.now(UTC).isoformat()
 
@@ -912,7 +921,7 @@ class TradingEngine:
             "timestamp": now,
             "strategy": strategy,
             "ticker": ticker,
-            "market_title": "",
+            "market_title": original_market_title,
             "side": side,
             "action": sell_action,
             "count": count,
@@ -939,7 +948,7 @@ class TradingEngine:
              result, pnl, settled_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                trade_id, now, strategy, ticker, "",
+                trade_id, now, strategy, ticker, original_market_title,
                 side, sell_action, count, price_cents, -cost, fee,
                 "limit", 1 if self.paper_mode else 0, order_id, status,
                 0, 0, 0, "position_monitor", f"EXIT: {reason}",
@@ -1067,16 +1076,17 @@ class TradingEngine:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
 
-        # Overall stats
+        # Overall stats — include both market-settled trades AND exit/sell trades
+        # Exit trades have pnl computed at exit time but keep status='filled'
         c.execute("""
             SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl <= 0 AND status = 'settled' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
                 COALESCE(SUM(pnl), 0) as total_pnl,
                 COALESCE(SUM(fee), 0) as total_fees,
-                COALESCE(SUM(cost), 0) as total_wagered
-            FROM trades WHERE status = 'settled'
+                COALESCE(SUM(CASE WHEN action = 'buy' THEN cost ELSE 0 END), 0) as total_wagered
+            FROM trades WHERE status = 'settled' OR action = 'sell'
         """)
         overall = dict(c.fetchone())
 
@@ -1089,7 +1099,7 @@ class TradingEngine:
                 SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
                 COALESCE(SUM(pnl), 0) as total_pnl,
                 COALESCE(SUM(fee), 0) as total_fees
-            FROM trades WHERE status = 'settled'
+            FROM trades WHERE status = 'settled' OR action = 'sell'
             GROUP BY strategy
         """)
         by_strategy = {row["strategy"]: dict(row) for row in c.fetchall()}

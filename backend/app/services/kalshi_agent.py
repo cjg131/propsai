@@ -304,8 +304,11 @@ class KalshiAgent:
     async def execute_ranked_signals(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Rank all candidates globally by edge * confidence, then execute
-        the top ones until 80% of bankroll is deployed this cycle.
-        Reserve 20% for DCA / next cycle.
+        the top ones.  Each cycle deploys up to 80% of AVAILABLE capital
+        (bankroll − current net exposure).  The remaining 20% is held back
+        for the next cycle to DCA into existing positions or catch new
+        opportunities.  Over multiple cycles the system can deploy up to
+        100% of bankroll.
         """
         if not candidates:
             return []
@@ -313,20 +316,20 @@ class KalshiAgent:
         # Sort by edge * confidence descending
         candidates.sort(key=lambda c: c.get("edge", 0) * c.get("confidence", 0), reverse=True)
 
-        deploy_target = self.engine.bankroll * 0.80
         total_exposure = self.engine.get_total_exposure()
-        remaining_budget = max(0, deploy_target - total_exposure)
+        available_capital = max(0, self.engine.bankroll - total_exposure)
+        cycle_budget = available_capital * 0.80  # deploy 80% of what's free this cycle
 
         self.engine.log_event(
             "info",
             f"Global ranking: {len(candidates)} candidates, "
-            f"deploy target=${deploy_target:.0f}, current exposure=${total_exposure:.2f}, "
-            f"remaining budget=${remaining_budget:.2f}",
+            f"exposure=${total_exposure:.2f}, available=${available_capital:.2f}, "
+            f"cycle budget=${cycle_budget:.2f}",
         )
 
         traded: list[dict[str, Any]] = []
         for candidate in candidates:
-            if remaining_budget <= 0:
+            if cycle_budget <= 0:
                 break
 
             strategy = candidate.get("strategy", "")
@@ -350,9 +353,9 @@ class KalshiAgent:
                 continue
 
             cost_estimate = count * price_cents / 100.0
-            if cost_estimate > remaining_budget:
+            if cost_estimate > cycle_budget:
                 # Reduce count to fit budget
-                count = int(remaining_budget / (price_cents / 100.0))
+                count = int(cycle_budget / (price_cents / 100.0))
                 if count <= 0:
                     continue
 
@@ -372,14 +375,14 @@ class KalshiAgent:
 
             if trade and trade.get("status") not in ("blocked", "error", "timeout"):
                 actual_cost = trade.get("cost", 0) + trade.get("fee", 0)
-                remaining_budget -= actual_cost
+                cycle_budget -= actual_cost
                 candidate["trade"] = trade
                 traded.append(candidate)
 
         self.engine.log_event(
             "info",
             f"Global execution: {len(traded)}/{len(candidates)} traded, "
-            f"remaining budget=${remaining_budget:.2f}",
+            f"cycle budget remaining=${cycle_budget:.2f}",
         )
         return traded
 

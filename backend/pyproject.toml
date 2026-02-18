@@ -30,6 +30,7 @@ apscheduler = "^3.10.0"
 eval-type-backport = "^0.3.1"
 newsapi-python = "^0.2.7"
 cryptography = "^42.0.0"
+websockets = "^13.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

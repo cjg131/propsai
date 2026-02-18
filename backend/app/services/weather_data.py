@@ -348,8 +348,8 @@ class WeatherConsensus:
                     forecasts["sources"][name] = result
             except Exception as e:
                 logger.warning("Forecast source failed", source=name, city=city_key, error=str(e))
-            # Small delay between API calls to respect rate limits
-            await asyncio.sleep(0.3)
+            # Delay between API calls to respect Tomorrow.io free tier (~25 req/hr)
+            await asyncio.sleep(2)
 
         return forecasts
 

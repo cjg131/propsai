@@ -311,3 +311,43 @@ export function useRunSportsCycle() {
     },
   });
 }
+
+export function useRunCryptoCycle() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post("/api/kalshi/agent/run/crypto"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agent"] });
+    },
+  });
+}
+
+export function useRunFinanceCycle() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post("/api/kalshi/agent/run/finance"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agent"] });
+    },
+  });
+}
+
+export function useRunEconCycle() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post("/api/kalshi/agent/run/econ"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agent"] });
+    },
+  });
+}
+
+export function useRunNbaPropsCycle() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post("/api/kalshi/agent/run/nba-props"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agent"] });
+    },
+  });
+}

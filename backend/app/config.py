@@ -54,6 +54,11 @@ class Settings(BaseSettings):
         default="", description="Visual Crossing API key for weather data ($35/month)"
     )
 
+    # FRED (Federal Reserve Economic Data)
+    fred_api_key: str = Field(
+        default="", description="FRED API key for economic data (free at fred.stlouisfed.org)"
+    )
+
     # Kalshi
     kalshi_api_key_id: str = Field(
         default="", description="Kalshi API key ID (UUID)"

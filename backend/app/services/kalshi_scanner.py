@@ -673,10 +673,423 @@ class KalshiScanner:
             if series_count > 0:
                 logger.info("Single game scan", series=series_ticker, found=series_count)
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
         logger.info("Single game scan complete", total=len(all_markets), series_checked=len(SINGLE_GAME_SERIES))
         return all_markets
+
+    async def scan_crypto_markets(self) -> list[dict[str, Any]]:
+        """Scan for active 15-minute crypto up/down markets.
+
+        Discovers series tickers dynamically by searching for crypto-related
+        open markets. Filters for markets with > 2 minutes remaining.
+        """
+        crypto_markets: list[dict[str, Any]] = []
+
+        # Known and candidate crypto series tickers on Kalshi
+        # These cover 15-min, 1-hour, and daily crypto markets
+        crypto_series = [
+            # 15-minute markets (primary target)
+            "KXBTC", "KXBTCZ", "KXBTC15",
+            "KXETH", "KXETHZ", "KXETH15",
+            "KXSOL", "KXSOLZ", "KXSOL15",
+            "KXXRP", "KXXRPZ", "KXXRP15",
+            # Broader crypto series
+            "KXBITCOIN", "KXCRYPTO",
+        ]
+
+        for series_ticker in crypto_series:
+            try:
+                await asyncio.sleep(0.35)
+                data = await self.kalshi.get_markets(
+                    series_ticker=series_ticker, limit=50, status="open",
+                )
+                markets = data.get("markets", [])
+
+                for m in markets:
+                    title = (m.get("title", "") or "").lower()
+                    ticker = m.get("ticker", "")
+
+                    # Filter: must be a crypto up/down or price market
+                    is_crypto = any(kw in title for kw in [
+                        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+                        "xrp", "crypto", "15 min", "15-min", "15min",
+                    ])
+                    if not is_crypto and "KXBTC" not in ticker and "KXETH" not in ticker and "KXSOL" not in ticker and "KXXRP" not in ticker:
+                        continue
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "crypto")
+                    if enriched:
+                        # Detect which coin this market is for
+                        coin = None
+                        upper_title = m.get("title", "").upper()
+                        upper_ticker = ticker.upper()
+                        if "BTC" in upper_ticker or "BITCOIN" in upper_title:
+                            coin = "BTC"
+                        elif "ETH" in upper_ticker or "ETHEREUM" in upper_title:
+                            coin = "ETH"
+                        elif "SOL" in upper_ticker or "SOLANA" in upper_title:
+                            coin = "SOL"
+                        elif "XRP" in upper_ticker:
+                            coin = "XRP"
+
+                        enriched["crypto"] = {
+                            "coin": coin,
+                            "close_time": m.get("close_time", ""),
+                        }
+                        crypto_markets.append(enriched)
+
+            except Exception as e:
+                logger.debug("Crypto series scan failed", series=series_ticker, error=str(e))
+                continue
+
+        # Also try a keyword-based search if series approach finds nothing
+        if not crypto_markets:
+            try:
+                await asyncio.sleep(0.5)
+                data = await self.kalshi.get_markets(status="open", limit=200)
+                for m in data.get("markets", []):
+                    title = (m.get("title", "") or "").lower()
+                    ticker = m.get("ticker", "")
+                    if not any(kw in title for kw in ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "crypto"]):
+                        continue
+                    if not any(kw in title for kw in ["15 min", "15-min", "up", "down", "above", "below", "price"]):
+                        continue
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "crypto")
+                    if enriched:
+                        coin = None
+                        upper_title = m.get("title", "").upper()
+                        if "BTC" in upper_title or "BITCOIN" in upper_title:
+                            coin = "BTC"
+                        elif "ETH" in upper_title or "ETHEREUM" in upper_title:
+                            coin = "ETH"
+                        elif "SOL" in upper_title or "SOLANA" in upper_title:
+                            coin = "SOL"
+                        elif "XRP" in upper_title:
+                            coin = "XRP"
+
+                        enriched["crypto"] = {
+                            "coin": coin,
+                            "close_time": m.get("close_time", ""),
+                        }
+                        crypto_markets.append(enriched)
+            except Exception as e:
+                logger.debug("Crypto keyword scan failed", error=str(e))
+
+        logger.info("Crypto scan complete", found=len(crypto_markets))
+        return crypto_markets
+
+    async def scan_finance_markets(self) -> list[dict[str, Any]]:
+        """Scan for active S&P 500 and Nasdaq daily markets on Kalshi."""
+        finance_markets: list[dict[str, Any]] = []
+
+        finance_series = [
+            "KXINX", "KXINXD", "KXINXU",
+            "KXSP500", "KXSPX", "KXSPY",
+            "KXNAS", "KXNASDAQ", "KXQQQ", "KXNDX",
+            "KXDOW", "KXDJIA",
+        ]
+
+        for series_ticker in finance_series:
+            try:
+                await asyncio.sleep(0.35)
+                data = await self.kalshi.get_markets(
+                    series_ticker=series_ticker, limit=50, status="open",
+                )
+                markets = data.get("markets", [])
+
+                for m in markets:
+                    title = (m.get("title", "") or "").lower()
+                    ticker = m.get("ticker", "")
+
+                    is_finance = any(kw in title for kw in [
+                        "s&p", "s&p 500", "sp500", "nasdaq", "dow", "index",
+                        "close above", "close below", "close up", "close down",
+                    ])
+                    if not is_finance:
+                        continue
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "finance")
+                    if enriched:
+                        # Detect which index
+                        index = None
+                        upper_title = m.get("title", "").upper()
+                        if "S&P" in upper_title or "SP500" in upper_title or "SPX" in upper_title:
+                            index = "SP500"
+                        elif "NASDAQ" in upper_title or "QQQ" in upper_title or "NDX" in upper_title:
+                            index = "NASDAQ"
+                        elif "DOW" in upper_title or "DJIA" in upper_title:
+                            index = "DOW"
+
+                        enriched["finance"] = {
+                            "index": index,
+                            "close_time": m.get("close_time", ""),
+                        }
+                        finance_markets.append(enriched)
+
+            except Exception as e:
+                logger.debug("Finance series scan failed", series=series_ticker, error=str(e))
+                continue
+
+        # Fallback keyword search
+        if not finance_markets:
+            try:
+                await asyncio.sleep(0.5)
+                data = await self.kalshi.get_markets(status="open", limit=200)
+                for m in data.get("markets", []):
+                    title = (m.get("title", "") or "").lower()
+                    if not any(kw in title for kw in ["s&p", "nasdaq", "dow jones"]):
+                        continue
+                    if not any(kw in title for kw in ["close", "above", "below", "up", "down"]):
+                        continue
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "finance")
+                    if enriched:
+                        upper_title = m.get("title", "").upper()
+                        index = None
+                        if "S&P" in upper_title or "SP500" in upper_title:
+                            index = "SP500"
+                        elif "NASDAQ" in upper_title:
+                            index = "NASDAQ"
+                        elif "DOW" in upper_title:
+                            index = "DOW"
+                        enriched["finance"] = {"index": index, "close_time": m.get("close_time", "")}
+                        finance_markets.append(enriched)
+            except Exception as e:
+                logger.debug("Finance keyword scan failed", error=str(e))
+
+        logger.info("Finance scan complete", found=len(finance_markets))
+        return finance_markets
+
+    async def scan_econ_markets(self) -> list[dict[str, Any]]:
+        """Scan for active economic event markets (CPI, Fed, Gas, Unemployment)."""
+        econ_markets: list[dict[str, Any]] = []
+
+        econ_series = [
+            "KXCPI", "KXINFL",
+            "KXFED", "KXFOMC", "KXRATE",
+            "KXGAS", "KXOIL",
+            "KXJOBS", "KXUNEMP", "KXNFP",
+            "KXGDP", "KXECON",
+        ]
+
+        for series_ticker in econ_series:
+            try:
+                await asyncio.sleep(0.35)
+                data = await self.kalshi.get_markets(
+                    series_ticker=series_ticker, limit=50, status="open",
+                )
+                markets = data.get("markets", [])
+
+                for m in markets:
+                    title = (m.get("title", "") or "").lower()
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "econ")
+                    if enriched:
+                        # Detect econ type
+                        econ_type = None
+                        if any(kw in title for kw in ["cpi", "inflation", "consumer price"]):
+                            econ_type = "cpi"
+                        elif any(kw in title for kw in ["fed", "fomc", "interest rate", "rate cut", "rate hike"]):
+                            econ_type = "fed_funds"
+                        elif any(kw in title for kw in ["gas price", "gasoline", "oil price"]):
+                            econ_type = "gas_price"
+                        elif any(kw in title for kw in ["unemployment", "jobless", "nonfarm", "payroll", "jobs report"]):
+                            econ_type = "unemployment"
+                        elif any(kw in title for kw in ["gdp", "gross domestic"]):
+                            econ_type = "gdp"
+
+                        enriched["econ"] = {
+                            "type": econ_type,
+                            "close_time": m.get("close_time", ""),
+                        }
+                        econ_markets.append(enriched)
+
+            except Exception as e:
+                logger.debug("Econ series scan failed", series=series_ticker, error=str(e))
+                continue
+
+        # Fallback keyword search
+        if not econ_markets:
+            try:
+                await asyncio.sleep(0.5)
+                data = await self.kalshi.get_markets(status="open", limit=200)
+                for m in data.get("markets", []):
+                    title = (m.get("title", "") or "").lower()
+                    if not any(kw in title for kw in [
+                        "cpi", "inflation", "fed", "fomc", "interest rate",
+                        "gas price", "gasoline", "unemployment", "jobless",
+                        "nonfarm", "payroll", "gdp",
+                    ]):
+                        continue
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "econ")
+                    if enriched:
+                        econ_type = None
+                        if any(kw in title for kw in ["cpi", "inflation"]):
+                            econ_type = "cpi"
+                        elif any(kw in title for kw in ["fed", "fomc", "interest rate"]):
+                            econ_type = "fed_funds"
+                        elif any(kw in title for kw in ["gas", "gasoline"]):
+                            econ_type = "gas_price"
+                        elif any(kw in title for kw in ["unemployment", "jobless", "nonfarm", "payroll"]):
+                            econ_type = "unemployment"
+                        elif "gdp" in title:
+                            econ_type = "gdp"
+                        enriched["econ"] = {"type": econ_type, "close_time": m.get("close_time", "")}
+                        econ_markets.append(enriched)
+            except Exception as e:
+                logger.debug("Econ keyword scan failed", error=str(e))
+
+        logger.info("Econ scan complete", found=len(econ_markets))
+        return econ_markets
+
+    async def scan_nba_props_markets(self) -> list[dict[str, Any]]:
+        """Scan for active NBA player prop markets on Kalshi.
+
+        Looks for markets like:
+          - "Will LeBron James score 25+ points?" (KXNBAPTS...)
+          - "Will Nikola Jokic get 10+ rebounds?" (KXNBAREB...)
+          - "Will Luka Doncic get 8+ assists?" (KXNBAAST...)
+        """
+        props_markets: list[dict[str, Any]] = []
+
+        nba_prop_series = [
+            "KXNBAPTS", "KXNBAAST", "KXNBAREB",
+            "KXNBA3PM", "KXNBASTL", "KXNBABLK", "KXNBATOV",
+            "KXNBAPRA", "KXNBAPR", "KXNBAPA", "KXNBARA",
+            "KXNBADD", "KXNBATD",
+        ]
+
+        for series_ticker in nba_prop_series:
+            try:
+                await asyncio.sleep(0.35)
+                data = await self.kalshi.get_markets(
+                    series_ticker=series_ticker, limit=100, status="open",
+                )
+                markets = data.get("markets", [])
+
+                for m in markets:
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "nba_props")
+                    if enriched:
+                        title = m.get("title", "")
+                        title_lower = title.lower()
+
+                        # Detect prop type from series or title
+                        prop_type = None
+                        if "KXNBAPTS" in series_ticker or "point" in title_lower or "score" in title_lower:
+                            prop_type = "points"
+                        elif "KXNBAREB" in series_ticker or "rebound" in title_lower:
+                            prop_type = "rebounds"
+                        elif "KXNBAAST" in series_ticker or "assist" in title_lower:
+                            prop_type = "assists"
+                        elif "KXNBA3PM" in series_ticker or "three" in title_lower or "3-pointer" in title_lower:
+                            prop_type = "threes"
+                        elif "KXNBASTL" in series_ticker or "steal" in title_lower:
+                            prop_type = "steals"
+                        elif "KXNBABLK" in series_ticker or "block" in title_lower:
+                            prop_type = "blocks"
+                        elif "KXNBATOV" in series_ticker or "turnover" in title_lower:
+                            prop_type = "turnovers"
+
+                        # Extract player name from title
+                        # Typical format: "Will [Player Name] score 25+ points?"
+                        player_match = re.search(
+                            r'(?:will\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z\'-]+)+)',
+                            title,
+                        )
+                        player_name = player_match.group(1).strip() if player_match else None
+
+                        # Extract line from title (e.g., "25+" or "over 25.5")
+                        line_match = re.search(r'(\d+\.?\d*)\+|over\s+(\d+\.?\d*)', title_lower)
+                        line = None
+                        if line_match:
+                            line = float(line_match.group(1) or line_match.group(2))
+
+                        enriched["nba_props"] = {
+                            "prop_type": prop_type,
+                            "player_name": player_name,
+                            "line": line,
+                            "close_time": m.get("close_time", ""),
+                        }
+                        props_markets.append(enriched)
+
+            except Exception as e:
+                logger.debug("NBA props series scan failed", series=series_ticker, error=str(e))
+                continue
+
+        # Fallback keyword search if no series matched
+        if not props_markets:
+            try:
+                await asyncio.sleep(0.5)
+                data = await self.kalshi.get_markets(status="open", limit=200)
+                for m in data.get("markets", []):
+                    title = (m.get("title", "") or "").lower()
+                    ticker = m.get("ticker", "")
+
+                    if not any(kw in title for kw in [
+                        "points", "rebounds", "assists", "steals", "blocks",
+                        "three-pointer", "3-pointer", "turnovers",
+                    ]):
+                        continue
+                    if not any(kw in title for kw in ["nba", "basketball"]) and not ticker.startswith("KXNBA"):
+                        continue
+
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    if yes_ask <= 2 or no_ask <= 2:
+                        continue
+
+                    enriched = self._enrich_market(m, "nba_props")
+                    if enriched:
+                        enriched["nba_props"] = {
+                            "prop_type": None,
+                            "player_name": None,
+                            "line": None,
+                            "close_time": m.get("close_time", ""),
+                        }
+                        props_markets.append(enriched)
+            except Exception as e:
+                logger.debug("NBA props keyword scan failed", error=str(e))
+
+        logger.info("NBA props scan complete", found=len(props_markets))
+        return props_markets
 
     def _enrich_market(self, market: dict[str, Any], category: str) -> dict[str, Any] | None:
         """Add parsed metadata to a raw Kalshi market."""

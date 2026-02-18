@@ -149,6 +149,54 @@ async def run_sports_cycle():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/run/crypto")
+async def run_crypto_cycle():
+    """Manually trigger one crypto strategy cycle."""
+    try:
+        agent = get_kalshi_agent()
+        results = await agent.run_crypto_cycle()
+        return {"signals": len(results), "results": results}
+    except Exception as e:
+        logger.error("Crypto cycle failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run/finance")
+async def run_finance_cycle():
+    """Manually trigger one finance strategy cycle."""
+    try:
+        agent = get_kalshi_agent()
+        results = await agent.run_finance_cycle()
+        return {"signals": len(results), "results": results}
+    except Exception as e:
+        logger.error("Finance cycle failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run/econ")
+async def run_econ_cycle():
+    """Manually trigger one econ strategy cycle."""
+    try:
+        agent = get_kalshi_agent()
+        results = await agent.run_econ_cycle()
+        return {"signals": len(results), "results": results}
+    except Exception as e:
+        logger.error("Econ cycle failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run/nba-props")
+async def run_nba_props_cycle():
+    """Manually trigger one NBA props strategy cycle."""
+    try:
+        agent = get_kalshi_agent()
+        results = await agent.run_nba_props_cycle()
+        return {"signals": len(results), "results": results}
+    except Exception as e:
+        logger.error("NBA props cycle failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Data Queries ───────────────────────────────────────────────
 
 
@@ -218,3 +266,57 @@ async def get_agent_log(
     engine = get_trading_engine()
     log = engine.get_agent_log(limit=limit, strategy=strategy)
     return {"log": log, "total": len(log)}
+
+
+# ── New Endpoints (OpenClaw, Adaptive Thresholds, Signal Stats, Reset) ──
+
+
+@router.get("/reviews")
+async def get_trade_reviews(
+    strategy: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Get GPT-powered trade reviews from OpenClaw."""
+    from app.services.trade_analyzer import get_trade_analyzer
+    analyzer = get_trade_analyzer()
+    reviews = analyzer.get_recent_reviews(strategy=strategy, limit=limit)
+    patterns = analyzer.get_pattern_summary()
+    return {"reviews": reviews, "patterns": patterns}
+
+
+@router.get("/thresholds")
+async def get_adaptive_thresholds():
+    """Get current adaptive thresholds per strategy."""
+    from app.services.adaptive_thresholds import get_adaptive_thresholds as _get
+    thresholds = _get()
+    return thresholds.get_all_thresholds()
+
+
+@router.get("/signal-stats")
+async def get_signal_stats():
+    """Get signal component quality stats and dynamic weights."""
+    from app.services.signal_scorer import get_signal_scorer
+    scorer = get_signal_scorer()
+    return scorer.get_all_stats()
+
+
+@router.post("/reset")
+async def reset_paper_trades():
+    """Clear all paper trades, signals, and logs for a fresh start."""
+    import sqlite3
+    from app.services.trading_engine import DB_PATH
+    engine = get_trading_engine()
+    engine.log_event("control", "DB reset requested via API")
+
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    c.execute("DELETE FROM trades WHERE paper_mode = 1")
+    c.execute("DELETE FROM signals")
+    c.execute("DELETE FROM daily_pnl")
+    c.execute("DELETE FROM agent_log")
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+
+    engine._first_cycle_done = False
+    return {"status": "reset", "message": "Paper trades, signals, and logs cleared"}

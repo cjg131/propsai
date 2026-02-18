@@ -69,3 +69,13 @@ deploy/env/kalshi.key
 
 # SQLite database
 backend/app/data/*.db
+
+# Debug/utility scripts (local only)
+backend/check_*.py
+backend/debug_*.py
+backend/current_state.py
+backend/db_summary.py
+backend/pnl_report.py
+backend/reset_trades.py
+backend/unrealized_pnl.py
+backend/research_*.py

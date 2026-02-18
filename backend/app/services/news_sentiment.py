@@ -301,3 +301,232 @@ def get_news_sentiment() -> NewsSentimentService:
     if _service is None:
         _service = NewsSentimentService()
     return _service
+
+
+# ── Market News Sentiment (Crypto / Finance / Econ) ──────────────────
+
+MARKET_RSS_FEEDS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=BTC-USD&region=US&lang=en-US",
+]
+
+CRYPTO_BULLISH_KW = [
+    "rally", "surge", "soar", "breakout", "all-time high", "ath",
+    "bullish", "adoption", "etf approved", "etf approval", "institutional",
+    "accumulation", "whale buying", "inflow", "upgrade",
+]
+
+CRYPTO_BEARISH_KW = [
+    "crash", "plunge", "dump", "sell-off", "selloff", "bearish",
+    "hack", "exploit", "rug pull", "regulation", "ban", "crackdown",
+    "sec lawsuit", "sec charges", "outflow", "liquidation", "fear",
+    "fud", "downgrade", "delisting",
+]
+
+FINANCE_BULLISH_KW = [
+    "rally", "surge", "record high", "all-time high", "beat expectations",
+    "strong earnings", "jobs growth", "rate cut", "dovish", "stimulus",
+    "bullish", "risk-on", "buy signal", "upgrade",
+]
+
+FINANCE_BEARISH_KW = [
+    "crash", "plunge", "sell-off", "selloff", "recession", "downturn",
+    "miss expectations", "weak earnings", "rate hike", "hawkish",
+    "inflation surge", "bearish", "risk-off", "downgrade", "layoffs",
+    "default", "debt ceiling", "shutdown",
+]
+
+# Map topics to their keyword sets
+TOPIC_KEYWORDS: dict[str, dict[str, list[str]]] = {
+    "BTC": {"search": ["bitcoin", "btc"], "bullish": CRYPTO_BULLISH_KW, "bearish": CRYPTO_BEARISH_KW},
+    "ETH": {"search": ["ethereum", "eth"], "bullish": CRYPTO_BULLISH_KW, "bearish": CRYPTO_BEARISH_KW},
+    "SOL": {"search": ["solana", "sol"], "bullish": CRYPTO_BULLISH_KW, "bearish": CRYPTO_BEARISH_KW},
+    "XRP": {"search": ["xrp", "ripple"], "bullish": CRYPTO_BULLISH_KW, "bearish": CRYPTO_BEARISH_KW},
+    "SP500": {"search": ["s&p 500", "s&p500", "sp500", "spy"], "bullish": FINANCE_BULLISH_KW, "bearish": FINANCE_BEARISH_KW},
+    "NASDAQ": {"search": ["nasdaq", "qqq", "tech stocks"], "bullish": FINANCE_BULLISH_KW, "bearish": FINANCE_BEARISH_KW},
+}
+
+
+def _score_market_text(text: str, bullish_kw: list[str], bearish_kw: list[str]) -> float:
+    """Score text for market sentiment. Returns -1.0 (bearish) to +1.0 (bullish)."""
+    text_lower = text.lower()
+    bull = sum(1 for kw in bullish_kw if kw in text_lower)
+    bear = sum(1 for kw in bearish_kw if kw in text_lower)
+    total = bull + bear
+    if total == 0:
+        return 0.0
+    return round((bull - bear) / total, 2)
+
+
+class MarketNewsSentiment:
+    """News sentiment for crypto and finance markets."""
+
+    def __init__(self):
+        settings = get_settings()
+        self.newsapi_key = getattr(settings, "newsapi_key", "") or ""
+        self.twitter_bearer = getattr(settings, "twitter_bearer_token", "") or ""
+        self._cache: dict[str, dict] = {}
+        self._cache_ts: float = 0.0
+        self._cache_ttl: float = 300.0  # 5 minute cache
+
+    def _fetch_rss(self, max_age_hours: int = 24) -> list[dict]:
+        """Fetch recent articles from market RSS feeds."""
+        articles = []
+        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+
+        for feed_url in MARKET_RSS_FEEDS:
+            try:
+                feed = feedparser.parse(feed_url)
+                for entry in feed.entries[:15]:
+                    published = None
+                    if hasattr(entry, "published_parsed") and entry.published_parsed:
+                        published = datetime(*entry.published_parsed[:6])
+                    elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
+                        published = datetime(*entry.updated_parsed[:6])
+                    if published and published < cutoff:
+                        continue
+
+                    title = getattr(entry, "title", "") or ""
+                    summary = getattr(entry, "summary", "") or ""
+                    articles.append({"text": f"{title} {summary}", "source": "rss"})
+            except Exception as e:
+                logger.debug(f"Market RSS error for {feed_url}: {e}")
+
+        return articles
+
+    def _fetch_newsapi(self, query: str, max_age_hours: int = 24) -> list[dict]:
+        """Fetch market news from NewsAPI."""
+        if not self.newsapi_key:
+            return []
+
+        from_date = (datetime.utcnow() - timedelta(hours=max_age_hours)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        try:
+            client = httpx.Client(timeout=10)
+            resp = client.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": query,
+                    "from": from_date,
+                    "language": "en",
+                    "sortBy": "publishedAt",
+                    "pageSize": 20,
+                    "apiKey": self.newsapi_key,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return [
+                {"text": f"{a.get('title', '')} {a.get('description', '')}", "source": "newsapi"}
+                for a in data.get("articles", [])
+            ]
+        except Exception as e:
+            logger.debug(f"Market NewsAPI error: {e}")
+            return []
+
+    def _fetch_twitter(self, query: str, max_results: int = 20) -> list[dict]:
+        """Fetch recent tweets via Twitter API v2 (free tier: 10 req/15min)."""
+        if not self.twitter_bearer:
+            return []
+
+        try:
+            client = httpx.Client(timeout=10)
+            resp = client.get(
+                "https://api.twitter.com/2/tweets/search/recent",
+                params={
+                    "query": f"{query} -is:retweet lang:en",
+                    "max_results": min(max_results, 100),
+                    "tweet.fields": "public_metrics,created_at",
+                },
+                headers={"Authorization": f"Bearer {self.twitter_bearer}"},
+            )
+            if resp.status_code == 429:
+                logger.debug("Twitter rate limited")
+                return []
+            resp.raise_for_status()
+            data = resp.json()
+            tweets = []
+            for tweet in data.get("data", []):
+                text = tweet.get("text", "")
+                metrics = tweet.get("public_metrics", {})
+                engagement = metrics.get("like_count", 0) + metrics.get("retweet_count", 0)
+                if engagement >= 5:  # Only tweets with some engagement
+                    tweets.append({"text": text, "source": "twitter", "engagement": engagement})
+            logger.info(f"Twitter: fetched {len(tweets)} high-engagement tweets for '{query}'")
+            return tweets
+        except Exception as e:
+            logger.debug(f"Twitter fetch error: {e}")
+            return []
+
+    def get_market_sentiment(self, topics: list[str] | None = None) -> dict[str, dict]:
+        """
+        Get sentiment for market topics.
+
+        Returns:
+            {topic: {"sentiment": float, "article_count": int, "bullish": int, "bearish": int}}
+        """
+        import time as _time
+
+        if self._cache and (_time.time() - self._cache_ts) < self._cache_ttl:
+            if topics:
+                return {t: self._cache.get(t, {"sentiment": 0.0, "article_count": 0}) for t in topics}
+            return dict(self._cache)
+
+        if topics is None:
+            topics = list(TOPIC_KEYWORDS.keys())
+
+        # Fetch all articles once (RSS + NewsAPI + Twitter)
+        rss_articles = self._fetch_rss()
+        newsapi_articles = self._fetch_newsapi("bitcoin OR ethereum OR S&P 500 OR nasdaq OR fed rate")
+        twitter_articles = self._fetch_twitter("bitcoin OR ethereum OR S&P500 OR nasdaq")
+        all_articles = rss_articles + newsapi_articles + twitter_articles
+
+        result: dict[str, dict] = {}
+        for topic in topics:
+            cfg = TOPIC_KEYWORDS.get(topic)
+            if not cfg:
+                result[topic] = {"sentiment": 0.0, "article_count": 0, "bullish": 0, "bearish": 0}
+                continue
+
+            # Filter articles mentioning this topic
+            relevant = []
+            for art in all_articles:
+                text_lower = art["text"].lower()
+                if any(kw in text_lower for kw in cfg["search"]):
+                    relevant.append(art)
+
+            if not relevant:
+                result[topic] = {"sentiment": 0.0, "article_count": 0, "bullish": 0, "bearish": 0}
+                continue
+
+            scores = [_score_market_text(a["text"], cfg["bullish"], cfg["bearish"]) for a in relevant]
+            avg_sentiment = sum(scores) / len(scores)
+            bullish_count = sum(1 for s in scores if s > 0)
+            bearish_count = sum(1 for s in scores if s < 0)
+
+            result[topic] = {
+                "sentiment": round(avg_sentiment, 3),
+                "article_count": len(relevant),
+                "bullish": bullish_count,
+                "bearish": bearish_count,
+            }
+
+        self._cache = result
+        self._cache_ts = _time.time()
+
+        mentioned = sum(1 for v in result.values() if v["article_count"] > 0)
+        logger.info(f"Market sentiment: {mentioned}/{len(topics)} topics with news, {len(all_articles)} articles scanned")
+        return result
+
+
+_market_service: MarketNewsSentiment | None = None
+
+
+def get_market_news_sentiment() -> MarketNewsSentiment:
+    global _market_service
+    if _market_service is None:
+        _market_service = MarketNewsSentiment()
+    return _market_service

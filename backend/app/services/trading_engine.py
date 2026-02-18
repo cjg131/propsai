@@ -5,6 +5,7 @@ Handles order placement, bankroll management, risk limits, and paper trading.
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -46,32 +47,33 @@ class TradingEngine:
         self,
         bankroll: float = 2000.0,
         paper_mode: bool = True,
-        daily_loss_limit: float = 200.0,
-        max_bet_size: float = 40.0,
-        max_bet_pct: float = 0.04,  # 4% of strategy bankroll per bet
-        max_position_per_ticker: float = 60.0,  # Max $60 exposure per ticker
-        max_total_exposure_pct: float = 1.00,  # Allow full bankroll deployment when edge is strong
+        daily_loss_limit: float | None = None,
+        max_bet_size: float | None = None,
+        max_bet_pct: float = 0.04,  # 4% of bankroll per bet
+        max_position_per_ticker: float | None = None,
+        max_total_exposure_pct: float = 1.00,  # Allow full bankroll deployment
+        first_cycle_exposure_pct: float = 0.50,  # First cycle: only deploy 50% to spread across best bets
     ):
         self.bankroll = bankroll
         self.paper_mode = paper_mode
-        self.daily_loss_limit = daily_loss_limit
-        self.max_bet_size = max_bet_size
         self.max_bet_pct = max_bet_pct
-        self.max_position_per_ticker = max_position_per_ticker
         self.max_total_exposure_pct = max_total_exposure_pct
+        self.first_cycle_exposure_pct = first_cycle_exposure_pct
+        # Scale risk limits from bankroll (override with explicit values if provided)
+        self.daily_loss_limit = daily_loss_limit if daily_loss_limit is not None else bankroll * 0.20
+        self.max_bet_size = max_bet_size if max_bet_size is not None else bankroll * 0.04
+        self.max_position_per_ticker = max_position_per_ticker if max_position_per_ticker is not None else bankroll * 0.07
+        self._first_cycle_done = False
         self.kill_switch = False
-
-        # Strategy allocations
-        self.allocations = {
-            "weather": 0.45,
-            "sports": 0.45,
-            "reserve": 0.10,
-        }
 
         # Strategy-level toggles
         self.strategy_enabled = {
             "weather": True,
             "sports": True,
+            "crypto": True,
+            "nba_props": True,
+            "finance": True,
+            "econ": True,
         }
 
         self._init_db()
@@ -170,11 +172,6 @@ class TradingEngine:
         conn.commit()
         conn.close()
 
-    def get_strategy_bankroll(self, strategy: str) -> float:
-        """Get the allocated bankroll for a strategy."""
-        alloc = self.allocations.get(strategy, 0)
-        return self.bankroll * alloc
-
     def get_today_pnl(self, strategy: str | None = None) -> float:
         """Get today's P&L, optionally filtered by strategy."""
         today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -230,6 +227,21 @@ class TradingEngine:
         conn.close()
         return result
 
+    def has_open_position(self, ticker: str) -> bool:
+        """Check if we already have an open (unsettled) position on this ticker."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        c.execute("""
+            SELECT
+                SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END)
+              - SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END) as net
+            FROM trades
+            WHERE status = 'filled' AND ticker = ?
+        """, (ticker,))
+        row = c.fetchone()
+        conn.close()
+        return row is not None and (row[0] or 0) > 0
+
     def get_ticker_exposure(self, ticker: str) -> float:
         """Get total capital deployed on a specific ticker."""
         conn = sqlite3.connect(str(DB_PATH))
@@ -242,15 +254,36 @@ class TradingEngine:
         conn.close()
         return result
 
-    def get_remaining_capital(self, strategy: str) -> float:
-        """Get remaining deployable capital for a strategy."""
-        strat_bankroll = self.get_strategy_bankroll(strategy)
-        strat_exposure = self.get_total_exposure(strategy)
-        max_deployable = self.bankroll * self.max_total_exposure_pct
+    def get_remaining_capital(self) -> float:
+        """Get remaining deployable capital.
+        
+        First cycle throttle: if no trades have been placed yet, limit to
+        first_cycle_exposure_pct so the bot spreads across the best opportunities.
+        After the first cycle, allow full bankroll deployment.
+        """
         total_exposure = self.get_total_exposure()
-        global_remaining = max_deployable - total_exposure
-        strat_remaining = strat_bankroll - strat_exposure
-        return max(0, min(global_remaining, strat_remaining))
+        
+        # First cycle: limit deployment so we don't blow the whole bankroll
+        # in one burst. After trades exist, remove the throttle.
+        if not self._first_cycle_done:
+            trade_count = self._get_trade_count()
+            if trade_count > 0:
+                self._first_cycle_done = True
+            else:
+                max_deployable = self.bankroll * self.first_cycle_exposure_pct
+                return max(0, max_deployable - total_exposure)
+        
+        max_deployable = self.bankroll * self.max_total_exposure_pct
+        return max(0, max_deployable - total_exposure)
+    
+    def _get_trade_count(self) -> int:
+        """Get total number of buy trades placed."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM trades WHERE action = 'buy'")
+        result = c.fetchone()[0]
+        conn.close()
+        return result
 
     def check_risk_limits(self, strategy: str, cost: float, ticker: str = "") -> tuple[bool, str]:
         """
@@ -263,25 +296,15 @@ class TradingEngine:
         if not self.strategy_enabled.get(strategy, False):
             return False, f"Strategy '{strategy}' is disabled"
 
-        # Check per-bet size limit
-        if cost > self.max_bet_size:
-            return False, f"Bet size ${cost:.2f} exceeds max ${self.max_bet_size:.2f}"
+        # Check percentage of total bankroll
+        if cost > self.bankroll * self.max_bet_pct:
+            return False, f"Bet size ${cost:.2f} exceeds {self.max_bet_pct*100:.0f}% of bankroll (${self.bankroll:.2f})"
 
-        # Check percentage of strategy bankroll
-        strat_bankroll = self.get_strategy_bankroll(strategy)
-        if strat_bankroll > 0 and cost > strat_bankroll * self.max_bet_pct:
-            return False, f"Bet size ${cost:.2f} exceeds {self.max_bet_pct*100:.0f}% of {strategy} bankroll (${strat_bankroll:.2f})"
-
-        # Check total bankroll exposure — CRITICAL GUARDRAIL
+        # Check total bankroll exposure
         total_exposure = self.get_total_exposure()
         max_deployable = self.bankroll * self.max_total_exposure_pct
         if total_exposure + cost > max_deployable:
             return False, f"Total exposure ${total_exposure + cost:.2f} would exceed {self.max_total_exposure_pct*100:.0f}% of bankroll (${max_deployable:.2f})"
-
-        # Check strategy-level exposure
-        strat_exposure = self.get_total_exposure(strategy)
-        if strat_exposure + cost > strat_bankroll:
-            return False, f"Strategy '{strategy}' exposure ${strat_exposure + cost:.2f} would exceed allocation ${strat_bankroll:.2f}"
 
         # Check per-ticker position limit
         if ticker:
@@ -316,15 +339,13 @@ class TradingEngine:
         kelly_fraction = edge / (1 - p)
         quarter_kelly = kelly_fraction * 0.25 * confidence
 
-        strat_bankroll = self.get_strategy_bankroll(strategy)
-        remaining = self.get_remaining_capital(strategy)
+        remaining = self.get_remaining_capital()
 
-        # Cap by remaining capital, per-bet max, and Kelly
+        # Cap by remaining capital, Kelly, and bankroll percentage
         max_dollars = min(
             remaining,
-            strat_bankroll * quarter_kelly,
-            self.max_bet_size,
-            strat_bankroll * self.max_bet_pct,
+            self.bankroll * quarter_kelly,
+            self.bankroll * self.max_bet_pct,
         )
 
         # Also cap by per-ticker limit
@@ -462,15 +483,46 @@ class TradingEngine:
                         action="buy",
                         count=count,
                         type="limit",
-                        no_price=100 - price_cents,
+                        no_price=price_cents,
                     )
                 order_id = result.get("order", {}).get("order_id", "")
                 status = result.get("order", {}).get("status", "pending")
                 self.log_event(
                     "live_trade",
-                    f"LIVE: {side.upper()} {count}x {ticker} @ {price_cents}c order_id={order_id}",
+                    f"LIVE: {side.upper()} {count}x {ticker} @ {price_cents}c order_id={order_id} status={status}",
                     strategy=strategy,
                 )
+
+                # Wait for fill confirmation (up to 30 seconds)
+                if status not in ("filled", "canceled", "error") and order_id:
+                    import asyncio as _asyncio
+                    for _attempt in range(6):
+                        await _asyncio.sleep(5)
+                        try:
+                            order_data = await client.get_order(order_id)
+                            order_info = order_data.get("order", order_data)
+                            status = order_info.get("status", status)
+                            fill_count = order_info.get("fill_count", 0)
+                            if status == "filled":
+                                count = fill_count or count
+                                cost = count * price_cents / 100.0
+                                fee = _kalshi_maker_fee(count, price_cents)
+                                self.log_event("live_trade", f"Order filled: {count}x @ {price_cents}c", strategy=strategy)
+                                break
+                            elif status in ("canceled", "error"):
+                                self.log_event("warning", f"Order {status}: {order_id}", strategy=strategy)
+                                return {"status": status, "reason": f"Order {status}"}
+                        except Exception:
+                            pass
+                    else:
+                        # Not filled after 30s — cancel and report timeout
+                        try:
+                            await client.cancel_order(order_id)
+                            self.log_event("warning", f"Order timeout, canceled: {order_id}", strategy=strategy)
+                        except Exception:
+                            pass
+                        return {"status": "timeout", "reason": "Order not filled within 30s"}
+
             except Exception as e:
                 self.log_event("error", f"Order failed: {e}", strategy=strategy)
                 return {"status": "error", "reason": str(e)}
@@ -560,16 +612,21 @@ class TradingEngine:
 
         trade = dict(row)
         side = trade["side"]
+        action = trade.get("action", "buy")
         count = trade["count"]
         cost = trade["cost"]
         fee = trade["fee"]
 
         # Calculate P&L
-        if result == side:
-            # Won: payout is $1 per contract minus cost minus fee
+        if action == "sell":
+            # Sell/exit trades: P&L already realized at exit.
+            # cost is negative (proceeds), so P&L = -cost - fee = proceeds - fee
+            pnl = -cost - fee
+        elif result == side:
+            # Buy trade won: payout is $1 per contract minus cost minus fee
             pnl = (count * 1.0) - cost - fee
         else:
-            # Lost: lose cost plus fee
+            # Buy trade lost: lose cost plus fee
             pnl = -cost - fee
 
         now = datetime.now(UTC).isoformat()
@@ -609,12 +666,28 @@ class TradingEngine:
 
         return {"trade_id": trade_id, "result": result, "pnl": pnl}
 
+    def get_unsettled_trades(self) -> list[dict[str, Any]]:
+        """Get all unsettled (filled) trades grouped by ticker for settlement checking."""
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, ticker, side, action, count, cost, fee, strategy
+            FROM trades
+            WHERE status = 'filled'
+            ORDER BY ticker
+        """)
+        trades = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return trades
+
     # ── Position Management ────────────────────────────────────────
 
     def get_open_positions(self) -> list[dict[str, Any]]:
         """
         Get all open (unsettled) positions, aggregated by ticker.
-        Each position includes entry price, contracts, cost basis, and max risk.
+        Properly nets buy and sell trades: net_contracts = buys - sells.
+        Only returns positions with net_contracts > 0.
         """
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
@@ -623,17 +696,18 @@ class TradingEngine:
         c.execute("""
             SELECT
                 ticker,
-                market_title,
+                MAX(CASE WHEN action = 'buy' THEN market_title ELSE '' END) as market_title,
                 side,
                 strategy,
-                signal_source,
-                SUM(count) as total_contracts,
-                SUM(cost) as total_cost,
+                MAX(signal_source) as signal_source,
+                SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END) as buy_contracts,
+                SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END) as sell_contracts,
+                SUM(CASE WHEN action = 'buy' THEN cost ELSE 0 END) as buy_cost,
+                SUM(CASE WHEN action = 'sell' THEN -cost ELSE 0 END) as sell_proceeds,
                 SUM(fee) as total_fees,
-                ROUND(SUM(cost * 100.0) / SUM(count), 1) as avg_entry_cents,
-                AVG(our_prob) as avg_our_prob,
-                AVG(kalshi_prob) as avg_entry_kalshi_prob,
-                AVG(edge) as avg_entry_edge,
+                AVG(CASE WHEN action = 'buy' THEN our_prob ELSE NULL END) as avg_our_prob,
+                AVG(CASE WHEN action = 'buy' THEN kalshi_prob ELSE NULL END) as avg_entry_kalshi_prob,
+                AVG(CASE WHEN action = 'buy' THEN edge ELSE NULL END) as avg_entry_edge,
                 MIN(timestamp) as first_entry,
                 MAX(timestamp) as last_entry,
                 COUNT(*) as num_fills,
@@ -641,24 +715,29 @@ class TradingEngine:
             FROM trades
             WHERE status = 'filled'
             GROUP BY ticker, side
+            HAVING SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END)
+                 - SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END) > 0
             ORDER BY MAX(timestamp) DESC
         """)
 
         positions = []
         for row in c.fetchall():
             r = dict(row)
-            total_cost = r["total_cost"]
+            contracts = r["buy_contracts"] - r["sell_contracts"]
+            buy_cost = r["buy_cost"]
             total_fees = r["total_fees"]
-            contracts = r["total_contracts"]
 
-            # Max risk = total cost + fees (if the position goes to zero)
-            max_risk = total_cost + total_fees
+            # Net cost = buy cost - sell proceeds
+            net_cost = buy_cost - r["sell_proceeds"]
 
-            # Max profit = (contracts * $1) - total_cost - fees (if position settles YES)
-            if r["side"] == "yes":
-                max_profit = (contracts * 1.0) - total_cost - total_fees
-            else:
-                max_profit = (contracts * 1.0) - total_cost - total_fees
+            # Avg entry based on buy trades only
+            avg_entry = round(buy_cost * 100.0 / r["buy_contracts"], 1) if r["buy_contracts"] > 0 else 0
+
+            # Max risk = net cost + fees
+            max_risk = net_cost + total_fees
+
+            # Max profit = (net contracts * $1) - net_cost - fees
+            max_profit = (contracts * 1.0) - net_cost - total_fees
 
             positions.append({
                 "ticker": r["ticker"],
@@ -667,14 +746,14 @@ class TradingEngine:
                 "strategy": r["strategy"],
                 "signal_source": r["signal_source"],
                 "contracts": contracts,
-                "avg_entry_cents": round(r["avg_entry_cents"]),
-                "total_cost": round(total_cost, 2),
+                "avg_entry_cents": round(avg_entry),
+                "total_cost": round(net_cost, 2),
                 "total_fees": round(total_fees, 2),
                 "max_risk": round(max_risk, 2),
                 "max_profit": round(max_profit, 2),
-                "avg_our_prob": round(r["avg_our_prob"], 4),
-                "avg_entry_kalshi_prob": round(r["avg_entry_kalshi_prob"], 4),
-                "avg_entry_edge": round(r["avg_entry_edge"], 4),
+                "avg_our_prob": round(r["avg_our_prob"] or 0, 4),
+                "avg_entry_kalshi_prob": round(r["avg_entry_kalshi_prob"] or 0, 4),
+                "avg_entry_edge": round(r["avg_entry_edge"] or 0, 4),
                 "first_entry": r["first_entry"],
                 "last_entry": r["last_entry"],
                 "num_fills": r["num_fills"],
@@ -735,17 +814,70 @@ class TradingEngine:
                 else:
                     result = await client.place_order(
                         ticker=ticker, side="no", action="sell",
-                        count=count, type="limit", no_price=100 - price_cents,
+                        count=count, type="limit", no_price=price_cents,
                     )
                 order_id = result.get("order", {}).get("order_id", "")
                 status = result.get("order", {}).get("status", "pending")
+
+                # Wait for fill confirmation (up to 30 seconds)
+                if status not in ("filled", "canceled", "error") and order_id:
+                    import asyncio as _asyncio
+                    for _attempt in range(6):
+                        await _asyncio.sleep(5)
+                        try:
+                            order_data = await client.get_order(order_id)
+                            order_info = order_data.get("order", order_data)
+                            status = order_info.get("status", status)
+                            if status == "filled":
+                                fill_count = order_info.get("fill_count", 0)
+                                if fill_count:
+                                    count = fill_count
+                                    cost = count * price_cents / 100.0
+                                    fee = _kalshi_maker_fee(count, price_cents)
+                                break
+                            elif status in ("canceled", "error"):
+                                self.log_event("warning", f"Exit order {status}: {order_id}", strategy=strategy)
+                                return {"status": status, "reason": f"Exit order {status}"}
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await client.cancel_order(order_id)
+                            self.log_event("warning", f"Exit order timeout, canceled: {order_id}", strategy=strategy)
+                        except Exception:
+                            pass
+                        return {"status": "timeout", "reason": "Exit order not filled within 30s"}
+
             except Exception as e:
                 self.log_event("error", f"Exit order failed: {e}", strategy=strategy)
                 return {"status": "error", "reason": str(e)}
 
+        # ── Compute realized P&L from entry price ──
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+
+        # Look up average entry price from buy trades for this ticker+side
+        c.execute(
+            """SELECT SUM(count) as total_count, SUM(cost) as total_cost, SUM(fee) as total_fees
+            FROM trades WHERE ticker = ? AND side = ? AND action = 'buy'
+            AND status = 'filled' AND paper_mode = ?""",
+            (ticker, side, 1 if self.paper_mode else 0),
+        )
+        entry_row = c.fetchone()
+        entry_cost_per_contract = 0.0
+        if entry_row and entry_row["total_count"] and entry_row["total_count"] > 0:
+            entry_cost_per_contract = entry_row["total_cost"] / entry_row["total_count"]
+
+        # P&L = (exit_price - entry_price) * count - exit_fee
+        exit_price_per = price_cents / 100.0
+        pnl = (exit_price_per - entry_cost_per_contract) * count - fee
+
+        now = datetime.now(UTC).isoformat()
+
         trade = {
             "id": trade_id,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": now,
             "strategy": strategy,
             "ticker": ticker,
             "market_title": "",
@@ -764,25 +896,54 @@ class TradingEngine:
             "edge": 0,
             "signal_source": "position_monitor",
             "notes": f"EXIT: {reason}",
+            "pnl": round(pnl, 4),
         }
 
-        conn = sqlite3.connect(str(DB_PATH))
-        c = conn.cursor()
         c.execute(
             """INSERT INTO trades
             (id, timestamp, strategy, ticker, market_title, side, action, count,
              price_cents, cost, fee, order_type, paper_mode, order_id, status,
-             our_prob, kalshi_prob, edge, signal_source, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             our_prob, kalshi_prob, edge, signal_source, notes,
+             result, pnl, settled_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                trade_id, trade["timestamp"], strategy, ticker, "",
+                trade_id, now, strategy, ticker, "",
                 side, sell_action, count, price_cents, -cost, fee,
                 "limit", 1 if self.paper_mode else 0, order_id, status,
                 0, 0, 0, "position_monitor", f"EXIT: {reason}",
+                "exit", round(pnl, 4), now,
             ),
         )
+
+        # Update daily P&L
+        date = now[:10]
+        c.execute(
+            """INSERT INTO daily_pnl (date, strategy, gross_pnl, fees, net_pnl, trades_count, wins, losses)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(date, strategy) DO UPDATE SET
+                gross_pnl = gross_pnl + ?,
+                fees = fees + ?,
+                net_pnl = net_pnl + ?,
+                trades_count = trades_count + 1,
+                wins = wins + ?,
+                losses = losses + ?""",
+            (
+                date, strategy,
+                round(pnl + fee, 4), fee, round(pnl, 4),
+                1 if pnl > 0 else 0, 1 if pnl <= 0 else 0,
+                round(pnl + fee, 4), fee, round(pnl, 4),
+                1 if pnl > 0 else 0, 1 if pnl <= 0 else 0,
+            ),
+        )
+
         conn.commit()
         conn.close()
+
+        self.log_event(
+            "exit_trade",
+            f"EXIT {side.upper()} {count}x {ticker} @ {price_cents}c | entry_avg={entry_cost_per_contract:.2f} P&L=${pnl:+.2f} | {reason}",
+            strategy=strategy,
+        )
 
         return trade
 
@@ -941,7 +1102,6 @@ class TradingEngine:
             "kill_switch": self.kill_switch,
             "bankroll": self.bankroll,
             "strategy_enabled": self.strategy_enabled,
-            "allocations": self.allocations,
             "daily_loss_limit": self.daily_loss_limit,
             "max_bet_size": self.max_bet_size,
             "today_pnl": self.get_today_pnl(),
@@ -957,8 +1117,14 @@ _engine: TradingEngine | None = None
 
 
 def get_trading_engine() -> TradingEngine:
-    """Get or create the singleton trading engine."""
+    """Get or create the singleton trading engine.
+    Reads from environment variables:
+      PAPER_MODE  - 'false' for live trading (default: 'true')
+      BANKROLL    - starting bankroll in dollars (default: '2000')
+    """
     global _engine
     if _engine is None:
-        _engine = TradingEngine(paper_mode=True)
+        paper_mode = os.environ.get("PAPER_MODE", "true").lower() != "false"
+        bankroll = float(os.environ.get("BANKROLL", "2000"))
+        _engine = TradingEngine(paper_mode=paper_mode, bankroll=bankroll)
     return _engine

@@ -11,7 +11,7 @@ services:
       - ./env/backend.env
     volumes:
       # Persist SQLite database across container restarts
-      - backend-data:/app/data
+      - backend-data:/app/app/data
       # Mount Kalshi private key (read-only)
       - ./env/kalshi.key:/app/kalshi.key:ro
     ports:

@@ -28,7 +28,25 @@ async def lifespan(app: FastAPI):
         )
         logger.info("Sentry initialized")
 
+    # Auto-start the Kalshi agent so all loops (monitor, weather, sports) run on boot
+    try:
+        from app.api.agent import get_kalshi_agent
+        agent = get_kalshi_agent()
+        await agent.start()
+        logger.info("Kalshi agent auto-started")
+    except Exception as e:
+        logger.error("Failed to auto-start agent", error=str(e))
+
     yield
+
+    # Gracefully stop agent on shutdown
+    try:
+        from app.api.agent import get_kalshi_agent
+        agent = get_kalshi_agent()
+        await agent.stop()
+        logger.info("Kalshi agent stopped")
+    except Exception:
+        pass
 
     logger.info("Shutting down PropsAI backend")
 

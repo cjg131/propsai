@@ -24,6 +24,10 @@ import {
   XCircle,
   Clock,
   Zap,
+  Bitcoin,
+  LineChart,
+  Landmark,
+  Dribbble,
 } from "lucide-react";
 import {
   useAgentStatus,
@@ -39,6 +43,10 @@ import {
   useToggleStrategy,
   useRunWeatherCycle,
   useRunSportsCycle,
+  useRunCryptoCycle,
+  useRunFinanceCycle,
+  useRunEconCycle,
+  useRunNbaPropsCycle,
 } from "@/lib/hooks/use-agent";
 
 function StatusBadge({ active, label }: { active: boolean; label: string }) {
@@ -94,6 +102,10 @@ export default function AgentPage() {
   const toggleStrategy = useToggleStrategy();
   const runWeather = useRunWeatherCycle();
   const runSports = useRunSportsCycle();
+  const runCrypto = useRunCryptoCycle();
+  const runFinance = useRunFinanceCycle();
+  const runEcon = useRunEconCycle();
+  const runNbaProps = useRunNbaPropsCycle();
 
   if (statusLoading) {
     return (
@@ -212,8 +224,52 @@ export default function AgentPage() {
               />
             </div>
 
+            <div className="flex items-center gap-2">
+              <Bitcoin className="h-4 w-4 text-yellow-500" />
+              <span className="text-sm">Crypto</span>
+              <Switch
+                checked={status?.strategy_enabled?.crypto ?? true}
+                onCheckedChange={(v) =>
+                  toggleStrategy.mutate({ strategy: "crypto", enabled: v })
+                }
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <LineChart className="h-4 w-4 text-blue-500" />
+              <span className="text-sm">Finance</span>
+              <Switch
+                checked={status?.strategy_enabled?.finance ?? true}
+                onCheckedChange={(v) =>
+                  toggleStrategy.mutate({ strategy: "finance", enabled: v })
+                }
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Landmark className="h-4 w-4 text-emerald-500" />
+              <span className="text-sm">Econ</span>
+              <Switch
+                checked={status?.strategy_enabled?.econ ?? true}
+                onCheckedChange={(v) =>
+                  toggleStrategy.mutate({ strategy: "econ", enabled: v })
+                }
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Dribbble className="h-4 w-4 text-orange-600" />
+              <span className="text-sm">NBA Props</span>
+              <Switch
+                checked={status?.strategy_enabled?.nba_props ?? true}
+                onCheckedChange={(v) =>
+                  toggleStrategy.mutate({ strategy: "nba_props", enabled: v })
+                }
+              />
+            </div>
+
             {/* Manual Triggers */}
-            <div className="flex items-center gap-2 border-l pl-4">
+            <div className="flex flex-wrap items-center gap-2 border-l pl-4">
               <Button
                 variant="outline"
                 size="sm"
@@ -221,7 +277,7 @@ export default function AgentPage() {
                 disabled={runWeather.isPending}
               >
                 <CloudSun className="h-3.5 w-3.5 mr-1" />
-                {runWeather.isPending ? "Running..." : "Run Weather"}
+                {runWeather.isPending ? "Running..." : "Weather"}
               </Button>
               <Button
                 variant="outline"
@@ -230,7 +286,43 @@ export default function AgentPage() {
                 disabled={runSports.isPending}
               >
                 <Trophy className="h-3.5 w-3.5 mr-1" />
-                {runSports.isPending ? "Running..." : "Run Sports"}
+                {runSports.isPending ? "Running..." : "Sports"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => runCrypto.mutate()}
+                disabled={runCrypto.isPending}
+              >
+                <Bitcoin className="h-3.5 w-3.5 mr-1" />
+                {runCrypto.isPending ? "Running..." : "Crypto"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => runFinance.mutate()}
+                disabled={runFinance.isPending}
+              >
+                <LineChart className="h-3.5 w-3.5 mr-1" />
+                {runFinance.isPending ? "Running..." : "Finance"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => runEcon.mutate()}
+                disabled={runEcon.isPending}
+              >
+                <Landmark className="h-3.5 w-3.5 mr-1" />
+                {runEcon.isPending ? "Running..." : "Econ"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => runNbaProps.mutate()}
+                disabled={runNbaProps.isPending}
+              >
+                <Dribbble className="h-3.5 w-3.5 mr-1" />
+                {runNbaProps.isPending ? "Running..." : "NBA Props"}
               </Button>
             </div>
           </div>
@@ -566,6 +658,7 @@ export default function AgentPage() {
                       <th className="pb-2 pr-3">Strategy</th>
                       <th className="pb-2 pr-3">Market</th>
                       <th className="pb-2 pr-3">Side</th>
+                      <th className="pb-2 pr-3">Action</th>
                       <th className="pb-2 pr-3 text-right">Size</th>
                       <th className="pb-2 pr-3 text-right">Price</th>
                       <th className="pb-2 pr-3 text-right">Edge</th>
@@ -593,7 +686,7 @@ export default function AgentPage() {
                           </Badge>
                         </td>
                         <td
-                          className="py-2 pr-3 max-w-[200px] truncate"
+                          className="py-2 pr-3 max-w-[350px] truncate"
                           title={trade.market_title}
                         >
                           {trade.market_title || trade.ticker}
@@ -608,6 +701,18 @@ export default function AgentPage() {
                             }
                           >
                             {trade.side.toUpperCase()}
+                          </Badge>
+                        </td>
+                        <td className="py-2 pr-3">
+                          <Badge
+                            variant="outline"
+                            className={
+                              trade.action === "sell"
+                                ? "bg-orange-500/10 text-orange-600 border-orange-500/30"
+                                : "bg-blue-500/10 text-blue-600 border-blue-500/30"
+                            }
+                          >
+                            {(trade.action || "buy").toUpperCase()}
                           </Badge>
                         </td>
                         <td className="py-2 pr-3 text-right font-mono">
@@ -695,7 +800,7 @@ export default function AgentPage() {
                           </Badge>
                         </td>
                         <td
-                          className="py-2 pr-3 max-w-[200px] truncate"
+                          className="py-2 pr-3 max-w-[350px] truncate"
                           title={sig.market_title}
                         >
                           {sig.market_title || sig.ticker}

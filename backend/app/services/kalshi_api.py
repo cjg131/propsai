@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 import time
@@ -104,11 +105,17 @@ def _sign_request(private_key: rsa.RSAPrivateKey, timestamp_ms: str, method: str
 class KalshiClient:
     """Client for the Kalshi prediction market API."""
 
+    # Kalshi rate limit: ~10 req/s sustained.  Keep headroom.
+    _REQUEST_DELAY = 0.15  # seconds between requests (~6 req/s)
+    _MAX_CONCURRENT = 2    # max parallel in-flight requests
+
     def __init__(self) -> None:
         settings = get_settings()
         self.api_key_id = settings.kalshi_api_key_id
         self.private_key: rsa.RSAPrivateKey | None = None
         self._http = httpx.AsyncClient(base_url=BASE_URL, timeout=30.0)
+        self._semaphore = asyncio.Semaphore(self._MAX_CONCURRENT)
+        self._last_request_time: float = 0.0
 
         if self.api_key_id and settings.kalshi_private_key_path:
             try:
@@ -131,26 +138,40 @@ class KalshiClient:
             "KALSHI-ACCESS-SIGNATURE": signature,
         }
 
+    async def _throttle(self) -> None:
+        """Enforce minimum delay between requests to avoid 429s."""
+        now = time.monotonic()
+        elapsed = now - self._last_request_time
+        if elapsed < self._REQUEST_DELAY:
+            await asyncio.sleep(self._REQUEST_DELAY - elapsed)
+        self._last_request_time = time.monotonic()
+
     async def _get(self, path: str, params: dict[str, Any] | None = None, auth: bool = False) -> dict[str, Any]:
         """Make a GET request to the Kalshi API."""
-        headers = self._auth_headers("GET", path.split("?")[0]) if auth else {}
-        resp = await self._http.get(path, params=params, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        async with self._semaphore:
+            await self._throttle()
+            headers = self._auth_headers("GET", path.split("?")[0]) if auth else {}
+            resp = await self._http.get(path, params=params, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
     async def _post(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any]:
         """Make an authenticated POST request."""
-        headers = self._auth_headers("POST", path)
-        resp = await self._http.post(path, json=json_data, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        async with self._semaphore:
+            await self._throttle()
+            headers = self._auth_headers("POST", path)
+            resp = await self._http.post(path, json=json_data, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
     async def _delete(self, path: str) -> dict[str, Any]:
         """Make an authenticated DELETE request."""
-        headers = self._auth_headers("DELETE", path)
-        resp = await self._http.delete(path, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        async with self._semaphore:
+            await self._throttle()
+            headers = self._auth_headers("DELETE", path)
+            resp = await self._http.delete(path, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
     # ── Public endpoints (no auth) ──────────────────────────────────
 

@@ -329,6 +329,18 @@ class TradingEngine:
             if ticker_exposure + cost > self.max_position_per_ticker:
                 return False, f"Ticker {ticker} exposure ${ticker_exposure + cost:.2f} would exceed max ${self.max_position_per_ticker:.2f}"
 
+        # Check per-strategy total exposure cap
+        strategy_exposure = self.get_total_exposure(strategy=strategy)
+        max_strategy = self.bankroll * self.max_strategy_exposure_pct
+        if strategy_exposure + cost > max_strategy:
+            return False, f"Strategy '{strategy}' exposure ${strategy_exposure + cost:.2f} would exceed {self.max_strategy_exposure_pct*100:.0f}% of bankroll (${max_strategy:.2f})"
+
+        # Check per-strategy cycle deployment cap
+        cycle_deployed = self._cycle_deployed.get(strategy, 0.0)
+        max_cycle = self.bankroll * self.max_strategy_cycle_pct
+        if cycle_deployed + cost > max_cycle:
+            return False, f"Strategy '{strategy}' cycle cap: ${cycle_deployed + cost:.2f} would exceed ${max_cycle:.2f}/cycle"
+
         # Check daily loss limit
         today_pnl = self.get_today_pnl()
         if today_pnl < -self.daily_loss_limit:

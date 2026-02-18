@@ -52,19 +52,22 @@ class TradingEngine:
         max_bet_pct: float = 0.04,  # 4% of bankroll per bet
         max_position_per_ticker: float | None = None,
         max_total_exposure_pct: float = 1.00,  # Allow full bankroll deployment
-        first_cycle_exposure_pct: float = 0.50,  # First cycle: only deploy 50% to spread across best bets
+        max_strategy_exposure_pct: float = 0.40,  # Soft cap: 40% of bankroll per strategy
+        max_strategy_cycle_pct: float = 0.25,  # Max 25% of bankroll deployed per strategy per cycle
     ):
         self.bankroll = bankroll
         self.paper_mode = paper_mode
         self.max_bet_pct = max_bet_pct
         self.max_total_exposure_pct = max_total_exposure_pct
-        self.first_cycle_exposure_pct = first_cycle_exposure_pct
+        self.max_strategy_exposure_pct = max_strategy_exposure_pct
+        self.max_strategy_cycle_pct = max_strategy_cycle_pct
         # Scale risk limits from bankroll (override with explicit values if provided)
         self.daily_loss_limit = daily_loss_limit if daily_loss_limit is not None else bankroll * 0.20
         self.max_bet_size = max_bet_size if max_bet_size is not None else bankroll * 0.04
-        self.max_position_per_ticker = max_position_per_ticker if max_position_per_ticker is not None else bankroll * 0.07
-        self._first_cycle_done = False
+        self.max_position_per_ticker = max_position_per_ticker if max_position_per_ticker is not None else bankroll * 0.10
         self.kill_switch = False
+        # Track per-strategy deployment within current cycle
+        self._cycle_deployed: dict[str, float] = {}
 
         # Strategy-level toggles
         self.strategy_enabled = {
@@ -254,27 +257,41 @@ class TradingEngine:
         conn.close()
         return result
 
-    def get_remaining_capital(self) -> float:
-        """Get remaining deployable capital.
+    def get_remaining_capital(self, strategy: str = "") -> float:
+        """Get remaining deployable capital, respecting per-strategy caps.
         
-        First cycle throttle: if no trades have been placed yet, limit to
-        first_cycle_exposure_pct so the bot spreads across the best opportunities.
-        After the first cycle, allow full bankroll deployment.
+        Limits:
+          1. Global: total exposure <= bankroll * max_total_exposure_pct
+          2. Per-strategy total: strategy exposure <= bankroll * max_strategy_exposure_pct
+          3. Per-strategy cycle: deployment this cycle <= bankroll * max_strategy_cycle_pct
+        Returns the minimum of all applicable limits.
         """
         total_exposure = self.get_total_exposure()
-        
-        # First cycle: limit deployment so we don't blow the whole bankroll
-        # in one burst. After trades exist, remove the throttle.
-        if not self._first_cycle_done:
-            trade_count = self._get_trade_count()
-            if trade_count > 0:
-                self._first_cycle_done = True
-            else:
-                max_deployable = self.bankroll * self.first_cycle_exposure_pct
-                return max(0, max_deployable - total_exposure)
-        
         max_deployable = self.bankroll * self.max_total_exposure_pct
-        return max(0, max_deployable - total_exposure)
+        remaining_global = max(0, max_deployable - total_exposure)
+        
+        if not strategy:
+            return remaining_global
+        
+        # Per-strategy total exposure cap (soft)
+        strategy_exposure = self.get_total_exposure(strategy=strategy)
+        max_strategy = self.bankroll * self.max_strategy_exposure_pct
+        remaining_strategy = max(0, max_strategy - strategy_exposure)
+        
+        # Per-strategy cycle cap (prevents one cycle from deploying too much)
+        cycle_deployed = self._cycle_deployed.get(strategy, 0.0)
+        max_cycle = self.bankroll * self.max_strategy_cycle_pct
+        remaining_cycle = max(0, max_cycle - cycle_deployed)
+        
+        return min(remaining_global, remaining_strategy, remaining_cycle)
+    
+    def start_cycle(self, strategy: str) -> None:
+        """Call at the start of each strategy cycle to reset cycle deployment tracking."""
+        self._cycle_deployed[strategy] = 0.0
+    
+    def _record_cycle_deployment(self, strategy: str, amount: float) -> None:
+        """Track how much capital was deployed in the current cycle for a strategy."""
+        self._cycle_deployed[strategy] = self._cycle_deployed.get(strategy, 0.0) + amount
     
     def _get_trade_count(self) -> int:
         """Get total number of buy trades placed."""
@@ -339,7 +356,7 @@ class TradingEngine:
         kelly_fraction = edge / (1 - p)
         quarter_kelly = kelly_fraction * 0.25 * confidence
 
-        remaining = self.get_remaining_capital()
+        remaining = self.get_remaining_capital(strategy=strategy)
 
         # Cap by remaining capital, Kelly, and bankroll percentage
         max_dollars = min(
@@ -526,6 +543,9 @@ class TradingEngine:
             except Exception as e:
                 self.log_event("error", f"Order failed: {e}", strategy=strategy)
                 return {"status": "error", "reason": str(e)}
+
+        # Track cycle deployment for per-strategy caps
+        self._record_cycle_deployment(strategy, cost + fee)
 
         # Record trade
         trade = {

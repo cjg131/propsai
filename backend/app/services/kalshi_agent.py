@@ -287,6 +287,7 @@ class KalshiAgent:
         5. Execute trades (paper or live)
         """
         self.engine.log_event("info", "Weather cycle starting", strategy="weather")
+        self.engine.start_cycle("weather")
         results = []
 
         if not self.engine.strategy_enabled.get("weather", True):
@@ -340,22 +341,55 @@ class KalshiAgent:
                     strategy="weather",
                 )
 
-                # Evaluate each market
+                # Evaluate each market (collect candidates, don't trade yet)
                 for market in city_markets:
-                    signal = await self._evaluate_weather_market(market, forecasts)
-                    if signal:
-                        results.append(signal)
+                    candidate = await self._evaluate_weather_market(market, forecasts)
+                    if candidate:
+                        results.append(candidate)
 
         except Exception as e:
             self.engine.log_event("error", f"Weather cycle failed: {e}", strategy="weather")
             logger.error("Weather cycle error", error=str(e))
 
+        # Rank by edge * confidence and only trade top 10 per cycle
+        MAX_WEATHER_TRADES_PER_CYCLE = 10
+        if len(results) > MAX_WEATHER_TRADES_PER_CYCLE:
+            results.sort(key=lambda s: s.get("edge", 0) * s.get("confidence", 0), reverse=True)
+            skipped = len(results) - MAX_WEATHER_TRADES_PER_CYCLE
+            results = results[:MAX_WEATHER_TRADES_PER_CYCLE]
+            self.engine.log_event(
+                "info",
+                f"Weather: ranked {skipped + MAX_WEATHER_TRADES_PER_CYCLE} candidates, trading top {MAX_WEATHER_TRADES_PER_CYCLE} (skipped {skipped})",
+                strategy="weather",
+            )
+
+        # Execute trades for the top candidates
+        traded = []
+        for candidate in results:
+            if candidate.get("action") == "skip":
+                traded.append(candidate)
+                continue
+            trade = await self.engine.execute_trade(
+                strategy="weather",
+                ticker=candidate["ticker"],
+                side=candidate["side"],
+                count=candidate["count"],
+                price_cents=candidate["price_cents"],
+                our_prob=candidate["our_prob"],
+                kalshi_prob=candidate["kalshi_prob"],
+                market_title=candidate.get("title", ""),
+                signal_source="weather_consensus",
+                signal_id=candidate.get("signal_id", ""),
+            )
+            candidate["trade"] = trade
+            traded.append(candidate)
+
         self.engine.log_event(
             "info",
-            f"Weather cycle complete: {len(results)} signals",
+            f"Weather cycle complete: {len(traded)} signals",
             strategy="weather",
         )
-        return results
+        return traded
 
     async def _evaluate_weather_market(
         self,
@@ -468,25 +502,14 @@ class KalshiAgent:
         if count <= 0:
             return {**signal, "ticker": market["ticker"], "action": "skip", "reason": "position_size_zero"}
 
-        # Execute trade (DCA allowed — per-ticker limit handles overexposure)
-        trade = await self.engine.execute_trade(
-            strategy="weather",
-            ticker=market["ticker"],
-            side=signal["side"],
-            count=count,
-            price_cents=price_cents,
-            our_prob=signal["our_prob"],
-            kalshi_prob=signal["kalshi_prob"],
-            market_title=market["title"],
-            signal_source="weather_consensus",
-            signal_id=signal_id,
-        )
-
+        # Return candidate for ranking (execution happens in the cycle)
         return {
             **signal,
             "ticker": market["ticker"],
             "title": market["title"],
-            "trade": trade,
+            "count": count,
+            "price_cents": price_cents,
+            "signal_id": signal_id,
         }
 
     # ── Cross-Market Sports Strategy ───────────────────────────────
@@ -501,6 +524,7 @@ class KalshiAgent:
         5. Also scan parlays for additional opportunities
         """
         self.engine.log_event("info", "Sports cycle starting", strategy="sports")
+        self.engine.start_cycle("sports")
         results: list[dict[str, Any]] = []
 
         if not self.engine.strategy_enabled.get("sports", True):
@@ -1024,6 +1048,7 @@ class KalshiAgent:
         4. Execute trades where edge > 3%
         """
         self.engine.log_event("info", "Crypto cycle starting", strategy="crypto")
+        self.engine.start_cycle("crypto")
         results: list[dict[str, Any]] = []
 
         if not self.engine.strategy_enabled.get("crypto", True):
@@ -1271,6 +1296,7 @@ class KalshiAgent:
         4. Execute trades where edge > 3%
         """
         self.engine.log_event("info", "Finance cycle starting", strategy="finance")
+        self.engine.start_cycle("finance")
         results: list[dict[str, Any]] = []
 
         if not self.engine.strategy_enabled.get("finance", True):
@@ -1456,6 +1482,7 @@ class KalshiAgent:
         4. Execute trades where edge > 3%
         """
         self.engine.log_event("info", "Econ cycle starting", strategy="econ")
+        self.engine.start_cycle("econ")
         results: list[dict[str, Any]] = []
 
         if not self.engine.strategy_enabled.get("econ", True):
@@ -1669,6 +1696,7 @@ class KalshiAgent:
         4. Compare to Kalshi prices and trade on edge > 3%
         """
         self.engine.log_event("info", "NBA props cycle starting", strategy="nba_props")
+        self.engine.start_cycle("nba_props")
         results: list[dict[str, Any]] = []
 
         if not self.engine.strategy_enabled.get("nba_props", True):
@@ -2276,6 +2304,26 @@ class KalshiAgent:
         self.engine.log_event("info", "Agent starting")
         logger.info("Kalshi agent starting", paper_mode=self.engine.paper_mode)
 
+        # Live mode: verify Kalshi account balance matches BANKROLL
+        if not self.engine.paper_mode:
+            try:
+                balance_data = await self.kalshi._get("/portfolio/balance")
+                balance_cents = balance_data.get("balance", 0)
+                balance_dollars = balance_cents / 100.0
+                self.engine.log_event(
+                    "info",
+                    f"Kalshi balance: ${balance_dollars:.2f} (BANKROLL=${self.engine.bankroll:.2f})",
+                )
+                if balance_dollars < self.engine.bankroll * 0.5:
+                    self.engine.log_event(
+                        "warning",
+                        f"Kalshi balance ${balance_dollars:.2f} is less than 50% of BANKROLL ${self.engine.bankroll:.2f}. "
+                        f"Adjusting bankroll to match actual balance.",
+                    )
+                    self.engine.bankroll = balance_dollars
+            except Exception as e:
+                self.engine.log_event("warning", f"Could not verify Kalshi balance: {e}")
+
         # Start WebSocket connection for real-time price updates
         try:
             ws_ok = await self.ws.connect()
@@ -2366,12 +2414,24 @@ class KalshiAgent:
 
             await asyncio.sleep(15 * 60)
 
+    @staticmethod
+    def _is_us_market_hours() -> bool:
+        """Check if US stock markets are open (9:00am-5:00pm ET, weekdays)."""
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:  # Saturday/Sunday
+            return False
+        return 9 <= now_et.hour < 17
+
     async def _finance_loop(self) -> None:
-        """Finance strategy loop — runs every 10 minutes (daily markets, no rush)."""
+        """Finance strategy loop — runs every 10 minutes during US market hours only."""
         while self._running:
             try:
                 if not self.engine.kill_switch:
-                    await self.run_finance_cycle()
+                    if self._is_us_market_hours():
+                        await self.run_finance_cycle()
+                    else:
+                        logger.debug("Finance loop: outside market hours, skipping")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -2381,11 +2441,14 @@ class KalshiAgent:
             await asyncio.sleep(10 * 60)
 
     async def _econ_loop(self) -> None:
-        """Econ strategy loop — runs every 30 minutes (slow-moving data)."""
+        """Econ strategy loop — runs every 30 minutes during US business hours only."""
         while self._running:
             try:
                 if not self.engine.kill_switch:
-                    await self.run_econ_cycle()
+                    if self._is_us_market_hours():
+                        await self.run_econ_cycle()
+                    else:
+                        logger.debug("Econ loop: outside market hours, skipping")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -2396,11 +2459,18 @@ class KalshiAgent:
 
     async def _monitor_loop(self) -> None:
         """Position monitor + settlement loop — runs every 2 minutes."""
+        last_summary_date = ""
         while self._running:
             try:
                 if not self.engine.kill_switch:
                     await self.run_monitor_cycle()
                     await self.run_settlement_cycle()
+
+                    # Daily summary at midnight UTC
+                    today = datetime.now(UTC).strftime("%Y-%m-%d")
+                    if today != last_summary_date:
+                        last_summary_date = today
+                        self._log_daily_summary()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -2408,6 +2478,39 @@ class KalshiAgent:
                 logger.error("Monitor loop error", error=str(e))
 
             await asyncio.sleep(2 * 60)
+
+    def _log_daily_summary(self) -> None:
+        """Log a daily performance summary."""
+        import sqlite3 as _sqlite3
+        from app.services.trading_engine import DB_PATH
+        try:
+            yesterday = (datetime.now(UTC) - __import__("datetime").timedelta(days=1)).strftime("%Y-%m-%d")
+            conn = _sqlite3.connect(str(DB_PATH))
+            c = conn.cursor()
+            c.execute(
+                "SELECT strategy, COUNT(*), COALESCE(SUM(cost+fee),0) FROM trades WHERE action='buy' AND timestamp LIKE ? GROUP BY strategy",
+                (f"{yesterday}%",),
+            )
+            trades_by_strat = {r[0]: (r[1], r[2]) for r in c.fetchall()}
+            c.execute(
+                "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='settled' AND settled_at LIKE ?",
+                (f"{yesterday}%",),
+            )
+            settled_pnl = c.fetchone()[0]
+            conn.close()
+
+            total_trades = sum(v[0] for v in trades_by_strat.values())
+            total_deployed = sum(v[1] for v in trades_by_strat.values())
+            strat_summary = ", ".join(f"{k}={v[0]}/${v[1]:.0f}" for k, v in trades_by_strat.items())
+
+            self.engine.log_event(
+                "daily_summary",
+                f"Daily summary {yesterday}: {total_trades} trades, ${total_deployed:.2f} deployed, "
+                f"settled P&L=${settled_pnl:+.2f} | {strat_summary}",
+                strategy="monitor",
+            )
+        except Exception as e:
+            logger.debug("Daily summary failed", error=str(e))
 
     def get_status(self) -> dict[str, Any]:
         """Get agent status."""

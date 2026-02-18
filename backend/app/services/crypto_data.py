@@ -301,12 +301,23 @@ class CryptoDataService:
         mean_reversion = self._compute_mean_reversion(candles_1m)
         vol_multiplier = self._compute_volatility_signal(candles_5m, kalshi_price)
 
+        # Use dynamic weights from signal scorer if available, else hardcoded
+        try:
+            from app.services.signal_scorer import get_signal_scorer
+            dw = get_signal_scorer().get_dynamic_weights("crypto")
+        except Exception:
+            dw = {}
+        w_mom5 = dw.get("momentum_5m", WEIGHT_MOMENTUM_5M)
+        w_mom1 = dw.get("momentum_1m", WEIGHT_MOMENTUM_1M)
+        w_fund = dw.get("funding_signal", WEIGHT_FUNDING)
+        w_mr = dw.get("mean_reversion", WEIGHT_MEAN_REVERSION)
+
         # Weighted composite signal: [-1, 1] where positive = bullish
         raw_signal = (
-            WEIGHT_MOMENTUM_5M * momentum_5m
-            + WEIGHT_MOMENTUM_1M * momentum_1m
-            + WEIGHT_FUNDING * funding_signal
-            + WEIGHT_MEAN_REVERSION * mean_reversion
+            w_mom5 * momentum_5m
+            + w_mom1 * momentum_1m
+            + w_fund * funding_signal
+            + w_mr * mean_reversion
         )
 
         # Convert to probability: signal of 0 → 50%, signal of 1 → ~70%, -1 → ~30%

@@ -760,11 +760,35 @@ class KalshiAgent:
                 self.engine.log_event("info", "No odds data available", strategy="sports")
                 return results
 
+            # ── Step 2b: Fetch breaking injury news (Twitter/RSS) ────────
+            # Catches injuries reported AFTER the sharp line was set but before
+            # Kalshi reprices. Reduces confidence on affected game markets.
+            breaking_injury_texts: list[str] = []
+            try:
+                from app.services.injury_scraper import get_injury_scraper
+                _inj = get_injury_scraper()
+                inj_news = await _inj.get_all_injury_news()
+                breaking_injury_texts = [
+                    item.get("text", "") or item.get("title", "") or item.get("summary", "")
+                    for item in inj_news.get("twitter", []) + inj_news.get("rss", [])
+                ]
+                if breaking_injury_texts:
+                    self.engine.log_event(
+                        "info",
+                        f"Sports: {len(breaking_injury_texts)} breaking injury items from Twitter/RSS",
+                        strategy="sports",
+                    )
+            except Exception as e:
+                logger.debug("Breaking injury fetch failed", error=str(e))
+
             # ── Step 3: Evaluate single-game markets against sharp lines ──
             single_stats = {"matched": 0, "no_odds": 0, "cheap_skip": 0, "no_team_match": 0, "no_sharp": 0, "no_edge": 0}
             for market in single_markets:
                 try:
-                    signal = await self._evaluate_single_game(market, odds_by_sport, single_stats, ref_signals)
+                    signal = await self._evaluate_single_game(
+                        market, odds_by_sport, single_stats, ref_signals,
+                        breaking_injury_texts=breaking_injury_texts,
+                    )
                     if signal:
                         results.append(signal)
                 except Exception as e:
@@ -814,6 +838,7 @@ class KalshiAgent:
         odds_by_sport: dict[str, list[dict[str, Any]]],
         stats: dict[str, int],
         ref_signals: dict[str, Any] | None = None,
+        breaking_injury_texts: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """
         Evaluate a single-game Kalshi market against sharp Odds API lines.
@@ -1048,9 +1073,31 @@ class KalshiAgent:
                     confidence = max(0.60, confidence - ref_strength * 0.08)
                     ref_detail = f" ref={ref_direction}({ref_point_adj:+.1f}pts,str={ref_strength:.2f}) ✗"
 
+        # ── Breaking injury check (Twitter/RSS) ────────────────────────
+        # If a team name from this market appears in a breaking injury report,
+        # reduce confidence — the sharp line may not yet reflect the news.
+        injury_detail = ""
+        if breaking_injury_texts and matched_event:
+            home = matched_event.get("home_team", "").lower()
+            away = matched_event.get("away_team", "").lower()
+            injury_keywords = ["out", "ruled out", "injured", "sidelined", "doubtful",
+                               "questionable", "day-to-day", "miss", "surgery", "won't play"]
+            for text in breaking_injury_texts:
+                text_lower = text.lower()
+                has_injury = any(kw in text_lower for kw in injury_keywords)
+                team_mentioned = (
+                    any(w in text_lower for w in home.split() if len(w) >= 4) or
+                    any(w in text_lower for w in away.split() if len(w) >= 4)
+                )
+                if has_injury and team_mentioned:
+                    confidence = max(0.50, confidence - 0.20)
+                    injury_detail = " breaking_injury=⚠️"
+                    logger.debug(f"Breaking injury penalty applied for {ticker}: {text[:80]}")
+                    break
+
         self.engine.log_event(
             "info",
-            f"Single-game edge: {ticker} {side} edge={edge:.1%} (sharp={sharp_prob:.1%} vs kalshi={kalshi_implied:.1%}) {match_desc}{ref_detail} | {title[:60]}",
+            f"Single-game edge: {ticker} {side} edge={edge:.1%} (sharp={sharp_prob:.1%} vs kalshi={kalshi_implied:.1%}) {match_desc}{ref_detail}{injury_detail} | {title[:60]}",
             strategy="sports",
         )
 
@@ -1064,7 +1111,7 @@ class KalshiAgent:
             market_title=title,
             confidence=confidence,
             signal_source="sharp_single_game",
-            details=f"sport={odds_sport} type={kalshi_type} match={match_desc} edge={edge:.4f}{ref_detail}",
+            details=f"sport={odds_sport} type={kalshi_type} match={match_desc} edge={edge:.4f}{ref_detail}{injury_detail}",
         )
 
         # Return candidate for global ranking (execution happens later)
@@ -1399,6 +1446,23 @@ class KalshiAgent:
         if price_cents < 10:
             return None
 
+        # ── MVP Thesis Gate: funding rate must not contradict momentum ──
+        # Funding rate is the institutional directional bias signal.
+        # When it directly opposes momentum, the trade has no thesis.
+        funding_s = signal.get("funding_signal", 0)
+        momentum_5m = signal.get("momentum_5m", 0)
+        FUNDING_CONTRADICTION_THRESHOLD = 0.20  # both signals must be meaningful
+        MOMENTUM_CONTRADICTION_THRESHOLD = 0.20
+        if (abs(funding_s) > FUNDING_CONTRADICTION_THRESHOLD
+                and abs(momentum_5m) > MOMENTUM_CONTRADICTION_THRESHOLD
+                and funding_s * momentum_5m < 0):
+            # Funding and momentum point opposite directions — no thesis
+            logger.debug(
+                f"Crypto thesis rejected: funding vs momentum contradiction for {coin} "
+                f"— funding={funding_s:.3f} momentum_5m={momentum_5m:.3f} side={side}"
+            )
+            return None
+
         # Polymarket cross-reference: boost confidence if prices diverge
         poly_details = ""
         try:
@@ -1609,6 +1673,53 @@ class KalshiAgent:
             prob_details = f"index={index} p_up={p_up:.4f} intraday={signal['intraday_momentum']:.4f} " \
                            f"futures={signal['futures_signal']:.4f} vix={signal['vix_signal']:.4f} " \
                            f"ma={signal['ma_signal']:.4f}"
+
+            # ── MVP Thesis Gate: require ≥3 of 5 signals aligned ────────
+            # A single momentum reading is noise. Three aligned signals is a thesis.
+            trade_direction = 1 if is_up_market else -1  # +1 = bullish bet, -1 = bearish bet
+            intraday_s = signal.get("intraday_momentum", 0)
+            futures_s = signal.get("futures_signal", 0)
+            vix_s = signal.get("vix_signal", 0)
+            ma_s = signal.get("ma_signal", 0)
+            news_s = signal.get("news_sentiment", 0)
+            vix_level = signal.get("vix_level") or 20.0
+
+            # Hard reject: extreme volatility (VIX > 35) — daily close unpredictable
+            if vix_level > 35:
+                logger.debug("Finance thesis rejected: VIX > 35", ticker=ticker, vix=vix_level)
+                return None
+
+            # Hard reject: futures and intraday momentum directly contradict each other
+            # (both must be non-trivial and pointing opposite directions)
+            if abs(intraday_s) > 0.15 and abs(futures_s) > 0.15 and (intraday_s * futures_s < 0):
+                logger.debug("Finance thesis rejected: futures vs intraday contradiction",
+                             ticker=ticker, intraday=intraday_s, futures=futures_s)
+                return None
+
+            # Count signals aligned with trade direction (threshold: signal > 0.1 in direction)
+            ALIGN_THRESHOLD = 0.10
+            aligned = 0
+            if intraday_s * trade_direction > ALIGN_THRESHOLD:
+                aligned += 1
+            if futures_s * trade_direction > ALIGN_THRESHOLD:
+                aligned += 1
+            if vix_s * trade_direction > ALIGN_THRESHOLD:
+                aligned += 1
+            if ma_s * trade_direction > ALIGN_THRESHOLD:
+                aligned += 1
+            if news_s * trade_direction > 0.05:  # news sentiment threshold is lower
+                aligned += 1
+
+            if aligned < 3:
+                logger.debug(
+                    f"Finance thesis rejected: only {aligned}/5 signals aligned for {ticker} "
+                    f"({'UP' if is_up_market else 'DOWN'}) — "
+                    f"intraday={intraday_s:.2f} futures={futures_s:.2f} vix={vix_s:.2f} "
+                    f"ma={ma_s:.2f} news={news_s:.2f}"
+                )
+                return None
+
+            prob_details += f" aligned={aligned}/5 vix_level={vix_level:.1f}"
 
         # Calculate edge
         kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0

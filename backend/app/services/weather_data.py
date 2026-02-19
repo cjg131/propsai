@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -17,26 +18,26 @@ logger = get_logger(__name__)
 
 # Kalshi weather cities → NWS grid points and coordinates
 CITY_CONFIGS = {
-    "NYC": {"lat": 40.7128, "lon": -74.0060, "nws_office": "OKX", "nws_grid": "33,37", "name": "New York"},
-    "MIA": {"lat": 25.7617, "lon": -80.1918, "nws_office": "MFL", "nws_grid": "110,50", "name": "Miami"},
-    "LAX": {"lat": 34.0522, "lon": -118.2437, "nws_office": "LOX", "nws_grid": "154,44", "name": "Los Angeles"},
-    "CHI": {"lat": 41.8781, "lon": -87.6298, "nws_office": "LOT", "nws_grid": "76,73", "name": "Chicago"},
-    "AUS": {"lat": 30.2672, "lon": -97.7431, "nws_office": "EWX", "nws_grid": "156,91", "name": "Austin"},
-    "DFW": {"lat": 32.7767, "lon": -96.7970, "nws_office": "FWD", "nws_grid": "80,103", "name": "Dallas"},
-    "PHL": {"lat": 39.9526, "lon": -75.1652, "nws_office": "PHI", "nws_grid": "49,75", "name": "Philadelphia"},
-    "DEN": {"lat": 39.7392, "lon": -104.9903, "nws_office": "BOU", "nws_grid": "62,60", "name": "Denver"},
-    "SEA": {"lat": 47.6062, "lon": -122.3321, "nws_office": "SEW", "nws_grid": "124,67", "name": "Seattle"},
-    "SFO": {"lat": 37.7749, "lon": -122.4194, "nws_office": "MTR", "nws_grid": "85,105", "name": "San Francisco"},
-    "DCA": {"lat": 38.9072, "lon": -77.0369, "nws_office": "LWX", "nws_grid": "97,71", "name": "Washington DC"},
-    "SLC": {"lat": 40.7608, "lon": -111.8910, "nws_office": "SLC", "nws_grid": "97,175", "name": "Salt Lake City"},
-    "ATL": {"lat": 33.7490, "lon": -84.3880, "nws_office": "FFC", "nws_grid": "50,86", "name": "Atlanta"},
-    "HOU": {"lat": 29.7604, "lon": -95.3698, "nws_office": "HGX", "nws_grid": "65,97", "name": "Houston"},
-    "BOS": {"lat": 42.3601, "lon": -71.0589, "nws_office": "BOX", "nws_grid": "71,90", "name": "Boston"},
-    "LAS": {"lat": 36.1699, "lon": -115.1398, "nws_office": "VEF", "nws_grid": "126,97", "name": "Las Vegas"},
-    "PHX": {"lat": 33.4484, "lon": -112.0740, "nws_office": "PSR", "nws_grid": "159,56", "name": "Phoenix"},
-    "MSP": {"lat": 44.9778, "lon": -93.2650, "nws_office": "MPX", "nws_grid": "107,71", "name": "Minneapolis"},
-    "NOL": {"lat": 29.9511, "lon": -90.0715, "nws_office": "LIX", "nws_grid": "76,76", "name": "New Orleans"},
-    "DET": {"lat": 42.3314, "lon": -83.0458, "nws_office": "DTX", "nws_grid": "65,33", "name": "Detroit"},
+    "NYC": {"lat": 40.7128, "lon": -74.0060, "nws_office": "OKX", "nws_grid": "33,37", "name": "New York", "tz": "America/New_York"},
+    "MIA": {"lat": 25.7617, "lon": -80.1918, "nws_office": "MFL", "nws_grid": "110,50", "name": "Miami", "tz": "America/New_York"},
+    "LAX": {"lat": 34.0522, "lon": -118.2437, "nws_office": "LOX", "nws_grid": "154,44", "name": "Los Angeles", "tz": "America/Los_Angeles"},
+    "CHI": {"lat": 41.8781, "lon": -87.6298, "nws_office": "LOT", "nws_grid": "76,73", "name": "Chicago", "tz": "America/Chicago"},
+    "AUS": {"lat": 30.2672, "lon": -97.7431, "nws_office": "EWX", "nws_grid": "156,91", "name": "Austin", "tz": "America/Chicago"},
+    "DFW": {"lat": 32.7767, "lon": -96.7970, "nws_office": "FWD", "nws_grid": "80,103", "name": "Dallas", "tz": "America/Chicago"},
+    "PHL": {"lat": 39.9526, "lon": -75.1652, "nws_office": "PHI", "nws_grid": "49,75", "name": "Philadelphia", "tz": "America/New_York"},
+    "DEN": {"lat": 39.7392, "lon": -104.9903, "nws_office": "BOU", "nws_grid": "62,60", "name": "Denver", "tz": "America/Denver"},
+    "SEA": {"lat": 47.6062, "lon": -122.3321, "nws_office": "SEW", "nws_grid": "124,67", "name": "Seattle", "tz": "America/Los_Angeles"},
+    "SFO": {"lat": 37.7749, "lon": -122.4194, "nws_office": "MTR", "nws_grid": "85,105", "name": "San Francisco", "tz": "America/Los_Angeles"},
+    "DCA": {"lat": 38.9072, "lon": -77.0369, "nws_office": "LWX", "nws_grid": "97,71", "name": "Washington DC", "tz": "America/New_York"},
+    "SLC": {"lat": 40.7608, "lon": -111.8910, "nws_office": "SLC", "nws_grid": "97,175", "name": "Salt Lake City", "tz": "America/Denver"},
+    "ATL": {"lat": 33.7490, "lon": -84.3880, "nws_office": "FFC", "nws_grid": "50,86", "name": "Atlanta", "tz": "America/New_York"},
+    "HOU": {"lat": 29.7604, "lon": -95.3698, "nws_office": "HGX", "nws_grid": "65,97", "name": "Houston", "tz": "America/Chicago"},
+    "BOS": {"lat": 42.3601, "lon": -71.0589, "nws_office": "BOX", "nws_grid": "71,90", "name": "Boston", "tz": "America/New_York"},
+    "LAS": {"lat": 36.1699, "lon": -115.1398, "nws_office": "VEF", "nws_grid": "126,97", "name": "Las Vegas", "tz": "America/Los_Angeles"},
+    "PHX": {"lat": 33.4484, "lon": -112.0740, "nws_office": "PSR", "nws_grid": "159,56", "name": "Phoenix", "tz": "America/Phoenix"},
+    "MSP": {"lat": 44.9778, "lon": -93.2650, "nws_office": "MPX", "nws_grid": "107,71", "name": "Minneapolis", "tz": "America/Chicago"},
+    "NOL": {"lat": 29.9511, "lon": -90.0715, "nws_office": "LIX", "nws_grid": "76,76", "name": "New Orleans", "tz": "America/Chicago"},
+    "DET": {"lat": 42.3314, "lon": -83.0458, "nws_office": "DTX", "nws_grid": "65,33", "name": "Detroit", "tz": "America/Detroit"},
 }
 
 
@@ -49,11 +50,14 @@ class NWSClient:
             headers={"User-Agent": "PropsAI-Weather-Agent/1.0 (contact@propsai.com)"},
         )
 
-    async def get_forecast(self, city_key: str) -> dict[str, Any] | None:
-        """Get NWS point forecast for a city. Returns high/low temps."""
+    async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Get NWS point forecast for a city on a specific date. Returns high/low temps."""
         config = CITY_CONFIGS.get(city_key)
         if not config:
             return None
+
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
 
         try:
             url = f"https://api.weather.gov/gridpoints/{config['nws_office']}/{config['nws_grid']}/forecast"
@@ -65,18 +69,40 @@ class NWSClient:
             if not periods:
                 return None
 
-            # Find today's daytime period for high temp
+            # Find daytime (high) and nighttime (low) periods matching target_date
             result: dict[str, Any] = {"source": "nws", "city": city_key}
-            for period in periods[:4]:
-                period.get("name", "").lower()
+            target_str = target_date.isoformat()
+            for period in periods[:14]:
+                start = period.get("startTime", "")
                 temp = period.get("temperature")
                 if temp is None:
                     continue
-                if period.get("isDaytime", False):
-                    result["high_temp_f"] = temp
-                    result["period_name"] = period.get("name", "")
-                    result["short_forecast"] = period.get("shortForecast", "")
-                    break
+                if start[:10] == target_str:
+                    if period.get("isDaytime", False):
+                        result["high_temp_f"] = temp
+                        result["period_name"] = period.get("name", "")
+                        result["short_forecast"] = period.get("shortForecast", "")
+                        result["date"] = target_str
+                    else:
+                        result["low_temp_f"] = temp
+                # Overnight low for target date may start the night before
+                # NWS overnight periods start at 6pm and run to 6am next day
+                # so a period starting on target_date-1 night covers target_date morning low
+                elif not period.get("isDaytime", False) and "low_temp_f" not in result:
+                    from datetime import timedelta as _td
+                    prev_str = (target_date - _td(days=1)).isoformat()
+                    if start[:10] == prev_str:
+                        result["low_temp_f"] = temp
+
+            # Fallback: first daytime period if no date match
+            if "high_temp_f" not in result:
+                for period in periods[:6]:
+                    if period.get("isDaytime", False) and period.get("temperature") is not None:
+                        result["high_temp_f"] = period.get("temperature")
+                        result["period_name"] = period.get("name", "")
+                        result["short_forecast"] = period.get("shortForecast", "")
+                        result["date"] = period.get("startTime", "")[:10]
+                        break
 
             return result if "high_temp_f" in result else None
 
@@ -118,14 +144,27 @@ class NWSClient:
 class OpenMeteoClient:
     """Open-Meteo Ensemble API client (free, no key needed)."""
 
+    _cache: dict[str, dict] = {}
+    _cache_ts: dict[str, float] = {}
+    _CACHE_TTL: float = 7200.0  # 2 hours — avoids 429 rate limiting
+
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(timeout=15.0)
 
-    async def get_ensemble_forecast(self, city_key: str) -> dict[str, Any] | None:
+    async def get_ensemble_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
         """
-        Get ensemble forecast with probability distributions.
+        Get ensemble forecast with probability distributions for a specific date.
         Uses multiple weather models for uncertainty estimation.
+        Results are cached for 2 hours to avoid 429 rate limiting.
         """
+        import time as _time
+        now = _time.time()
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        cache_key = f"{city_key}_{target_date.isoformat()}"
+        if cache_key in OpenMeteoClient._cache and (now - OpenMeteoClient._cache_ts.get(cache_key, 0)) < OpenMeteoClient._CACHE_TTL:
+            return OpenMeteoClient._cache[cache_key]
+
         config = CITY_CONFIGS.get(city_key)
         if not config:
             return None
@@ -140,8 +179,8 @@ class OpenMeteoClient:
                     "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum",
                     "temperature_unit": "fahrenheit",
                     "precipitation_unit": "inch",
-                    "timezone": "America/New_York",
-                    "forecast_days": 3,
+                    "timezone": config.get("tz", "America/New_York"),
+                    "forecast_days": 7,
                     "models": "icon_seamless,gfs_seamless,ecmwf_ifs025,gem_global,bom_access_global_ensemble",
                 },
             )
@@ -153,12 +192,24 @@ class OpenMeteoClient:
             if not times:
                 return None
 
-            # Collect all model predictions for today
+            # Find the index for the target date
+            target_str = target_date.isoformat()
+            day_idx = 0
+            for i, t in enumerate(times):
+                if t == target_str:
+                    day_idx = i
+                    break
+
+            # Collect all model predictions for target date (both high and low)
             high_temps = []
+            low_temps = []
             for key, values in daily.items():
                 if key.startswith("temperature_2m_max") and values:
-                    if values[0] is not None:
-                        high_temps.append(values[0])
+                    if day_idx < len(values) and values[day_idx] is not None:
+                        high_temps.append(values[day_idx])
+                elif key.startswith("temperature_2m_min") and values:
+                    if day_idx < len(values) and values[day_idx] is not None:
+                        low_temps.append(values[day_idx])
 
             if not high_temps:
                 return None
@@ -177,11 +228,15 @@ class OpenMeteoClient:
             p75 = high_temps[min(n - 1, int(n * 0.75))]
             p90 = high_temps[min(n - 1, int(n * 0.9))]
 
-            return {
+            low_temps.sort()
+            mean_low = sum(low_temps) / len(low_temps) if low_temps else None
+
+            result = {
                 "source": "open_meteo",
                 "city": city_key,
-                "date": times[0],
+                "date": target_str,
                 "high_temp_f": round(mean_high, 1),
+                "low_temp_f": round(mean_low, 1) if mean_low is not None else None,
                 "high_temp_median": round(median_high, 1),
                 "high_temp_min": round(min_high, 1),
                 "high_temp_max": round(max_high, 1),
@@ -191,7 +246,11 @@ class OpenMeteoClient:
                 "high_temp_p90": round(p90, 1),
                 "ensemble_count": n,
                 "all_predictions": [round(t, 1) for t in high_temps],
+                "all_low_predictions": [round(t, 1) for t in low_temps],
             }
+            OpenMeteoClient._cache[cache_key] = result
+            OpenMeteoClient._cache_ts[cache_key] = now
+            return result
 
         except Exception as e:
             logger.warning("Open-Meteo ensemble failed", city=city_key, error=str(e))
@@ -208,14 +267,18 @@ class TomorrowIOClient:
         self.api_key = api_key
         self._http = httpx.AsyncClient(timeout=15.0)
 
-    async def get_forecast(self, city_key: str) -> dict[str, Any] | None:
-        """Get Tomorrow.io forecast with percentile data."""
+    async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Get Tomorrow.io forecast for a specific date."""
         if not self.api_key:
             return None
 
         config = CITY_CONFIGS.get(city_key)
         if not config:
             return None
+
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        target_str = target_date.isoformat()
 
         try:
             resp = await self._http.get(
@@ -234,13 +297,21 @@ class TomorrowIOClient:
             if not daily:
                 return None
 
-            today = daily[0]
-            values = today.get("values", {})
+            # Find the entry matching target_date
+            target_day = None
+            for day in daily:
+                if day.get("time", "")[:10] == target_str:
+                    target_day = day
+                    break
+            if target_day is None:
+                target_day = daily[0]  # fallback to first
+
+            values = target_day.get("values", {})
 
             return {
                 "source": "tomorrow_io",
                 "city": city_key,
-                "date": today.get("time", "")[:10],
+                "date": target_day.get("time", "")[:10],
                 "high_temp_f": values.get("temperatureMax"),
                 "low_temp_f": values.get("temperatureMin"),
                 "precip_prob": values.get("precipitationProbabilityMax"),
@@ -263,8 +334,8 @@ class VisualCrossingClient:
         self.api_key = api_key
         self._http = httpx.AsyncClient(timeout=15.0)
 
-    async def get_forecast(self, city_key: str) -> dict[str, Any] | None:
-        """Get Visual Crossing forecast."""
+    async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Get Visual Crossing forecast for a specific date."""
         if not self.api_key:
             return None
 
@@ -272,14 +343,18 @@ class VisualCrossingClient:
         if not config:
             return None
 
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        target_str = target_date.isoformat()
+
         try:
             location = f"{config['lat']},{config['lon']}"
             resp = await self._http.get(
-                f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location}/today",
+                f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location}/{target_str}",
                 params={
                     "unitGroup": "us",
                     "key": self.api_key,
-                    "include": "days,hours",
+                    "include": "days",
                     "contentType": "json",
                 },
             )
@@ -290,18 +365,18 @@ class VisualCrossingClient:
             if not days:
                 return None
 
-            today = days[0]
+            day = days[0]
             return {
                 "source": "visual_crossing",
                 "city": city_key,
-                "date": today.get("datetime", ""),
-                "high_temp_f": today.get("tempmax"),
-                "low_temp_f": today.get("tempmin"),
-                "precip_inches": today.get("precip"),
-                "precip_prob": today.get("precipprob"),
-                "snow_inches": today.get("snow"),
-                "humidity": today.get("humidity"),
-                "conditions": today.get("conditions", ""),
+                "date": day.get("datetime", ""),
+                "high_temp_f": day.get("tempmax"),
+                "low_temp_f": day.get("tempmin"),
+                "precip_inches": day.get("precip"),
+                "precip_prob": day.get("precipprob"),
+                "snow_inches": day.get("snow"),
+                "humidity": day.get("humidity"),
+                "conditions": day.get("conditions", ""),
             }
 
         except Exception as e:
@@ -328,17 +403,19 @@ class WeatherConsensus:
         self.tomorrow_io = TomorrowIOClient(api_key=tomorrow_io_key)
         self.visual_crossing = VisualCrossingClient(api_key=visual_crossing_key)
 
-    async def get_all_forecasts(self, city_key: str) -> dict[str, Any]:
-        """Fetch forecasts from all available sources for a city.
+    async def get_all_forecasts(self, city_key: str, target_date: date | None = None) -> dict[str, Any]:
+        """Fetch forecasts from all available sources for a city on a specific date.
         Staggers calls to avoid 429 rate limits on paid APIs."""
-        forecasts: dict[str, Any] = {"city": city_key, "sources": {}}
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        forecasts: dict[str, Any] = {"city": city_key, "sources": {}, "target_date": target_date.isoformat()}
 
         # NWS is free/unlimited — call first
         calls = [
-            ("nws", self.nws.get_forecast(city_key)),
-            ("open_meteo", self.open_meteo.get_ensemble_forecast(city_key)),
-            ("tomorrow_io", self.tomorrow_io.get_forecast(city_key)),
-            ("visual_crossing", self.visual_crossing.get_forecast(city_key)),
+            ("nws", self.nws.get_forecast(city_key, target_date)),
+            ("open_meteo", self.open_meteo.get_ensemble_forecast(city_key, target_date)),
+            ("tomorrow_io", self.tomorrow_io.get_forecast(city_key, target_date)),
+            ("visual_crossing", self.visual_crossing.get_forecast(city_key, target_date)),
         ]
 
         for name, coro in calls:
@@ -353,22 +430,35 @@ class WeatherConsensus:
 
         return forecasts
 
-    def _estimate_std_dev(self, forecasts: dict[str, Any]) -> float:
-        """Estimate temperature standard deviation from available data."""
+    def _estimate_std_dev(self, forecasts: dict[str, Any], is_bracket: bool = False, market_type: str = "high_temp") -> float:
+        """Estimate temperature standard deviation from available data.
+
+        For bracket markets a minimum of 3°F is enforced because weather forecasts
+        are never accurate enough to warrant a tighter distribution on a 1-2° window.
+        """
         sources = forecasts.get("sources", {})
-        high_temps = [d.get("high_temp_f") for d in sources.values() if d.get("high_temp_f") is not None]
-        if len(high_temps) < 2:
-            return 2.5  # Default uncertainty
-        spread = max(high_temps) - min(high_temps)
+        is_low = market_type == "low_temp"
+        temp_field = "low_temp_f" if is_low else "high_temp_f"
+        temps = [d.get(temp_field) for d in sources.values() if d.get(temp_field) is not None]
+        if len(temps) < 2:
+            return 3.0 if is_bracket else 2.5
+        spread = max(temps) - min(temps)
         # Ensemble spread gives better estimate
         ensemble = sources.get("open_meteo", {})
-        preds = ensemble.get("all_predictions", [])
+        pred_key = "all_low_predictions" if is_low else "all_predictions"
+        preds = ensemble.get(pred_key, [])
         if len(preds) >= 5:
             preds_sorted = sorted(preds)
             n = len(preds_sorted)
             iqr = preds_sorted[int(n * 0.75)] - preds_sorted[int(n * 0.25)]
-            return max(iqr / 1.35, 1.5)  # IQR → std dev approximation
-        return max(spread / 2, 2.0)
+            std = max(iqr / 1.35, 1.5)
+        else:
+            std = max(spread / 2, 2.0)
+        # Bracket markets: enforce a minimum 3°F floor — no forecast is ever
+        # accurate enough to price a 1-2° bracket with std_dev < 3°F
+        if is_bracket:
+            std = max(std, 3.0)
+        return std
 
     def _normal_cdf(self, x: float, mean: float, std: float) -> float:
         """P(X <= x) for normal distribution."""
@@ -383,6 +473,7 @@ class WeatherConsensus:
         strike_type: str = "greater",
         floor_strike: float | None = None,
         cap_strike: float | None = None,
+        market_type: str = "high_temp",
     ) -> dict[str, Any]:
         """
         Build a consensus probability for a Kalshi weather market.
@@ -390,31 +481,36 @@ class WeatherConsensus:
         strike_type: 'greater', 'less', or 'between'
         floor_strike: lower bound (used by greater and between)
         cap_strike: upper bound (used by less and between)
+        market_type: 'high_temp', 'low_temp', 'rain', 'snow', etc.
         """
         sources = forecasts.get("sources", {})
         if not sources:
             return {"error": "No forecast data available"}
 
+        is_low = market_type == "low_temp"
+        temp_field = "low_temp_f" if is_low else "high_temp_f"
+
         high_temps: list[float] = []
         source_details: list[dict[str, Any]] = []
 
         for name, data in sources.items():
-            temp = data.get("high_temp_f")
+            temp = data.get(temp_field)
             if temp is not None:
                 high_temps.append(temp)
-                source_details.append({"source": name, "high_temp_f": temp})
+                source_details.append({"source": name, temp_field: temp})
 
         if not high_temps:
-            return {"error": "No temperature data from any source"}
+            return {"error": f"No {temp_field} data from any source"}
 
         n = len(high_temps)
         mean_temp = sum(high_temps) / n
         spread = max(high_temps) - min(high_temps) if n > 1 else 0
         confidence = max(0.0, min(1.0, 1.0 - (spread - 2) / 8))
-        std_dev = self._estimate_std_dev(forecasts)
+        std_dev = self._estimate_std_dev(forecasts, is_bracket=(strike_type == "between"), market_type=market_type)
 
         # Use ensemble predictions if available for empirical probability
-        ensemble_preds = sources.get("open_meteo", {}).get("all_predictions", [])
+        pred_key = "all_low_predictions" if is_low else "all_predictions"
+        ensemble_preds = sources.get("open_meteo", {}).get(pred_key, [])
 
         # Calculate probability based on strike type
         our_prob_yes = 0.0
@@ -455,7 +551,9 @@ class WeatherConsensus:
             "city": forecasts.get("city", ""),
             "source_count": n,
             "sources": source_details,
-            "mean_high_f": round(mean_temp, 1),
+            "mean_high_f": round(mean_temp, 1) if not is_low else None,
+            "mean_low_f": round(mean_temp, 1) if is_low else None,
+            "market_type": market_type,
             "std_dev_f": round(std_dev, 2),
             "spread_f": round(spread, 1),
             "confidence": round(confidence, 3),
@@ -506,6 +604,8 @@ class WeatherConsensus:
         signal = None
 
         if yes_edge >= min_edge and yes_edge <= max_edge and kalshi_yes_price > 0:
+            _mkt_type = consensus.get("market_type", "high_temp")
+            _temp_key = "mean_low_f" if _mkt_type == "low_temp" else "mean_high_f"
             signal = {
                 "side": "yes",
                 "our_prob": round(our_prob_yes, 4),
@@ -513,10 +613,12 @@ class WeatherConsensus:
                 "edge": round(yes_edge, 4),
                 "confidence": round(confidence, 3),
                 "source_count": source_count,
-                "consensus_temp": consensus.get("mean_high_f"),
+                "consensus_temp": consensus.get(_temp_key),
                 "label": consensus.get("label", ""),
             }
         elif no_edge >= min_edge and no_edge <= max_edge and kalshi_no_price > 0:
+            _mkt_type = consensus.get("market_type", "high_temp")
+            _temp_key = "mean_low_f" if _mkt_type == "low_temp" else "mean_high_f"
             signal = {
                 "side": "no",
                 "our_prob": round(our_prob_no, 4),
@@ -524,7 +626,7 @@ class WeatherConsensus:
                 "edge": round(no_edge, 4),
                 "confidence": round(confidence, 3),
                 "source_count": source_count,
-                "consensus_temp": consensus.get("mean_high_f"),
+                "consensus_temp": consensus.get(_temp_key),
                 "label": consensus.get("label", ""),
             }
 

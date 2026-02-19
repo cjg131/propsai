@@ -14,6 +14,7 @@ Signals:
 from __future__ import annotations
 
 import asyncio
+import math
 import statistics
 from datetime import UTC, datetime
 from typing import Any
@@ -343,3 +344,45 @@ class FinanceDataService:
         ]
         results = await asyncio.gather(*tasks)
         return [r for r in results if r is not None]
+
+    @staticmethod
+    def _normal_cdf(x: float, mean: float, std: float) -> float:
+        """P(X <= x) for normal distribution using math.erf."""
+        if std <= 0:
+            return 1.0 if x >= mean else 0.0
+        z = (x - mean) / std
+        return 0.5 * (1.0 + math.erf(z / math.sqrt(2)))
+
+    def get_bracket_probability(
+        self,
+        current_price: float,
+        bracket_low: float,
+        bracket_high: float,
+        days_to_expiry: float,
+        vix_level: float | None = None,
+    ) -> float:
+        """
+        Compute the probability that an index closes within [bracket_low, bracket_high]
+        using a Gaussian price distribution.
+
+        Uses log-normal returns: sigma = current_price * daily_vol * sqrt(days_to_expiry)
+        Daily vol is estimated from VIX (VIX/16 ≈ 1-day sigma as a fraction) or defaults to 0.8%.
+
+        Returns probability in [0, 1].
+        """
+        if current_price <= 0 or days_to_expiry <= 0:
+            return 0.0
+
+        if vix_level and vix_level > 0:
+            daily_vol_frac = vix_level / (100.0 * 16.0)
+        else:
+            daily_vol_frac = 0.008
+
+        sigma = current_price * daily_vol_frac * math.sqrt(days_to_expiry)
+        sigma = max(sigma, current_price * 0.003)
+
+        prob = (
+            self._normal_cdf(bracket_high, current_price, sigma)
+            - self._normal_cdf(bracket_low, current_price, sigma)
+        )
+        return max(0.01, min(0.99, prob))

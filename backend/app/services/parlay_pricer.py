@@ -196,11 +196,9 @@ def price_parlay_legs(
     for leg in priced_legs:
         fair_prob *= leg["sharp_prob"]
 
-    # If some legs are unpriced, we can't fully price the parlay
-    # Estimate unpriced legs at 50% (maximum uncertainty)
-    for _ in unpriced_legs:
-        fair_prob *= 0.50
-
+    # Only use priced legs in the fair_prob product.
+    # Unpriced legs are excluded — their probability is unknown, not 50%.
+    # Confidence reflects what fraction of legs we could price.
     confidence = legs_priced / legs_total if legs_total > 0 else 0.0
 
     return {
@@ -393,8 +391,12 @@ def _extract_sharp_probs(
                         probs[name] = []
                     probs[name].append(prob)
 
-    # Average across sharp books
-    return {name: sum(ps) / len(ps) for name, ps in probs.items() if ps}
+    # Average across sharp books, then remove vig by normalizing
+    raw = {name: sum(ps) / len(ps) for name, ps in probs.items() if ps}
+    total = sum(raw.values())
+    if total > 0:
+        return {name: p / total for name, p in raw.items()}
+    return raw
 
 
 def _extract_sharp_spread_probs(

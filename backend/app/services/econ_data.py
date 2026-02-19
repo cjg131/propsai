@@ -308,12 +308,13 @@ class EconDataService:
         """Estimate probability that actual value will be above threshold.
 
         Uses a simple normal distribution approximation.
+        volatility is the absolute std dev of the estimate (not a fraction).
         """
         import math
         if volatility <= 0:
             return 1.0 if estimated_value > threshold else 0.0
 
-        z = (estimated_value - threshold) / (estimated_value * volatility)
+        z = (estimated_value - threshold) / volatility
         # Approximate normal CDF using logistic function
         p = 1.0 / (1.0 + math.exp(-1.7 * z))
         return round(max(0.01, min(0.99, p)), 4)

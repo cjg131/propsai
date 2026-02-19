@@ -331,15 +331,18 @@ export default function AgentPage() {
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <Card>
+        <Card className={(status?.over_deployed) ? "border-red-500" : ""}>
           <CardContent className="p-4">
             <div className="flex items-center gap-2 text-muted-foreground text-xs mb-1">
               <DollarSign className="h-3.5 w-3.5" />
               Bankroll
             </div>
             <div className="text-2xl font-bold">
-              ${(status?.bankroll ?? 0).toLocaleString()}
+              ${(status?.effective_bankroll ?? status?.bankroll ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
+            {status?.bankroll && status?.effective_bankroll !== undefined && status.effective_bankroll !== status.bankroll && (
+              <div className="text-xs text-muted-foreground mt-0.5">started ${status.bankroll.toLocaleString()}</div>
+            )}
           </CardContent>
         </Card>
 
@@ -349,9 +352,12 @@ export default function AgentPage() {
               <TrendingDown className="h-3.5 w-3.5" />
               Deployed
             </div>
-            <div className="text-2xl font-bold text-amber-600">
+            <div className={`text-2xl font-bold ${(status?.over_deployed) ? "text-red-500" : "text-amber-600"}`}>
               ${(status?.total_exposure ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
+            {status?.over_deployed && (
+              <div className="text-xs text-red-500 mt-0.5 font-semibold">⚠ Over-deployed</div>
+            )}
           </CardContent>
         </Card>
 
@@ -361,7 +367,7 @@ export default function AgentPage() {
               <ShieldCheck className="h-3.5 w-3.5" />
               Remaining
             </div>
-            <div className="text-2xl font-bold text-emerald-600">
+            <div className={`text-2xl font-bold ${(status?.remaining_capital ?? 0) < 0 ? "text-red-500" : "text-emerald-600"}`}>
               ${(status?.remaining_capital ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
           </CardContent>

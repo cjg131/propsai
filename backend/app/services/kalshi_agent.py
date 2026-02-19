@@ -285,6 +285,8 @@ class KalshiAgent:
     @staticmethod
     def _enrich_weather_title(ticker: str, title: str) -> str:
         """Prepend city name to weather market title if not already present."""
+        # Strip markdown bold markers left by some Kalshi titles
+        title = title.replace("**", "")
         # Extract city code from ticker: KXHIGHTBOS-... or KXHIGHMIA-... or KXHIGHDEN-...
         # Pattern: KX(HIGH|LOW)(T?)<CITY>-...
         m = re.match(r'KX(?:HIGH|LOW)T?([A-Z]{2,4})-', ticker)
@@ -313,11 +315,54 @@ class KalshiAgent:
         if not candidates:
             return []
 
+        # ── Deduplicate mutually exclusive outcomes ──────────────────────
+        # Finance bracket markets: SP500 can only close in ONE bracket per expiry.
+        # Sports game markets: a game has only ONE winner.
+        # Keep only the highest edge×confidence candidate per exclusive group.
+        deduped: list[dict[str, Any]] = []
+        seen_exclusive: dict[str, dict[str, Any]] = {}
+
+        for c in candidates:
+            strategy = c.get("strategy", "")
+            exclusive_key: str | None = None
+
+            if strategy == "finance" and c.get("is_bracket"):
+                fin_index = c.get("finance_index", "")
+                fin_expiry = c.get("finance_expiry", "")
+                if fin_index and fin_expiry:
+                    exclusive_key = f"finance_bracket_{fin_index}_{fin_expiry}"
+
+            elif strategy == "sports":
+                ticker = c.get("ticker", "")
+                # Game prefix: everything before the last hyphen-separated suffix
+                # e.g. KXMLSGAME-26FEB22SEACOL-SEA → KXMLSGAME-26FEB22SEACOL
+                parts = ticker.rsplit("-", 1)
+                if len(parts) == 2:
+                    exclusive_key = f"sports_game_{parts[0]}"
+
+            if exclusive_key:
+                score = c.get("edge", 0) * c.get("confidence", 0)
+                existing = seen_exclusive.get(exclusive_key)
+                if existing is None:
+                    seen_exclusive[exclusive_key] = c
+                    deduped.append(c)
+                else:
+                    existing_score = existing.get("edge", 0) * existing.get("confidence", 0)
+                    if score > existing_score:
+                        deduped.remove(existing)
+                        seen_exclusive[exclusive_key] = c
+                        deduped.append(c)
+            else:
+                deduped.append(c)
+
+        candidates = deduped
+
         # Sort by edge * confidence descending
         candidates.sort(key=lambda c: c.get("edge", 0) * c.get("confidence", 0), reverse=True)
 
         total_exposure = self.engine.get_total_exposure()
-        available_capital = max(0, self.engine.bankroll - total_exposure)
+        effective_bankroll = self.engine.get_effective_bankroll()
+        available_capital = max(0, effective_bankroll - total_exposure)
         cycle_budget = available_capital * 0.80  # deploy 80% of what's free this cycle
 
         self.engine.log_event(
@@ -414,14 +459,32 @@ class KalshiAgent:
                 strategy="weather",
             )
 
-            # Group by city code (scanner stores CITY_CONFIGS keys directly)
-            by_city: dict[str, list[dict[str, Any]]] = {}
+            # Group by (city_code, target_date) so each group gets the right forecast
+            from datetime import UTC, date as _date, datetime as _datetime
+            by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for m in weather_markets:
                 city_code = m.get("weather", {}).get("city_code", "")
-                if city_code:
-                    by_city.setdefault(city_code, []).append(m)
+                if not city_code:
+                    continue
+                # Parse target date from the ticker (e.g. KXHIGHDEN-26FEB19-B36.5 → 2026-02-19)
+                # close_time is UTC and can be off by one day; ticker date is authoritative
+                ticker = m.get("ticker", "")
+                try:
+                    import re as _re
+                    date_match = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})-', ticker)
+                    if date_match:
+                        # e.g. KXHIGHDEN-26FEB19-B36.5 → year=26, month=FEB, day=19
+                        target_date_str = _datetime.strptime(
+                            date_match.group(1) + date_match.group(2) + date_match.group(3), "%y%b%d"
+                        ).date().isoformat()
+                    else:
+                        target_date_str = _datetime.now(UTC).date().isoformat()
+                except Exception:
+                    target_date_str = _datetime.now(UTC).date().isoformat()
+                by_city_date.setdefault((city_code, target_date_str), []).append(m)
 
-            for i, (city_key, city_markets) in enumerate(by_city.items()):
+            fetched_forecasts: dict[tuple[str, str], dict[str, Any]] = {}
+            for i, ((city_key, target_date_str), city_markets) in enumerate(by_city_date.items()):
                 if city_key not in CITY_CONFIGS:
                     self.engine.log_event(
                         "warning",
@@ -430,18 +493,20 @@ class KalshiAgent:
                     )
                     continue
 
-                # Rate-limit: pause between cities to avoid 429s
+                # Rate-limit: pause between city/date combos to avoid 429s
                 if i > 0:
                     await asyncio.sleep(2.0)
 
-                # Get forecasts from all sources
-                forecasts = await self.weather.get_all_forecasts(city_key)
+                target_date = _date.fromisoformat(target_date_str)
+
+                # Get forecasts from all sources for the correct date
+                forecasts = await self.weather.get_all_forecasts(city_key, target_date=target_date)
                 source_count = len(forecasts.get("sources", {}))
 
                 if source_count < 2:
                     self.engine.log_event(
                         "warning",
-                        f"Only {source_count} sources for {city_key}, skipping",
+                        f"Only {source_count} sources for {city_key} {target_date_str}, skipping",
                         strategy="weather",
                     )
                     continue
@@ -536,11 +601,13 @@ class KalshiAgent:
             return None
 
         # Build consensus for this specific market's strike structure
+        market_type = weather_info.get("market_type", "high_temp")
         consensus = self.weather.build_consensus(
             forecasts,
             strike_type=strike_type,
             floor_strike=floor_strike,
             cap_strike=cap_strike,
+            market_type=market_type,
         )
         if "error" in consensus:
             return None
@@ -571,7 +638,7 @@ class KalshiAgent:
             market_title=enriched_title,
             confidence=signal["confidence"],
             signal_source="weather_consensus",
-            details=f"consensus={consensus.get('mean_high_f')}°F {label} sources={signal['source_count']}",
+            details=f"consensus={consensus.get('mean_low_f') if market_type == 'low_temp' else consensus.get('mean_high_f')}°F {label} sources={signal['source_count']}",
         )
 
         # Calculate position size
@@ -729,6 +796,13 @@ class KalshiAgent:
         no_ask = market.get("no_ask", 0)
         floor_strike = market.get("floor_strike")
 
+        # Skip multi-game / extended series tickers — these aggregate multiple
+        # games and cannot be matched to a single Odds API event
+        ticker_upper = ticker.upper()
+        if "MULTIGAME" in ticker_upper or "EXTENDED" in ticker_upper or "SERIES" in ticker_upper:
+            stats["no_odds"] += 1
+            return None
+
         if not odds_sport or not title or not ticker:
             stats["no_odds"] += 1
             return None
@@ -788,9 +862,6 @@ class KalshiAgent:
         if not sharp:
             stats["no_sharp"] += 1
             return None
-
-        matched_event.get("home_team", "")
-        matched_event.get("away_team", "")
 
         # Now match based on market type
         sharp_prob = None
@@ -893,7 +964,7 @@ class KalshiAgent:
 
         sports_thresh = self.adaptive.get_thresholds("sports")
         min_edge = sports_thresh["min_edge"]
-        max_edge = 0.15  # 15% cap — anything higher is likely a bad match
+        max_edge = 0.25  # 25% cap — anything higher is likely a bad match
         if edge < min_edge:
             stats["no_edge"] += 1
             return None
@@ -1397,6 +1468,9 @@ class KalshiAgent:
         index = market.get("finance", {}).get("index")
         yes_ask = market.get("yes_ask", 0)
         no_ask = market.get("no_ask", 0)
+        strike_type = market.get("strike_type", "")
+        floor_strike = market.get("floor_strike")
+        cap_strike = market.get("cap_strike")
 
         if not index or index not in signal_by_index:
             return None
@@ -1408,16 +1482,60 @@ class KalshiAgent:
         signal = signal_by_index[index]
         p_up = signal["p_up"]
         confidence = signal["confidence"]
+        current_price = signal.get("current_price", 0)
+        vix_level = signal.get("vix_level")
 
-        # Determine market direction
         title_lower = title.lower()
-        is_up_market = any(kw in title_lower for kw in ["up", "above", "higher", "close above", "gain"])
-        is_down_market = any(kw in title_lower for kw in ["down", "below", "lower", "close below", "lose", "drop"])
+        is_bracket = strike_type == "between" or (
+            floor_strike is not None and cap_strike is not None
+        )
 
-        if not is_up_market and not is_down_market:
-            is_up_market = True
+        if is_bracket:
+            # ── Bracket market: use Gaussian price distribution ──────────
+            # p_up is a directional signal and is NOT valid for bracket markets.
+            # We need the probability of landing in a specific price window.
+            if not current_price or floor_strike is None or cap_strike is None:
+                return None
 
-        our_prob_yes = p_up if is_up_market else (1.0 - p_up)
+            # Bracket viability check: skip if current price is more than
+            # 3× bracket width away from the bracket midpoint (dead bracket)
+            bracket_width = cap_strike - floor_strike
+            bracket_mid = (floor_strike + cap_strike) / 2.0
+            if bracket_width > 0 and abs(current_price - bracket_mid) > 3 * bracket_width:
+                return None
+
+            # Days to expiry from close_time
+            close_time_str = market.get("finance", {}).get("close_time", "") or market.get("close_time", "")
+            days_to_expiry = 1.0
+            if close_time_str:
+                try:
+                    close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                    days_to_expiry = max(0.1, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
+                except (ValueError, TypeError):
+                    pass
+
+            our_prob_yes = self.finance.get_bracket_probability(
+                current_price=current_price,
+                bracket_low=float(floor_strike),
+                bracket_high=float(cap_strike),
+                days_to_expiry=days_to_expiry,
+                vix_level=vix_level,
+            )
+            signal_source = "finance_bracket_gaussian"
+            prob_details = f"bracket=[{floor_strike},{cap_strike}] price={current_price:.0f} days={days_to_expiry:.2f}"
+        else:
+            # ── Threshold / directional market: use p_up ────────────────
+            is_up_market = any(kw in title_lower for kw in ["up", "above", "higher", "close above", "gain"])
+            is_down_market = any(kw in title_lower for kw in ["down", "below", "lower", "close below", "lose", "drop"])
+
+            if not is_up_market and not is_down_market:
+                is_up_market = True
+
+            our_prob_yes = p_up if is_up_market else (1.0 - p_up)
+            signal_source = "finance_momentum"
+            prob_details = f"index={index} p_up={p_up:.4f} intraday={signal['intraday_momentum']:.4f} " \
+                           f"futures={signal['futures_signal']:.4f} vix={signal['vix_signal']:.4f} " \
+                           f"ma={signal['ma_signal']:.4f}"
 
         # Calculate edge
         kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
@@ -1447,10 +1565,11 @@ class KalshiAgent:
         except Exception:
             pass
 
+        market_type_tag = "bracket" if is_bracket else "threshold"
         self.engine.log_event(
             "info",
             f"Finance edge: {ticker} {side} edge={edge:.1%} (our={our_prob:.1%} vs kalshi={kalshi_prob:.1%}) "
-            f"index={index} p_up={p_up:.2f} conf={confidence:.2f}{poly_details} | {title[:60]}",
+            f"[{market_type_tag}] index={index} conf={confidence:.2f}{poly_details} | {title[:60]}",
             strategy="finance",
         )
 
@@ -1462,10 +1581,8 @@ class KalshiAgent:
             kalshi_prob=kalshi_prob,
             market_title=title,
             confidence=confidence,
-            signal_source="finance_momentum",
-            details=f"index={index} p_up={p_up:.4f} intraday={signal['intraday_momentum']:.4f} "
-                    f"futures={signal['futures_signal']:.4f} vix={signal['vix_signal']:.4f} "
-                    f"ma={signal['ma_signal']:.4f}",
+            signal_source=signal_source,
+            details=prob_details,
         )
         self._record_cross_signal("finance", ticker, side, our_prob, kalshi_prob, confidence)
 
@@ -1482,7 +1599,10 @@ class KalshiAgent:
             "our_prob": our_prob,
             "kalshi_prob": kalshi_prob,
             "price_cents": price_cents,
-            "signal_source": "finance_momentum",
+            "signal_source": signal_source,
+            "is_bracket": is_bracket,
+            "finance_index": index,
+            "finance_expiry": market.get("finance", {}).get("close_time", "")[:10],
         }
 
     # ── Econ Strategy (CPI / Fed / Gas / Jobs) ───────────────────────
@@ -1572,13 +1692,24 @@ class KalshiAgent:
         our_prob_yes = 0.5  # Default
         confidence = 0.3
 
-        if econ_type == "cpi" and signal.get("estimated_next_yoy") is not None:
+        if econ_type == "cpi" and signal.get("mom_change") is not None:
             if threshold_match:
                 threshold = float(threshold_match.group(1)) / 100.0
+                # Kalshi CPI markets are month-over-month (e.g. "above 0.5%")
+                # Use mom_change for MoM markets, yoy_change for YoY markets
+                title_lower_cpi = title_lower
+                if "year" in title_lower_cpi or "annual" in title_lower_cpi or "yoy" in title_lower_cpi:
+                    estimated = signal.get("estimated_next_yoy") or signal.get("yoy_change") or signal["mom_change"]
+                else:
+                    estimated = signal["mom_change"]  # MoM decimal (e.g. 0.003 = 0.3%)
+                # volatility = absolute std dev of the CPI estimate
+                # MoM CPI std dev ~0.002 (0.2 percentage points), YoY ~0.005
+                is_yoy = "year" in title_lower_cpi or "annual" in title_lower_cpi or "yoy" in title_lower_cpi
+                cpi_vol = 0.005 if is_yoy else 0.002
                 our_prob_yes = self.econ.estimate_probability_above(
-                    signal["estimated_next_yoy"], threshold, volatility=0.05
+                    estimated, threshold, volatility=cpi_vol
                 )
-                confidence = 0.5
+                confidence = 0.4
             else:
                 return None
 
@@ -1598,8 +1729,9 @@ class KalshiAgent:
         elif econ_type == "gas_price" and signal.get("estimated_next") is not None:
             if threshold_price_match:
                 threshold = float(threshold_price_match.group(1))
+                # Gas price std dev ~$0.10/week
                 our_prob_yes = self.econ.estimate_probability_above(
-                    signal["estimated_next"], threshold, volatility=0.03
+                    signal["estimated_next"], threshold, volatility=0.10
                 )
                 confidence = 0.4
             else:
@@ -1608,8 +1740,9 @@ class KalshiAgent:
         elif econ_type == "unemployment" and signal.get("estimated_next_rate") is not None:
             if threshold_match:
                 threshold = float(threshold_match.group(1))
+                # Unemployment std dev ~0.2 percentage points
                 our_prob_yes = self.econ.estimate_probability_above(
-                    signal["estimated_next_rate"], threshold, volatility=0.05
+                    signal["estimated_next_rate"], threshold, volatility=0.2
                 )
                 confidence = 0.4
             else:
@@ -2481,8 +2614,35 @@ class KalshiAgent:
         while self._running:
             try:
                 if not self.engine.kill_switch:
+                    # Reconnect WebSocket if it dropped
+                    try:
+                        ws_status = self.ws.get_status()
+                        if not ws_status.get("connected", False):
+                            logger.info("WebSocket disconnected — attempting reconnect")
+                            await self.ws.connect()
+                    except Exception as ws_err:
+                        logger.warning("WebSocket reconnect failed", error=str(ws_err))
+
                     await self.run_monitor_cycle()
                     await self.run_settlement_cycle()
+
+                    # Proactive kill-switch: fire if daily loss limit breached
+                    today_pnl = self.engine.get_today_pnl()
+                    effective = self.engine.get_effective_bankroll()
+                    dynamic_loss_limit = effective * 0.20
+                    if today_pnl < -dynamic_loss_limit and not self.engine.kill_switch:
+                        self.engine.kill_switch = True
+                        self.engine.log_event(
+                            "kill_switch",
+                            f"Daily loss limit hit: ${today_pnl:.2f} < -${dynamic_loss_limit:.2f} "
+                            f"(20% of effective bankroll ${effective:.2f}) — kill switch activated",
+                            strategy="monitor",
+                        )
+                        logger.warning(
+                            "Kill switch activated: daily loss limit breached",
+                            today_pnl=today_pnl,
+                            limit=-dynamic_loss_limit,
+                        )
 
                     # Daily summary at midnight UTC
                     today = datetime.now(UTC).strftime("%Y-%m-%d")

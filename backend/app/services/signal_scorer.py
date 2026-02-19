@@ -40,6 +40,27 @@ BASE_WEIGHTS: dict[str, dict[str, float]] = {
         "ma_signal": 0.15,
         "volume_signal": 0.10,
     },
+    "weather": {
+        "consensus_temp": 0.50,
+        "source_agreement": 0.30,
+        "ensemble_spread": 0.20,
+    },
+    "sports": {
+        "sharp_consensus": 0.60,
+        "line_movement": 0.25,
+        "market_edge": 0.15,
+    },
+    "econ": {
+        "fred_data": 0.50,
+        "historical_trend": 0.30,
+        "market_implied": 0.20,
+    },
+    "nba_props": {
+        "model_prediction": 0.50,
+        "recent_form": 0.25,
+        "matchup_history": 0.15,
+        "injury_news": 0.10,
+    },
 }
 
 # Minimum trades needed before adjusting weights

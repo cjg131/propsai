@@ -11,6 +11,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -103,18 +104,21 @@ class PolymarketData:
                 markets = event.get("markets", [])
 
                 for mkt in markets[:3]:  # Limit markets per event
-                    token_ids = mkt.get("clobTokenIds", [])
-                    if not token_ids:
-                        continue
+                    # outcomePrices is a JSON string like '["0.65", "0.35"]'
+                    # YES price is the first element (index 0)
+                    outcome_prices_raw = mkt.get("outcomePrices", "[]")
+                    try:
+                        outcome_prices = json.loads(outcome_prices_raw) if isinstance(outcome_prices_raw, str) else outcome_prices_raw
+                        yes_price = float(outcome_prices[0]) if outcome_prices else None
+                    except (json.JSONDecodeError, IndexError, ValueError, TypeError):
+                        yes_price = None
 
-                    # Get price for YES token (first token)
-                    price = await self.get_market_price(token_ids[0])
-                    if price is not None and price > 0:
+                    if yes_price is not None and yes_price > 0:
                         all_events[slug] = {
                             "title": title,
                             "question": mkt.get("question", title),
-                            "poly_price": round(price * 100, 1),  # Convert to cents
-                            "token_id": token_ids[0],
+                            "poly_price": round(yes_price * 100, 1),  # Convert to cents
+                            "token_id": "",
                         }
                         break  # One price per event is enough
 

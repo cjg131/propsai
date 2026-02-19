@@ -175,6 +175,26 @@ class TradingEngine:
         conn.commit()
         conn.close()
 
+    def _get_all_realized_pnl(self) -> float:
+        """Sum of all realized P&L: settled trades + exited (sell) trades."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        c.execute("""
+            SELECT COALESCE(SUM(pnl), 0) FROM trades
+            WHERE status = 'settled' OR action = 'sell'
+        """)
+        result = c.fetchone()[0]
+        conn.close()
+        return result
+
+    def get_effective_bankroll(self) -> float:
+        """Real available capital = starting bankroll + all realized P&L.
+        
+        This is the true bankroll after wins and losses are accounted for.
+        All risk calculations should use this, not self.bankroll.
+        """
+        return max(0.0, self.bankroll + self._get_all_realized_pnl())
+
     def get_today_pnl(self, strategy: str | None = None) -> float:
         """Get today's P&L, optionally filtered by strategy."""
         today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -218,21 +238,23 @@ class TradingEngine:
         
         Nets buy cost against sell proceeds so that exited positions free up capital.
         buy cost is positive, sell cost is negative (proceeds), so SUM(cost) gives net.
+        Excludes sell/exit trades from the exposure count since they reduce exposure.
         """
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         if strategy:
             c.execute(
-                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND strategy = ?",
+                """SELECT COALESCE(SUM(cost + fee), 0) FROM trades
+                   WHERE status = 'filled' AND action = 'buy' AND strategy = ?""",
                 (strategy,),
             )
         else:
             c.execute(
-                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled'"
+                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND action = 'buy'"
             )
         result = c.fetchone()[0]
         conn.close()
-        return max(0, result)  # Floor at 0 in case sell proceeds exceed buy cost
+        return max(0, result)
 
     def has_open_position(self, ticker: str) -> bool:
         """Check if we already have an open (unsettled) position on this ticker."""
@@ -264,14 +286,18 @@ class TradingEngine:
     def get_remaining_capital(self, strategy: str = "") -> float:
         """Get remaining deployable capital, respecting per-strategy caps.
         
+        Uses effective_bankroll (starting bankroll + realized P&L) so that
+        losses reduce available capital in real time.
+        
         Limits:
-          1. Global: total exposure <= bankroll * max_total_exposure_pct
-          2. Per-strategy total: strategy exposure <= bankroll * max_strategy_exposure_pct
-          3. Per-strategy cycle: deployment this cycle <= bankroll * max_strategy_cycle_pct
+          1. Global: total exposure <= effective_bankroll * max_total_exposure_pct
+          2. Per-strategy total: strategy exposure <= effective_bankroll * max_strategy_exposure_pct
+          3. Per-strategy cycle: deployment this cycle <= effective_bankroll * max_strategy_cycle_pct
         Returns the minimum of all applicable limits.
         """
+        effective = self.get_effective_bankroll()
         total_exposure = self.get_total_exposure()
-        max_deployable = self.bankroll * self.max_total_exposure_pct
+        max_deployable = effective * self.max_total_exposure_pct
         remaining_global = max(0, max_deployable - total_exposure)
         
         if not strategy:
@@ -279,12 +305,12 @@ class TradingEngine:
         
         # Per-strategy total exposure cap (soft)
         strategy_exposure = self.get_total_exposure(strategy=strategy)
-        max_strategy = self.bankroll * self.max_strategy_exposure_pct
+        max_strategy = effective * self.max_strategy_exposure_pct
         remaining_strategy = max(0, max_strategy - strategy_exposure)
         
         # Per-strategy cycle cap (prevents one cycle from deploying too much)
         cycle_deployed = self._cycle_deployed.get(strategy, 0.0)
-        max_cycle = self.bankroll * self.max_strategy_cycle_pct
+        max_cycle = effective * self.max_strategy_cycle_pct
         remaining_cycle = max(0, max_cycle - cycle_deployed)
         
         return min(remaining_global, remaining_strategy, remaining_cycle)
@@ -309,6 +335,7 @@ class TradingEngine:
     def check_risk_limits(self, strategy: str, cost: float, ticker: str = "") -> tuple[bool, str]:
         """
         Check if a trade passes all risk limits.
+        Uses effective_bankroll (starting bankroll + realized P&L) for all calculations.
         Returns (allowed, reason).
         """
         if self.kill_switch:
@@ -317,38 +344,46 @@ class TradingEngine:
         if not self.strategy_enabled.get(strategy, False):
             return False, f"Strategy '{strategy}' is disabled"
 
-        # Check percentage of total bankroll
-        if cost > self.bankroll * self.max_bet_pct:
-            return False, f"Bet size ${cost:.2f} exceeds {self.max_bet_pct*100:.0f}% of bankroll (${self.bankroll:.2f})"
+        effective = self.get_effective_bankroll()
+        if effective <= 0:
+            return False, f"Effective bankroll is ${effective:.2f} — no capital available"
 
-        # Check total bankroll exposure
+        # Check percentage of effective bankroll per bet
+        if cost > effective * self.max_bet_pct:
+            return False, f"Bet size ${cost:.2f} exceeds {self.max_bet_pct*100:.0f}% of effective bankroll (${effective:.2f})"
+
+        # Check total exposure vs effective bankroll
         total_exposure = self.get_total_exposure()
-        max_deployable = self.bankroll * self.max_total_exposure_pct
+        if total_exposure >= effective:
+            return False, f"Over-deployed: ${total_exposure:.2f} deployed vs ${effective:.2f} effective bankroll"
+        max_deployable = effective * self.max_total_exposure_pct
         if total_exposure + cost > max_deployable:
-            return False, f"Total exposure ${total_exposure + cost:.2f} would exceed {self.max_total_exposure_pct*100:.0f}% of bankroll (${max_deployable:.2f})"
+            return False, f"Total exposure ${total_exposure + cost:.2f} would exceed {self.max_total_exposure_pct*100:.0f}% of effective bankroll (${max_deployable:.2f})"
 
-        # Check per-ticker position limit
+        # Check per-ticker position limit (scaled to effective bankroll)
+        max_per_ticker = effective * 0.10
         if ticker:
             ticker_exposure = self.get_ticker_exposure(ticker)
-            if ticker_exposure + cost > self.max_position_per_ticker:
-                return False, f"Ticker {ticker} exposure ${ticker_exposure + cost:.2f} would exceed max ${self.max_position_per_ticker:.2f}"
+            if ticker_exposure + cost > max_per_ticker:
+                return False, f"Ticker {ticker} exposure ${ticker_exposure + cost:.2f} would exceed max ${max_per_ticker:.2f}"
 
         # Check per-strategy total exposure cap
         strategy_exposure = self.get_total_exposure(strategy=strategy)
-        max_strategy = self.bankroll * self.max_strategy_exposure_pct
+        max_strategy = effective * self.max_strategy_exposure_pct
         if strategy_exposure + cost > max_strategy:
-            return False, f"Strategy '{strategy}' exposure ${strategy_exposure + cost:.2f} would exceed {self.max_strategy_exposure_pct*100:.0f}% of bankroll (${max_strategy:.2f})"
+            return False, f"Strategy '{strategy}' exposure ${strategy_exposure + cost:.2f} would exceed {self.max_strategy_exposure_pct*100:.0f}% of effective bankroll (${max_strategy:.2f})"
 
         # Check per-strategy cycle deployment cap
         cycle_deployed = self._cycle_deployed.get(strategy, 0.0)
-        max_cycle = self.bankroll * self.max_strategy_cycle_pct
+        max_cycle = effective * self.max_strategy_cycle_pct
         if cycle_deployed + cost > max_cycle:
             return False, f"Strategy '{strategy}' cycle cap: ${cycle_deployed + cost:.2f} would exceed ${max_cycle:.2f}/cycle"
 
-        # Check daily loss limit
+        # Check daily loss limit (dynamic: 20% of effective bankroll)
         today_pnl = self.get_today_pnl()
-        if today_pnl < -self.daily_loss_limit:
-            return False, f"Daily loss limit reached: ${today_pnl:.2f} (limit: -${self.daily_loss_limit:.2f})"
+        dynamic_loss_limit = effective * 0.20
+        if today_pnl < -dynamic_loss_limit:
+            return False, f"Daily loss limit reached: ${today_pnl:.2f} (limit: -${dynamic_loss_limit:.2f})"
 
         return True, "OK"
 
@@ -373,18 +408,20 @@ class TradingEngine:
         quarter_kelly = kelly_fraction * 0.25 * confidence
 
         remaining = self.get_remaining_capital(strategy=strategy)
+        effective = self.get_effective_bankroll()
 
-        # Cap by remaining capital, Kelly, and bankroll percentage
+        # Cap by remaining capital, Kelly, and effective bankroll percentage
         max_dollars = min(
             remaining,
-            self.bankroll * quarter_kelly,
-            self.bankroll * self.max_bet_pct,
+            effective * quarter_kelly,
+            effective * self.max_bet_pct,
         )
 
-        # Also cap by per-ticker limit
+        # Also cap by per-ticker limit (scaled to effective bankroll)
         if ticker:
             ticker_exposure = self.get_ticker_exposure(ticker)
-            ticker_remaining = max(0, self.max_position_per_ticker - ticker_exposure)
+            max_per_ticker = effective * 0.10
+            ticker_remaining = max(0, max_per_ticker - ticker_exposure)
             max_dollars = min(max_dollars, ticker_remaining)
 
         if max_dollars <= 0:
@@ -1137,20 +1174,25 @@ class TradingEngine:
 
     def get_status(self) -> dict[str, Any]:
         """Get current agent status."""
+        effective = self.get_effective_bankroll()
         total_exposure = self.get_total_exposure()
-        max_deployable = self.bankroll * self.max_total_exposure_pct
+        max_deployable = effective * self.max_total_exposure_pct
+        remaining = max_deployable - total_exposure
+        dynamic_loss_limit = effective * 0.20
         return {
             "paper_mode": self.paper_mode,
             "kill_switch": self.kill_switch,
             "bankroll": self.bankroll,
+            "effective_bankroll": round(effective, 2),
             "strategy_enabled": self.strategy_enabled,
-            "daily_loss_limit": self.daily_loss_limit,
-            "max_bet_size": self.max_bet_size,
+            "daily_loss_limit": round(dynamic_loss_limit, 2),
+            "max_bet_size": round(effective * self.max_bet_pct, 2),
             "today_pnl": self.get_today_pnl(),
             "today_trades": self.get_today_trade_count(),
             "total_exposure": round(total_exposure, 2),
             "max_deployable": round(max_deployable, 2),
-            "remaining_capital": round(max_deployable - total_exposure, 2),
+            "remaining_capital": round(remaining, 2),
+            "over_deployed": total_exposure > effective,
         }
 
 

@@ -284,10 +284,24 @@ class CrossMarketScanner:
                             sharp_probs[outcome_key] = []
                         sharp_probs[outcome_key].append(prob)
 
-        # Average sharp probabilities
-        consensus: dict[str, float] = {}
+        # Average sharp probabilities, then remove vig per market by normalizing.
+        # Group by market_key (first segment of outcome_key) and normalize within each group.
+        raw_consensus: dict[str, float] = {}
         for key, probs in sharp_probs.items():
-            consensus[key] = sum(probs) / len(probs)
+            raw_consensus[key] = sum(probs) / len(probs)
+
+        # Normalize within each market type to remove vig
+        from collections import defaultdict as _dd
+        market_totals: dict[str, float] = _dd(float)
+        for key, prob in raw_consensus.items():
+            market_key = key.split("|")[0]
+            market_totals[market_key] += prob
+
+        consensus: dict[str, float] = {}
+        for key, prob in raw_consensus.items():
+            market_key = key.split("|")[0]
+            total = market_totals[market_key]
+            consensus[key] = prob / total if total > 0 else prob
 
         return {
             "event_id": event_data.get("id", ""),
@@ -310,14 +324,10 @@ class CrossMarketScanner:
         Returns list of mispricings with edge > min_edge.
         """
         mispricings = []
-        sharp_consensus.get("sharp_consensus", {})
-
         for kalshi_market in kalshi_markets:
             ticker = kalshi_market.get("ticker", "")
             title = kalshi_market.get("title", "")
-            kalshi_market.get("yes_bid", 0)
             yes_ask = kalshi_market.get("yes_ask", 0)
-            kalshi_market.get("no_bid", 0)
             no_ask = kalshi_market.get("no_ask", 0)
             volume = kalshi_market.get("volume", 0)
 

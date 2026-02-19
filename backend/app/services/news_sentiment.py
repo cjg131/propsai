@@ -480,8 +480,8 @@ class MarketNewsSentiment:
 
         # Fetch all articles once (RSS + NewsAPI + Twitter)
         rss_articles = self._fetch_rss()
-        newsapi_articles = self._fetch_newsapi("bitcoin OR ethereum OR S&P 500 OR nasdaq OR fed rate")
-        twitter_articles = self._fetch_twitter("bitcoin OR ethereum OR S&P500 OR nasdaq")
+        newsapi_articles = self._fetch_newsapi('bitcoin OR ethereum OR "S&P 500" OR "stock market" OR nasdaq OR "fed rate"')
+        twitter_articles = self._fetch_twitter("bitcoin OR ethereum OR SPY OR nasdaq OR stockmarket")
         all_articles = rss_articles + newsapi_articles + twitter_articles
 
         result: dict[str, dict] = {}

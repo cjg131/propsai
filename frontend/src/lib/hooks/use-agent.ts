@@ -8,6 +8,7 @@ export interface AgentStatus {
   paper_mode: boolean;
   kill_switch: boolean;
   bankroll: number;
+  effective_bankroll: number;
   strategy_enabled: Record<string, boolean>;
   allocations: Record<string, number>;
   daily_loss_limit: number;
@@ -17,6 +18,7 @@ export interface AgentStatus {
   total_exposure: number;
   max_deployable: number;
   remaining_capital: number;
+  over_deployed: boolean;
   odds_api_credits_remaining: number | null;
 }
 

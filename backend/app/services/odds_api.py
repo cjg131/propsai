@@ -17,13 +17,34 @@ MARKET_MAP = {
     "player_rebounds": "rebounds",
     "player_assists": "assists",
     "player_threes": "threes",
+    "player_steals": "steals",
+    "player_blocks": "blocks",
+    "player_turnovers": "turnovers",
+    "player_points_rebounds_assists": "pra",
+    "player_points_rebounds": "points_rebounds",
+    "player_points_assists": "points_assists",
+    "player_rebounds_assists": "rebounds_assists",
+    "player_first_basket": "first_basket",
+    "player_double_double": "double_double",
 }
 
-ALLOWED_BOOKS = {"draftkings", "fanduel"}
+# Sharp books for game lines (h2h, spreads, totals)
+SHARP_BOOKS = {"pinnacle", "betfair_ex_eu", "betfair"}
+
+# Soft books for player props (Pinnacle rarely has props; DK/FD are the market)
+PROP_BOOKS = {"draftkings", "fanduel", "betmgm", "caesars", "pointsbet"}
+
+# All books we care about
+ALLOWED_BOOKS = SHARP_BOOKS | PROP_BOOKS
 
 BOOK_DISPLAY = {
     "draftkings": "DraftKings",
     "fanduel": "FanDuel",
+    "pinnacle": "Pinnacle",
+    "betfair_ex_eu": "Betfair",
+    "betmgm": "BetMGM",
+    "caesars": "Caesars",
+    "pointsbet": "PointsBet",
 }
 
 
@@ -49,18 +70,21 @@ class OddsAPIClient:
     async def get_player_props(self, event_id: str) -> list[dict]:
         """
         Get player prop odds for a specific event.
-        Returns a flat list of prop lines:
+        Returns a flat list of prop lines aggregated across books.
+        For each player+prop_type, we compute a consensus line from all available books.
         [{"player": "...", "prop_type": "points", "line": 24.5,
-          "over_odds": -110, "under_odds": -110, "book": "DraftKings"}, ...]
+          "over_odds": -110, "under_odds": -110, "book": "DraftKings",
+          "consensus_over_prob": 0.52, "books_count": 3}, ...]
         """
         markets = ",".join(MARKET_MAP.keys())
         r = await self.client.get(
             f"{ODDS_API_BASE}/sports/{SPORT}/events/{event_id}/odds",
             params={
                 "apiKey": self.api_key,
-                "regions": "us",
+                "regions": "us,eu",  # eu gives Pinnacle access
                 "markets": markets,
                 "oddsFormat": "american",
+                "bookmakers": ",".join(PROP_BOOKS),  # focus on prop-active books
             },
         )
         remaining = r.headers.get("x-requests-remaining", "?")
@@ -68,9 +92,12 @@ class OddsAPIClient:
         r.raise_for_status()
         data = r.json()
 
-        props = []
         home_team = data.get("home_team", "")
         away_team = data.get("away_team", "")
+
+        # Aggregate by (player, prop_type) across all books
+        # key: (player, prop_type) -> {line, over_probs: [], under_probs: [], books: []}
+        aggregated: dict[tuple, dict] = {}
 
         for bookmaker in data.get("bookmakers", []):
             book_key = bookmaker.get("key", "")
@@ -84,7 +111,6 @@ class OddsAPIClient:
                 if not prop_type:
                     continue
 
-                # Group outcomes by player (Over/Under pairs)
                 player_outcomes: dict[str, dict] = {}
                 for outcome in market.get("outcomes", []):
                     player = outcome.get("description", "")
@@ -93,26 +119,72 @@ class OddsAPIClient:
                     price = outcome.get("price", 0)
 
                     if player not in player_outcomes:
-                        player_outcomes[player] = {
-                            "player": player,
-                            "prop_type": prop_type,
-                            "line": point,
-                            "book": book_name,
-                            "book_key": book_key,
-                            "home_team": home_team,
-                            "away_team": away_team,
-                            "event_id": event_id,
-                        }
-
+                        player_outcomes[player] = {"line": point}
                     if name == "Over":
                         player_outcomes[player]["over_odds"] = price
                         player_outcomes[player]["line"] = point
                     elif name == "Under":
                         player_outcomes[player]["under_odds"] = price
 
-                for po in player_outcomes.values():
-                    if "over_odds" in po and "under_odds" in po:
-                        props.append(po)
+                for player, po in player_outcomes.items():
+                    if "over_odds" not in po or "under_odds" not in po:
+                        continue
+                    key = (player, prop_type)
+                    if key not in aggregated:
+                        aggregated[key] = {
+                            "player": player,
+                            "prop_type": prop_type,
+                            "line": po["line"],
+                            "home_team": home_team,
+                            "away_team": away_team,
+                            "event_id": event_id,
+                            "over_probs": [],
+                            "under_probs": [],
+                            "books": [],
+                            "best_book": book_name,
+                            "over_odds": po["over_odds"],
+                            "under_odds": po["under_odds"],
+                        }
+                    # Convert American odds to implied probability (no vig yet)
+                    def _to_prob(odds: float) -> float:
+                        if odds >= 0:
+                            return 100.0 / (odds + 100.0)
+                        return abs(odds) / (abs(odds) + 100.0)
+
+                    over_p = _to_prob(po["over_odds"])
+                    under_p = _to_prob(po["under_odds"])
+                    # Remove vig by normalizing
+                    total = over_p + under_p
+                    if total > 0:
+                        over_p /= total
+                        under_p /= total
+                    aggregated[key]["over_probs"].append(over_p)
+                    aggregated[key]["under_probs"].append(under_p)
+                    aggregated[key]["books"].append(book_name)
+
+        # Build final prop list with consensus probabilities
+        props = []
+        for (player, prop_type), agg in aggregated.items():
+            if not agg["over_probs"]:
+                continue
+            consensus_over = sum(agg["over_probs"]) / len(agg["over_probs"])
+            consensus_under = sum(agg["under_probs"]) / len(agg["under_probs"])
+            props.append({
+                "player": player,
+                "prop_type": prop_type,
+                "line": agg["line"],
+                "book": agg["best_book"],
+                "book_key": agg["best_book"].lower(),
+                "home_team": agg["home_team"],
+                "away_team": agg["away_team"],
+                "event_id": agg["event_id"],
+                "over_odds": agg["over_odds"],
+                "under_odds": agg["under_odds"],
+                "consensus_over_prob": round(consensus_over, 4),
+                "consensus_under_prob": round(consensus_under, 4),
+                "books_count": len(agg["books"]),
+                "books": agg["books"],
+            })
 
         return props
 
@@ -128,19 +200,19 @@ class OddsAPIClient:
     async def get_game_lines(self) -> dict[str, dict]:
         """
         Fetch real spreads and totals (over/under) for today's NBA games.
+        Uses sharp books (Pinnacle, Betfair) for accurate consensus lines.
         Returns {event_id: {"spread_home": -5.5, "spread_away": 5.5,
                             "total": 220.5, "home_team": "...", "away_team": "..."}}.
-        Uses 1 API request (counts toward free tier quota).
         """
         try:
             r = await self.client.get(
                 f"{ODDS_API_BASE}/sports/{SPORT}/odds/",
                 params={
                     "apiKey": self.api_key,
-                    "regions": "us",
-                    "markets": "spreads,totals",
+                    "regions": "us,eu",  # eu gives Pinnacle
+                    "markets": "h2h,spreads,totals",
                     "oddsFormat": "american",
-                    "bookmakers": "draftkings,fanduel",
+                    "bookmakers": ",".join(SHARP_BOOKS | PROP_BOOKS),
                 },
             )
             remaining = r.headers.get("x-requests-remaining", "?")

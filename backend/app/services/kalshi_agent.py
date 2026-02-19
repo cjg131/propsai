@@ -30,6 +30,7 @@ from app.services.news_sentiment import get_market_news_sentiment
 from app.services.trade_analyzer import get_trade_analyzer
 from app.services.trading_engine import get_trading_engine
 from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
+from app.services.referee_data import get_referee_data, RefereeDataService
 
 logger = get_logger(__name__)
 
@@ -94,6 +95,11 @@ class KalshiAgent:
 
         # Cross-strategy correlation engine
         self.correlation = get_cross_strategy_engine()
+
+        # Referee data service (NBA totals edge)
+        self.referee_data: RefereeDataService = get_referee_data(
+            api_key=getattr(settings, "sportsdataio_api_key", "")
+        )
 
         self._running = False
         self._weather_task: asyncio.Task | None = None
@@ -684,6 +690,23 @@ class KalshiAgent:
             return results
 
         try:
+            # ── Step 0: Fetch referee signals for today (NBA totals edge) ──
+            ref_signals: dict[str, Any] = {}
+            try:
+                ref_signals = await self.referee_data.get_game_ref_signals()
+                if ref_signals:
+                    self.engine.log_event(
+                        "info",
+                        f"Referee data: {len(ref_signals)} games, "
+                        + ", ".join(
+                            f"{k}: {v['direction']}({v['foul_adjustment']:+.1f})"
+                            for k, v in list(ref_signals.items())[:3]
+                        ),
+                        strategy="sports",
+                    )
+            except Exception as e:
+                logger.debug("Referee data fetch failed", error=str(e))
+
             # ── Step 1: Scan single-game markets ──────────────────
             single_markets = await self.scanner.scan_single_game_markets(min_volume=0)
             self.engine.log_event(
@@ -730,7 +753,7 @@ class KalshiAgent:
             single_stats = {"matched": 0, "no_odds": 0, "cheap_skip": 0, "no_team_match": 0, "no_sharp": 0, "no_edge": 0}
             for market in single_markets:
                 try:
-                    signal = await self._evaluate_single_game(market, odds_by_sport, single_stats)
+                    signal = await self._evaluate_single_game(market, odds_by_sport, single_stats, ref_signals)
                     if signal:
                         results.append(signal)
                 except Exception as e:
@@ -779,6 +802,7 @@ class KalshiAgent:
         market: dict[str, Any],
         odds_by_sport: dict[str, list[dict[str, Any]]],
         stats: dict[str, int],
+        ref_signals: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """
         Evaluate a single-game Kalshi market against sharp Odds API lines.
@@ -975,9 +999,47 @@ class KalshiAgent:
 
         stats["matched"] += 1
 
+        # ── Referee adjustment for NBA totals ──────────────────────────
+        confidence = 0.85
+        ref_detail = ""
+        if kalshi_type == "totals" and ref_signals and matched_event:
+            home = matched_event.get("home_team", "")
+            away = matched_event.get("away_team", "")
+            # Try multiple key formats to find the ref signal
+            ref_sig = (
+                ref_signals.get(f"{home}_{away}")
+                or ref_signals.get(f"{away}_{home}")
+            )
+            if not ref_sig:
+                # Partial match on team abbreviations
+                for rk, rv in (ref_signals or {}).items():
+                    rk_teams = rk.lower().replace("_", " ")
+                    if (home.lower()[:3] in rk_teams or away.lower()[:3] in rk_teams):
+                        ref_sig = rv
+                        break
+
+            if ref_sig and ref_sig.get("strength", 0) > 0.1:
+                ref_direction = ref_sig["direction"]  # "over", "under", "neutral"
+                ref_strength = ref_sig["strength"]    # 0-1
+                ref_point_adj = ref_sig["point_adjustment"]
+
+                # Does the ref signal agree with our trade direction?
+                trade_is_over = (side == "yes")  # YES on totals = over
+                ref_agrees = (
+                    (ref_direction == "over" and trade_is_over) or
+                    (ref_direction == "under" and not trade_is_over)
+                )
+
+                if ref_agrees:
+                    confidence = min(0.95, confidence + ref_strength * 0.10)
+                    ref_detail = f" ref={ref_direction}({ref_point_adj:+.1f}pts,str={ref_strength:.2f}) ✓"
+                elif ref_direction != "neutral":
+                    confidence = max(0.60, confidence - ref_strength * 0.08)
+                    ref_detail = f" ref={ref_direction}({ref_point_adj:+.1f}pts,str={ref_strength:.2f}) ✗"
+
         self.engine.log_event(
             "info",
-            f"Single-game edge: {ticker} {side} edge={edge:.1%} (sharp={sharp_prob:.1%} vs kalshi={kalshi_implied:.1%}) {match_desc} | {title[:60]}",
+            f"Single-game edge: {ticker} {side} edge={edge:.1%} (sharp={sharp_prob:.1%} vs kalshi={kalshi_implied:.1%}) {match_desc}{ref_detail} | {title[:60]}",
             strategy="sports",
         )
 
@@ -989,9 +1051,9 @@ class KalshiAgent:
             our_prob=sharp_prob,
             kalshi_prob=kalshi_implied,
             market_title=title,
-            confidence=0.85,
+            confidence=confidence,
             signal_source="sharp_single_game",
-            details=f"sport={odds_sport} type={kalshi_type} match={match_desc} edge={edge:.4f}",
+            details=f"sport={odds_sport} type={kalshi_type} match={match_desc} edge={edge:.4f}{ref_detail}",
         )
 
         # Return candidate for global ranking (execution happens later)
@@ -1002,7 +1064,7 @@ class KalshiAgent:
             "title": title,
             "side": side,
             "edge": edge,
-            "confidence": 0.85,
+            "confidence": confidence,
             "our_prob": sharp_prob,
             "kalshi_prob": kalshi_implied,
             "price_cents": price_cents,
@@ -1716,15 +1778,14 @@ class KalshiAgent:
         elif econ_type == "fed_funds":
             if "cut" in title_lower:
                 our_prob_yes = signal.get("p_cut", 0.3)
-                confidence = 0.4
             elif "hike" in title_lower or "raise" in title_lower:
                 our_prob_yes = signal.get("p_hike", 0.1)
-                confidence = 0.4
             elif "hold" in title_lower or "unchanged" in title_lower:
                 our_prob_yes = signal.get("p_hold", 0.6)
-                confidence = 0.4
             else:
                 return None
+            # FedWatch gives real market-implied probs — boost confidence accordingly
+            confidence = 0.4 + signal.get("confidence_boost", 0.0)
 
         elif econ_type == "gas_price" and signal.get("estimated_next") is not None:
             if threshold_price_match:
@@ -1889,10 +1950,47 @@ class KalshiAgent:
                 if name:
                     name_to_player[name] = pf
 
-            # Step 4: Evaluate each market
+            # Step 4: Fetch Odds API consensus props for cross-reference
+            # {"player_name|prop_type": {consensus_over_prob, line, books_count}}
+            odds_props_lookup: dict[str, dict] = {}
+            try:
+                from app.services.odds_api import get_odds_api
+                odds_client = get_odds_api()
+                all_odds_props = await odds_client.get_all_todays_props()
+                for op in all_odds_props:
+                    key = f"{op['player'].lower()}|{op['prop_type']}"
+                    if key not in odds_props_lookup or op.get("books_count", 0) > odds_props_lookup[key].get("books_count", 0):
+                        odds_props_lookup[key] = op
+                self.engine.log_event(
+                    "info",
+                    f"Odds API props: {len(all_odds_props)} lines across {len(odds_props_lookup)} player/prop combos",
+                    strategy="nba_props",
+                )
+            except Exception as e:
+                logger.debug("Odds API props fetch failed for NBA cross-ref", error=str(e))
+
+            # Step 5: Fetch SportsDataIO player news for injury/status context
+            sdio_news: dict[str, list[dict]] = {}  # player_name_lower -> news items
+            try:
+                from app.services.sportsdataio import get_sportsdataio
+                sdio = get_sportsdataio()
+                news_items = await sdio.get_news()
+                for item in news_items:
+                    pname = (item.get("Name") or item.get("PlayerName") or "").lower().strip()
+                    if pname:
+                        sdio_news.setdefault(pname, []).append(item)
+                logger.info(f"SportsDataIO news: {len(news_items)} items for {len(sdio_news)} players")
+            except Exception as e:
+                logger.debug("SportsDataIO news fetch failed", error=str(e))
+
+            # Step 6: Evaluate each market
             for market in props_markets:
                 try:
-                    result = await self._evaluate_nba_prop(market, name_to_player, loop)
+                    result = await self._evaluate_nba_prop(
+                        market, name_to_player, loop,
+                        odds_props_lookup=odds_props_lookup,
+                        sdio_news=sdio_news,
+                    )
                     if result:
                         results.append(result)
                 except Exception as e:
@@ -1914,6 +2012,8 @@ class KalshiAgent:
         market: dict[str, Any],
         name_to_player: dict[str, dict],
         loop: asyncio.AbstractEventLoop,
+        odds_props_lookup: dict[str, dict] | None = None,
+        sdio_news: dict[str, list[dict]] | None = None,
     ) -> dict[str, Any] | None:
         """Evaluate a single NBA prop market using SmartPredictor."""
         ticker = market.get("ticker", "")
@@ -1988,6 +2088,68 @@ class KalshiAgent:
         our_prob_yes = over_prob
         confidence = confidence_score / 100.0  # Normalize to 0-1
 
+        # ── Cross-reference: Odds API consensus probability ──────────────────
+        # If sportsbooks' consensus agrees with our prediction, boost confidence.
+        # If they disagree significantly, reduce confidence.
+        odds_detail = ""
+        if odds_props_lookup and prop_type and player_name:
+            odds_key = f"{player_name.lower()}|{prop_type}"
+            odds_prop = odds_props_lookup.get(odds_key)
+            if not odds_prop:
+                # Try partial player name match
+                for ok, ov in odds_props_lookup.items():
+                    if ok.endswith(f"|{prop_type}") and player_name.lower()[:6] in ok:
+                        odds_prop = ov
+                        break
+
+            if odds_prop:
+                books_consensus_over = odds_prop.get("consensus_over_prob", 0.5)
+                books_count = odds_prop.get("books_count", 0)
+                # Agreement = both predict same direction (over vs under)
+                our_direction = over_prob > 0.5
+                books_direction = books_consensus_over > 0.5
+                agreement = our_direction == books_direction
+                divergence = abs(over_prob - books_consensus_over)
+
+                if agreement and books_count >= 2:
+                    # Both agree: boost confidence proportional to books coverage
+                    boost = min(0.12, divergence * 0.3 + (books_count / 10) * 0.05)
+                    confidence = min(0.95, confidence + boost)
+                    odds_detail = f" books={books_consensus_over:.2f}({books_count}bks) ✓"
+                elif not agreement and divergence > 0.08:
+                    # Significant disagreement: reduce confidence
+                    penalty = min(0.15, divergence * 0.5)
+                    confidence = max(0.10, confidence - penalty)
+                    odds_detail = f" books={books_consensus_over:.2f}({books_count}bks) ✗"
+
+        # ── SportsDataIO news: injury/status context ───────────────────────
+        news_detail = ""
+        if sdio_news and player_name:
+            player_news = sdio_news.get(player_name.lower(), [])
+            if not player_news:
+                # Try partial match
+                for nk, nv in sdio_news.items():
+                    if player_name.lower()[:6] in nk:
+                        player_news = nv
+                        break
+
+            if player_news:
+                # Check for injury/questionable keywords in most recent news
+                latest = player_news[0]
+                headline = (latest.get("Title") or latest.get("Content") or "").lower()
+                injury_keywords = ["out", "questionable", "doubtful", "injured", "sidelined",
+                                   "day-to-day", "miss", "surgery", "sprain", "rest", "load"]
+                positive_keywords = ["return", "active", "available", "cleared", "full", "healthy"]
+
+                if any(kw in headline for kw in injury_keywords):
+                    # Player may be limited/out — reduce confidence significantly
+                    confidence = max(0.10, confidence - 0.20)
+                    news_detail = f" news=INJURY_RISK"
+                elif any(kw in headline for kw in positive_keywords):
+                    # Player confirmed healthy/active
+                    confidence = min(0.95, confidence + 0.05)
+                    news_detail = f" news=HEALTHY"
+
         # Calculate edge
         kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
         kalshi_no_implied = no_ask / 100.0 if no_ask > 0 else 0
@@ -2008,7 +2170,8 @@ class KalshiAgent:
         self.engine.log_event(
             "info",
             f"NBA pred: {player_name} {prop_type} line={line} pred={predicted_value:.1f} "
-            f"over_p={over_prob:.2f} → {side} edge={edge:.1%} conf={confidence:.2f} | {title[:50]}",
+            f"over_p={over_prob:.2f} → {side} edge={edge:.1%} conf={confidence:.2f}"
+            f"{odds_detail}{news_detail} | {title[:50]}",
             strategy="nba_props",
         )
 
@@ -2022,7 +2185,8 @@ class KalshiAgent:
             signal_source="smart_predictor",
             details=f"player={player_name} prop={prop_type} line={line} "
                     f"pred={predicted_value} over_p={over_prob:.3f} "
-                    f"agreement={prediction.get('ensemble_agreement', 0):.3f}",
+                    f"agreement={prediction.get('ensemble_agreement', 0):.3f}"
+                    f"{odds_detail}{news_detail}",
         )
         self._record_cross_signal("nba_props", ticker, side, our_prob, kalshi_prob, confidence)
 

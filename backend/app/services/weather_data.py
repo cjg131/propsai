@@ -268,7 +268,12 @@ class TomorrowIOClient:
         self._http = httpx.AsyncClient(timeout=15.0)
 
     async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
-        """Get Tomorrow.io forecast for a specific date."""
+        """Get Tomorrow.io forecast for a specific date.
+
+        Fetches BOTH daily summary AND hourly data. The hourly data gives us
+        per-hour temperatures which we aggregate to get true daily max/min —
+        more accurate than the daily summary alone.
+        """
         if not self.api_key:
             return None
 
@@ -281,23 +286,28 @@ class TomorrowIOClient:
         target_str = target_date.isoformat()
 
         try:
+            # Fetch daily + hourly in one request using comma-separated timesteps
             resp = await self._http.get(
                 "https://api.tomorrow.io/v4/weather/forecast",
                 params={
                     "location": f"{config['lat']},{config['lon']}",
                     "apikey": self.api_key,
                     "units": "imperial",
-                    "timesteps": "1d",
+                    "timesteps": "1d,1h",
+                    "fields": "temperatureMax,temperatureMin,temperature,precipitationProbabilityMax,precipitationIntensityMax,humidityMax,windSpeedMax",
                 },
             )
             resp.raise_for_status()
             data = resp.json()
 
-            daily = data.get("timelines", {}).get("daily", [])
+            timelines = data.get("timelines", {})
+            daily = timelines.get("daily", [])
+            hourly = timelines.get("hourly", [])
+
             if not daily:
                 return None
 
-            # Find the entry matching target_date
+            # Find the daily entry matching target_date
             target_day = None
             for day in daily:
                 if day.get("time", "")[:10] == target_str:
@@ -307,16 +317,39 @@ class TomorrowIOClient:
                 target_day = daily[0]  # fallback to first
 
             values = target_day.get("values", {})
+            high_from_daily = values.get("temperatureMax")
+            low_from_daily = values.get("temperatureMin")
+
+            # Refine high/low from hourly data for the target date
+            # Hourly gives us actual per-hour temps — more precise than daily summary
+            hourly_temps_for_date = [
+                h.get("values", {}).get("temperature")
+                for h in hourly
+                if h.get("time", "")[:10] == target_str
+                and h.get("values", {}).get("temperature") is not None
+            ]
+
+            if hourly_temps_for_date:
+                high_from_hourly = max(hourly_temps_for_date)
+                low_from_hourly = min(hourly_temps_for_date)
+                # Use hourly-derived values if available (more precise)
+                high_temp_f = high_from_hourly
+                low_temp_f = low_from_hourly
+            else:
+                high_temp_f = high_from_daily
+                low_temp_f = low_from_daily
 
             return {
                 "source": "tomorrow_io",
                 "city": city_key,
                 "date": target_day.get("time", "")[:10],
-                "high_temp_f": values.get("temperatureMax"),
-                "low_temp_f": values.get("temperatureMin"),
+                "high_temp_f": high_temp_f,
+                "low_temp_f": low_temp_f,
                 "precip_prob": values.get("precipitationProbabilityMax"),
                 "precip_inches": values.get("precipitationIntensityMax"),
                 "humidity": values.get("humidityMax"),
+                "wind_speed": values.get("windSpeedMax"),
+                "hourly_count": len(hourly_temps_for_date),
             }
 
         except Exception as e:

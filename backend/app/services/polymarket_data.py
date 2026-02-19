@@ -24,11 +24,14 @@ logger = get_logger(__name__)
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 
-# Map Kalshi market categories to Polymarket search terms
+# Map Kalshi market categories to Polymarket keyword filters.
+# Polymarket /markets has sports futures + political/macro — NOT crypto price brackets.
+# These keywords match what actually exists on Polymarket's active market feed.
 CATEGORY_SEARCH: dict[str, list[str]] = {
-    "crypto": ["bitcoin", "btc", "ethereum", "eth", "solana", "crypto"],
-    "finance": ["s&p 500", "sp500", "nasdaq", "stock market"],
-    "econ": ["cpi", "inflation", "fed rate", "unemployment", "gdp"],
+    "crypto": ["bitcoin", "ethereum", "crypto", "btc", "eth", "megaeth", "solana"],
+    "finance": ["stock", "s&p", "nasdaq", "market cap", "ipo"],
+    "econ": ["federal reserve", "inflation", "recession", "gdp", "unemployment", "tariff", "trade"],
+    "sports": ["nba finals", "stanley cup", "world cup", "super bowl", "championship"],
 }
 
 
@@ -52,7 +55,7 @@ class PolymarketData:
         try:
             resp = await client.get(
                 f"{GAMMA_BASE}/events",
-                params={"title": query, "active": "true", "limit": limit},
+                params={"title": query, "active": "true", "closed": "false", "limit": limit},
             )
             resp.raise_for_status()
             events = resp.json()
@@ -76,57 +79,76 @@ class PolymarketData:
             logger.debug(f"Polymarket price failed: {e}")
             return None
 
+    async def _fetch_active_markets(self, limit: int = 200) -> list[dict]:
+        """Fetch active Polymarket markets via /markets endpoint (works reliably)."""
+        client = await self._get_client()
+        try:
+            resp = await client.get(
+                f"{GAMMA_BASE}/markets",
+                params={"active": "true", "closed": "false", "limit": limit},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else data.get("markets", data.get("results", []))
+        except Exception as e:
+            logger.debug(f"Polymarket markets fetch failed: {e}")
+            return []
+
     async def get_cross_market_signals(
         self, category: str = "crypto"
     ) -> dict[str, dict[str, Any]]:
         """
         Fetch Polymarket prices for markets matching a category.
 
+        Uses /markets endpoint (bulk fetch + local keyword filter) since
+        the /events search API returns stale/wrong results.
+
         Returns:
-            {event_slug: {"title": str, "poly_price": float, "token_id": str, "markets": [...]}}
+            {slug: {"title": str, "poly_price": float, "question": str}}
         """
         now = time.time()
         cache_key = f"signals_{category}"
         if cache_key in self._cache and (now - self._cache_ts) < self._cache_ttl:
             return self._cache[cache_key]
 
-        search_terms = CATEGORY_SEARCH.get(category, [category])
-        all_events: dict[str, dict[str, Any]] = {}
+        keywords = CATEGORY_SEARCH.get(category, [category])
+        all_markets = await self._fetch_active_markets(limit=200)
+        matched: dict[str, dict[str, Any]] = {}
 
-        for term in search_terms[:3]:  # Limit searches
-            events = await self.search_events(term, limit=5)
-            for event in events:
-                slug = event.get("slug", "")
-                if not slug or slug in all_events:
-                    continue
+        for mkt in all_markets:
+            question = (mkt.get("question") or mkt.get("title") or "").lower()
+            if not question:
+                continue
 
-                title = event.get("title", "")
-                markets = event.get("markets", [])
+            # Check if any keyword matches the question
+            if not any(kw.lower() in question for kw in keywords):
+                continue
 
-                for mkt in markets[:3]:  # Limit markets per event
-                    # outcomePrices is a JSON string like '["0.65", "0.35"]'
-                    # YES price is the first element (index 0)
-                    outcome_prices_raw = mkt.get("outcomePrices", "[]")
-                    try:
-                        outcome_prices = json.loads(outcome_prices_raw) if isinstance(outcome_prices_raw, str) else outcome_prices_raw
-                        yes_price = float(outcome_prices[0]) if outcome_prices else None
-                    except (json.JSONDecodeError, IndexError, ValueError, TypeError):
-                        yes_price = None
+            # Parse outcomePrices — JSON string like '["0.65", "0.35"]'
+            outcome_prices_raw = mkt.get("outcomePrices", "[]")
+            try:
+                outcome_prices = json.loads(outcome_prices_raw) if isinstance(outcome_prices_raw, str) else outcome_prices_raw
+                yes_price = float(outcome_prices[0]) if outcome_prices else None
+            except (json.JSONDecodeError, IndexError, ValueError, TypeError):
+                yes_price = None
 
-                    if yes_price is not None and yes_price > 0:
-                        all_events[slug] = {
-                            "title": title,
-                            "question": mkt.get("question", title),
-                            "poly_price": round(yes_price * 100, 1),  # Convert to cents
-                            "token_id": "",
-                        }
-                        break  # One price per event is enough
+            # Skip resolved/illiquid markets
+            if yes_price is None or yes_price <= 0.02 or yes_price >= 0.98:
+                continue
 
-        self._cache[cache_key] = all_events
+            slug = mkt.get("slug") or mkt.get("id") or question[:40]
+            matched[str(slug)] = {
+                "title": mkt.get("title") or question,
+                "question": mkt.get("question") or question,
+                "poly_price": round(yes_price * 100, 1),
+                "token_id": mkt.get("clobTokenIds", [""])[0] if mkt.get("clobTokenIds") else "",
+            }
+
+        self._cache[cache_key] = matched
         self._cache_ts = now
 
-        logger.info(f"Polymarket: found {len(all_events)} {category} markets with prices")
-        return all_events
+        logger.info(f"Polymarket: found {len(matched)} {category} markets with prices")
+        return matched
 
     async def get_edge_signal(
         self, kalshi_title: str, kalshi_price_cents: int, category: str = "crypto"

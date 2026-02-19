@@ -766,6 +766,15 @@ class KalshiAgent:
 
         if not yes_ask and not no_ask:
             return None
+
+        # Skip markets where one side is at near-zero — already resolved or no real liquidity.
+        # yes_ask=1, no_ask=100 means Kalshi already knows the answer; there's nothing to buy.
+        if yes_ask <= 5 or no_ask <= 5:
+            return None
+        # Both sides must have real two-sided liquidity (not 100¢ = no sellers)
+        if yes_ask >= 97 or no_ask >= 97:
+            return None
+
         if market.get("volume", 0) < 50:
             return None
 
@@ -2299,6 +2308,10 @@ class KalshiAgent:
                 return results
 
             # Step 3: Build enriched feature set (sync call in executor)
+            # SportsDataIO may 403 — that's okay, BDL enrichment (Step 3b) will
+            # still build player data from game logs. Don't return early.
+            players: dict = {}
+            schedule: dict = {}
             try:
                 feature_data = await loop.run_in_executor(
                     None, self.nba_data.build_full_feature_set
@@ -2311,12 +2324,11 @@ class KalshiAgent:
                     strategy="nba_props",
                 )
             except Exception as e:
-                self.engine.log_event("warning", f"Feature build failed: {e}", strategy="nba_props")
-                return results
-
-            if not players:
-                self.engine.log_event("info", "No player data available (off-season?)", strategy="nba_props")
-                return results
+                self.engine.log_event(
+                    "warning",
+                    f"SportsDataIO feature build failed ({e}), continuing with BDL-only data",
+                    strategy="nba_props",
+                )
 
             # Build name -> player lookup for matching
             name_to_player: dict[str, dict] = {}

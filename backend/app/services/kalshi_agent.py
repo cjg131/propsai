@@ -2353,6 +2353,40 @@ class KalshiAgent:
                     if full:
                         bdl_name_map[full] = ap
 
+                # If SportsDataIO failed (name_to_player is empty), seed from BDL active players.
+                # Only seed players who appear in the actual Kalshi prop markets — not all 517.
+                # Fetching game logs for all active players would hang the cycle.
+                if not name_to_player and bdl_name_map:
+                    # Build set of player names from Kalshi prop markets
+                    kalshi_player_names: set[str] = set()
+                    for m in props_markets:
+                        pn = (m.get("nba_props", {}).get("player_name") or "").lower().strip()
+                        if pn:
+                            kalshi_player_names.add(pn)
+
+                    for full_name, ap in bdl_name_map.items():
+                        # Only include if name matches a Kalshi market player
+                        if full_name in kalshi_player_names:
+                            name_to_player[full_name] = {
+                                "name": full_name,
+                                "team": (ap.get("team") or {}).get("abbreviation", ""),
+                                "position": ap.get("position", ""),
+                            }
+                        else:
+                            # Try last-name partial match
+                            parts = full_name.split()
+                            if parts and any(kn.endswith(parts[-1]) and len(parts[-1]) >= 4 for kn in kalshi_player_names):
+                                name_to_player[full_name] = {
+                                    "name": full_name,
+                                    "team": (ap.get("team") or {}).get("abbreviation", ""),
+                                    "position": ap.get("position", ""),
+                                }
+                    self.engine.log_event(
+                        "info",
+                        f"BDL fallback: seeded {len(name_to_player)} players from {len(kalshi_player_names)} Kalshi markets",
+                        strategy="nba_props",
+                    )
+
                 # Fetch game logs for all players we care about (bulk, one request)
                 bdl_ids_needed = []
                 name_to_bdl_id: dict[str, int] = {}

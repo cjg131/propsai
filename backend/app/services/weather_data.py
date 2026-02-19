@@ -16,28 +16,29 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Kalshi weather cities → NWS grid points and coordinates
+# Kalshi weather cities → NWS grid points, coordinates, and observation stations
+# nws_station: ICAO station ID used for real-time hourly observations
 CITY_CONFIGS = {
-    "NYC": {"lat": 40.7128, "lon": -74.0060, "nws_office": "OKX", "nws_grid": "33,37", "name": "New York", "tz": "America/New_York"},
-    "MIA": {"lat": 25.7617, "lon": -80.1918, "nws_office": "MFL", "nws_grid": "110,50", "name": "Miami", "tz": "America/New_York"},
-    "LAX": {"lat": 34.0522, "lon": -118.2437, "nws_office": "LOX", "nws_grid": "154,44", "name": "Los Angeles", "tz": "America/Los_Angeles"},
-    "CHI": {"lat": 41.8781, "lon": -87.6298, "nws_office": "LOT", "nws_grid": "76,73", "name": "Chicago", "tz": "America/Chicago"},
-    "AUS": {"lat": 30.2672, "lon": -97.7431, "nws_office": "EWX", "nws_grid": "156,91", "name": "Austin", "tz": "America/Chicago"},
-    "DFW": {"lat": 32.7767, "lon": -96.7970, "nws_office": "FWD", "nws_grid": "80,103", "name": "Dallas", "tz": "America/Chicago"},
-    "PHL": {"lat": 39.9526, "lon": -75.1652, "nws_office": "PHI", "nws_grid": "49,75", "name": "Philadelphia", "tz": "America/New_York"},
-    "DEN": {"lat": 39.7392, "lon": -104.9903, "nws_office": "BOU", "nws_grid": "62,60", "name": "Denver", "tz": "America/Denver"},
-    "SEA": {"lat": 47.6062, "lon": -122.3321, "nws_office": "SEW", "nws_grid": "124,67", "name": "Seattle", "tz": "America/Los_Angeles"},
-    "SFO": {"lat": 37.7749, "lon": -122.4194, "nws_office": "MTR", "nws_grid": "85,105", "name": "San Francisco", "tz": "America/Los_Angeles"},
-    "DCA": {"lat": 38.9072, "lon": -77.0369, "nws_office": "LWX", "nws_grid": "97,71", "name": "Washington DC", "tz": "America/New_York"},
-    "SLC": {"lat": 40.7608, "lon": -111.8910, "nws_office": "SLC", "nws_grid": "97,175", "name": "Salt Lake City", "tz": "America/Denver"},
-    "ATL": {"lat": 33.7490, "lon": -84.3880, "nws_office": "FFC", "nws_grid": "50,86", "name": "Atlanta", "tz": "America/New_York"},
-    "HOU": {"lat": 29.7604, "lon": -95.3698, "nws_office": "HGX", "nws_grid": "65,97", "name": "Houston", "tz": "America/Chicago"},
-    "BOS": {"lat": 42.3601, "lon": -71.0589, "nws_office": "BOX", "nws_grid": "71,90", "name": "Boston", "tz": "America/New_York"},
-    "LAS": {"lat": 36.1699, "lon": -115.1398, "nws_office": "VEF", "nws_grid": "126,97", "name": "Las Vegas", "tz": "America/Los_Angeles"},
-    "PHX": {"lat": 33.4484, "lon": -112.0740, "nws_office": "PSR", "nws_grid": "159,56", "name": "Phoenix", "tz": "America/Phoenix"},
-    "MSP": {"lat": 44.9778, "lon": -93.2650, "nws_office": "MPX", "nws_grid": "107,71", "name": "Minneapolis", "tz": "America/Chicago"},
-    "NOL": {"lat": 29.9511, "lon": -90.0715, "nws_office": "LIX", "nws_grid": "76,76", "name": "New Orleans", "tz": "America/Chicago"},
-    "DET": {"lat": 42.3314, "lon": -83.0458, "nws_office": "DTX", "nws_grid": "65,33", "name": "Detroit", "tz": "America/Detroit"},
+    "NYC": {"lat": 40.7128, "lon": -74.0060, "nws_office": "OKX", "nws_grid": "33,37", "name": "New York", "tz": "America/New_York", "nws_station": "KNYC"},
+    "MIA": {"lat": 25.7617, "lon": -80.1918, "nws_office": "MFL", "nws_grid": "110,50", "name": "Miami", "tz": "America/New_York", "nws_station": "KMIA"},
+    "LAX": {"lat": 34.0522, "lon": -118.2437, "nws_office": "LOX", "nws_grid": "154,44", "name": "Los Angeles", "tz": "America/Los_Angeles", "nws_station": "KLAX"},
+    "CHI": {"lat": 41.8781, "lon": -87.6298, "nws_office": "LOT", "nws_grid": "76,73", "name": "Chicago", "tz": "America/Chicago", "nws_station": "KORD"},
+    "AUS": {"lat": 30.2672, "lon": -97.7431, "nws_office": "EWX", "nws_grid": "156,91", "name": "Austin", "tz": "America/Chicago", "nws_station": "KAUS"},
+    "DFW": {"lat": 32.7767, "lon": -96.7970, "nws_office": "FWD", "nws_grid": "80,103", "name": "Dallas", "tz": "America/Chicago", "nws_station": "KDFW"},
+    "PHL": {"lat": 39.9526, "lon": -75.1652, "nws_office": "PHI", "nws_grid": "49,75", "name": "Philadelphia", "tz": "America/New_York", "nws_station": "KPHL"},
+    "DEN": {"lat": 39.7392, "lon": -104.9903, "nws_office": "BOU", "nws_grid": "62,60", "name": "Denver", "tz": "America/Denver", "nws_station": "KDEN"},
+    "SEA": {"lat": 47.6062, "lon": -122.3321, "nws_office": "SEW", "nws_grid": "124,67", "name": "Seattle", "tz": "America/Los_Angeles", "nws_station": "KSEA"},
+    "SFO": {"lat": 37.7749, "lon": -122.4194, "nws_office": "MTR", "nws_grid": "85,105", "name": "San Francisco", "tz": "America/Los_Angeles", "nws_station": "KSFO"},
+    "DCA": {"lat": 38.9072, "lon": -77.0369, "nws_office": "LWX", "nws_grid": "97,71", "name": "Washington DC", "tz": "America/New_York", "nws_station": "KDCA"},
+    "SLC": {"lat": 40.7608, "lon": -111.8910, "nws_office": "SLC", "nws_grid": "97,175", "name": "Salt Lake City", "tz": "America/Denver", "nws_station": "KSLC"},
+    "ATL": {"lat": 33.7490, "lon": -84.3880, "nws_office": "FFC", "nws_grid": "50,86", "name": "Atlanta", "tz": "America/New_York", "nws_station": "KATL"},
+    "HOU": {"lat": 29.7604, "lon": -95.3698, "nws_office": "HGX", "nws_grid": "65,97", "name": "Houston", "tz": "America/Chicago", "nws_station": "KHOU"},
+    "BOS": {"lat": 42.3601, "lon": -71.0589, "nws_office": "BOX", "nws_grid": "71,90", "name": "Boston", "tz": "America/New_York", "nws_station": "KBOS"},
+    "LAS": {"lat": 36.1699, "lon": -115.1398, "nws_office": "VEF", "nws_grid": "126,97", "name": "Las Vegas", "tz": "America/Los_Angeles", "nws_station": "KLAS"},
+    "PHX": {"lat": 33.4484, "lon": -112.0740, "nws_office": "PSR", "nws_grid": "159,56", "name": "Phoenix", "tz": "America/Phoenix", "nws_station": "KPHX"},
+    "MSP": {"lat": 44.9778, "lon": -93.2650, "nws_office": "MPX", "nws_grid": "107,71", "name": "Minneapolis", "tz": "America/Chicago", "nws_station": "KMSP"},
+    "NOL": {"lat": 29.9511, "lon": -90.0715, "nws_office": "LIX", "nws_grid": "76,76", "name": "New Orleans", "tz": "America/Chicago", "nws_station": "KMSY"},
+    "DET": {"lat": 42.3314, "lon": -83.0458, "nws_office": "DTX", "nws_grid": "65,33", "name": "Detroit", "tz": "America/Detroit", "nws_station": "KDTW"},
 }
 
 
@@ -136,6 +137,87 @@ class NWSClient:
         except Exception as e:
             logger.warning("NWS hourly forecast failed", city=city_key, error=str(e))
             return []
+
+    async def get_current_observations(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """
+        Fetch real-time hourly observations from NWS for a city.
+        Returns the observed high/low so far today from actual station data.
+        This is the core of the same-day arbitrage strategy — we KNOW what
+        the thermometer has read, not what we predict it will read.
+        """
+        config = CITY_CONFIGS.get(city_key)
+        if not config:
+            return None
+        station = config.get("nws_station")
+        if not station:
+            return None
+
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+
+        try:
+            # NWS observations endpoint — returns last ~72 hours of hourly obs
+            url = f"https://api.weather.gov/stations/{station}/observations"
+            resp = await self._http.get(url, params={"limit": 48})
+            resp.raise_for_status()
+            data = resp.json()
+
+            features = data.get("features", [])
+            if not features:
+                return None
+
+            target_str = target_date.isoformat()
+            temps_today: list[float] = []
+            latest_temp_f: float | None = None
+            latest_time: str = ""
+
+            for feature in features:
+                props = feature.get("properties", {})
+                obs_time = props.get("timestamp", "")  # ISO8601 UTC
+                if not obs_time or obs_time[:10] != target_str:
+                    continue
+
+                # Temperature is in Celsius from NWS — convert to Fahrenheit
+                temp_c_obj = props.get("temperature", {})
+                temp_c = temp_c_obj.get("value") if isinstance(temp_c_obj, dict) else temp_c_obj
+                if temp_c is None:
+                    continue
+
+                temp_f = round(temp_c * 9 / 5 + 32, 1)
+                temps_today.append(temp_f)
+
+                # Track the most recent observation
+                if not latest_time or obs_time > latest_time:
+                    latest_time = obs_time
+                    latest_temp_f = temp_f
+
+            if not temps_today:
+                return None
+
+            observed_high = max(temps_today)
+            observed_low = min(temps_today)
+            obs_count = len(temps_today)
+
+            logger.debug(
+                f"NWS observations {city_key}: {obs_count} readings today, "
+                f"high={observed_high}°F low={observed_low}°F current={latest_temp_f}°F"
+            )
+
+            return {
+                "source": "nws_observations",
+                "city": city_key,
+                "date": target_str,
+                "observed_high_f": observed_high,
+                "observed_low_f": observed_low,
+                "current_temp_f": latest_temp_f,
+                "latest_obs_time": latest_time,
+                "obs_count": obs_count,
+                "all_temps_f": temps_today,
+            }
+
+        except Exception as e:
+            logger.warning("NWS observations failed", city=city_key, station=station, error=str(e))
+            return None
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -435,6 +517,10 @@ class WeatherConsensus:
         self.open_meteo = OpenMeteoClient()
         self.tomorrow_io = TomorrowIOClient(api_key=tomorrow_io_key)
         self.visual_crossing = VisualCrossingClient(api_key=visual_crossing_key)
+
+    async def get_current_observations(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Fetch real-time NWS observations for same-day arbitrage."""
+        return await self.nws.get_current_observations(city_key, target_date)
 
     async def get_all_forecasts(self, city_key: str, target_date: date | None = None) -> dict[str, Any]:
         """Fetch forecasts from all available sources for a city on a specific date.

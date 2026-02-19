@@ -478,6 +478,8 @@ class KalshiAgent:
 
             # Group by (city_code, target_date) so each group gets the right forecast
             from datetime import UTC, date as _date, datetime as _datetime
+            import re as _re
+            today_str = _datetime.now(UTC).date().isoformat()
             by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for m in weather_markets:
                 city_code = m.get("weather", {}).get("city_code", "")
@@ -487,18 +489,35 @@ class KalshiAgent:
                 # close_time is UTC and can be off by one day; ticker date is authoritative
                 ticker = m.get("ticker", "")
                 try:
-                    import re as _re
                     date_match = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})-', ticker)
                     if date_match:
-                        # e.g. KXHIGHDEN-26FEB19-B36.5 → year=26, month=FEB, day=19
                         target_date_str = _datetime.strptime(
                             date_match.group(1) + date_match.group(2) + date_match.group(3), "%y%b%d"
                         ).date().isoformat()
                     else:
-                        target_date_str = _datetime.now(UTC).date().isoformat()
+                        target_date_str = today_str
                 except Exception:
-                    target_date_str = _datetime.now(UTC).date().isoformat()
+                    target_date_str = today_str
                 by_city_date.setdefault((city_code, target_date_str), []).append(m)
+
+            # Pre-fetch NWS real-time observations for all cities with same-day markets.
+            # These are ACTUAL recorded temps, not forecasts — the core of same-day arbitrage.
+            obs_by_city: dict[str, dict[str, Any]] = {}
+            same_day_cities = {city for city, dt in by_city_date if dt == today_str}
+            for city_key in same_day_cities:
+                try:
+                    obs = await self.weather.get_current_observations(city_key)
+                    if obs:
+                        obs_by_city[city_key] = obs
+                        self.engine.log_event(
+                            "info",
+                            f"{city_key} observations: high={obs['observed_high_f']}°F "
+                            f"low={obs['observed_low_f']}°F current={obs['current_temp_f']}°F "
+                            f"({obs['obs_count']} readings)",
+                            strategy="weather",
+                        )
+                except Exception as e:
+                    logger.debug("Observation fetch failed", city=city_key, error=str(e))
 
             fetched_forecasts: dict[tuple[str, str], dict[str, Any]] = {}
             for i, ((city_key, target_date_str), city_markets) in enumerate(by_city_date.items()):
@@ -510,13 +529,37 @@ class KalshiAgent:
                     )
                     continue
 
+                is_same_day = (target_date_str == today_str)
+                obs = obs_by_city.get(city_key) if is_same_day else None
+
+                # ── Same-day markets: observations-first logic ───────────
+                # If we have real observed data, evaluate markets directly from
+                # actuals — no forecast needed. Skip forecast fetch entirely.
+                if is_same_day and obs:
+                    for market in city_markets:
+                        candidate = await self._evaluate_weather_market_observed(market, obs)
+                        if candidate:
+                            results.append(candidate)
+                    continue
+
+                # ── Same-day markets without observations: skip entirely ──
+                # Never use probabilistic forecast logic for today's markets.
+                # A 30% forecast probability still loses 70% of the time.
+                if is_same_day and not obs:
+                    self.engine.log_event(
+                        "info",
+                        f"{city_key}: same-day market but no observations available — skipping {len(city_markets)} markets",
+                        strategy="weather",
+                    )
+                    continue
+
+                # ── Future-day markets: use multi-source forecast consensus ─
                 # Rate-limit: pause between city/date combos to avoid 429s
                 if i > 0:
                     await asyncio.sleep(2.0)
 
                 target_date = _date.fromisoformat(target_date_str)
 
-                # Get forecasts from all sources for the correct date
                 forecasts = await self.weather.get_all_forecasts(city_key, target_date=target_date)
                 source_count = len(forecasts.get("sources", {}))
 
@@ -530,7 +573,7 @@ class KalshiAgent:
 
                 self.engine.log_event(
                     "info",
-                    f"{city_key}: {len(city_markets)} markets, {source_count} forecast sources",
+                    f"{city_key}: {len(city_markets)} markets, {source_count} forecast sources (future-day)",
                     strategy="weather",
                 )
 
@@ -679,6 +722,215 @@ class KalshiAgent:
             "count": count,
             "price_cents": price_cents,
             "signal_id": signal_id,
+        }
+
+    async def _evaluate_weather_market_observed(
+        self,
+        market: dict[str, Any],
+        obs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """
+        Evaluate a same-day weather market using ACTUAL NWS observations.
+
+        This is the real-time arbitrage path. Instead of forecasting what the
+        temperature will be, we read what it HAS been from the NWS station.
+
+        Logic:
+        - If observed_high > threshold: "above threshold" is near-certain YES
+        - If observed_high < threshold AND day is late (>3 PM local): near-certain NO
+        - If outcome is not yet deterministic (early in day, close to threshold): skip
+        - Minimum 3 observations required (data quality gate)
+        """
+        from datetime import UTC, datetime as _dt, timezone as _tz
+        import zoneinfo as _zi
+
+        ticker = market.get("ticker", "")
+        title = market.get("title", "")
+        yes_ask = market.get("yes_ask", 0)
+        no_ask = market.get("no_ask", 0)
+        weather_info = market.get("weather", {})
+        market_type = weather_info.get("market_type", "high_temp")
+        strike_type = weather_info.get("strike_type", "") or market.get("strike_type", "")
+
+        # Parse strikes
+        floor_strike = weather_info.get("floor_strike") or market.get("floor_strike")
+        cap_strike = weather_info.get("cap_strike") or market.get("cap_strike")
+        try:
+            floor_strike = float(floor_strike) if floor_strike is not None else None
+        except (ValueError, TypeError):
+            floor_strike = None
+        try:
+            cap_strike = float(cap_strike) if cap_strike is not None else None
+        except (ValueError, TypeError):
+            cap_strike = None
+
+        if not yes_ask and not no_ask:
+            return None
+        if market.get("volume", 0) < 50:
+            return None
+
+        # Skip markets closing within 30 min (too late to act)
+        close_time = market.get("close_time", "")
+        if close_time:
+            try:
+                close_dt = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
+                mins_left = (close_dt - _dt.now(UTC)).total_seconds() / 60
+                if mins_left < 30:
+                    return None
+            except (ValueError, TypeError):
+                pass
+
+        # Need at least 3 hourly readings for data quality
+        if obs.get("obs_count", 0) < 3:
+            return None
+
+        observed_high = obs.get("observed_high_f")
+        observed_low = obs.get("observed_low_f")
+        current_temp = obs.get("current_temp_f")
+        obs_count = obs.get("obs_count", 0)
+
+        # Determine local time of day to assess if the day's high is likely set
+        city_key = weather_info.get("city_code", "")
+        city_cfg = CITY_CONFIGS.get(city_key, {})
+        city_tz_str = city_cfg.get("tz", "America/New_York")
+        try:
+            city_tz = _zi.ZoneInfo(city_tz_str)
+            local_hour = _dt.now(city_tz).hour
+        except Exception:
+            local_hour = _dt.now(UTC).hour
+
+        # Daily high is typically reached between noon and 4 PM local time.
+        # After 4 PM we can be confident the high is set for the day.
+        # Before noon, the high could still rise significantly.
+        HIGH_LIKELY_SET_HOUR = 16   # 4 PM local
+        HIGH_POSSIBLY_SET_HOUR = 13  # 1 PM local — use with larger margin
+
+        our_prob_yes: float | None = None
+        certainty_label = ""
+
+        if market_type in ("high_temp",) and observed_high is not None:
+            if strike_type == "greater" and floor_strike is not None:
+                # "Will high be > X°F?"
+                if observed_high > floor_strike:
+                    # Already exceeded — YES is near-certain
+                    our_prob_yes = 0.97
+                    certainty_label = f"obs_high={observed_high}°F > threshold={floor_strike}°F ✓CONFIRMED"
+                elif local_hour >= HIGH_LIKELY_SET_HOUR and observed_high < floor_strike - 1.0:
+                    # Day is done, high never reached threshold — NO is near-certain
+                    our_prob_yes = 0.03
+                    certainty_label = f"obs_high={observed_high}°F < threshold={floor_strike}°F day_done ✓CONFIRMED"
+                elif local_hour >= HIGH_POSSIBLY_SET_HOUR and observed_high < floor_strike - 3.0:
+                    # Afternoon, high is 3°F below threshold — very unlikely to reach it
+                    our_prob_yes = 0.08
+                    certainty_label = f"obs_high={observed_high}°F << threshold={floor_strike}°F afternoon"
+
+            elif strike_type == "less" and cap_strike is not None:
+                # "Will high be < X°F?"
+                if observed_high >= cap_strike:
+                    # Already exceeded cap — NO is near-certain (YES = false)
+                    our_prob_yes = 0.03
+                    certainty_label = f"obs_high={observed_high}°F >= cap={cap_strike}°F ✓CONFIRMED NO"
+                elif local_hour >= HIGH_LIKELY_SET_HOUR and observed_high < cap_strike - 1.0:
+                    # Day done, high stayed below cap — YES is near-certain
+                    our_prob_yes = 0.97
+                    certainty_label = f"obs_high={observed_high}°F < cap={cap_strike}°F day_done ✓CONFIRMED YES"
+                elif local_hour >= HIGH_POSSIBLY_SET_HOUR and observed_high < cap_strike - 4.0:
+                    # Afternoon, high is well below cap — likely YES
+                    our_prob_yes = 0.90
+                    certainty_label = f"obs_high={observed_high}°F << cap={cap_strike}°F afternoon"
+
+        elif market_type in ("low_temp",) and observed_low is not None:
+            if strike_type == "greater" and floor_strike is not None:
+                if observed_low > floor_strike:
+                    our_prob_yes = 0.97
+                    certainty_label = f"obs_low={observed_low}°F > threshold={floor_strike}°F ✓CONFIRMED"
+                elif local_hour >= 10 and observed_low < floor_strike - 2.0:
+                    our_prob_yes = 0.05
+                    certainty_label = f"obs_low={observed_low}°F < threshold={floor_strike}°F morning_done"
+            elif strike_type == "less" and cap_strike is not None:
+                if observed_low >= cap_strike:
+                    our_prob_yes = 0.03
+                    certainty_label = f"obs_low={observed_low}°F >= cap={cap_strike}°F ✓CONFIRMED NO"
+                elif local_hour >= 10 and observed_low < cap_strike - 2.0:
+                    our_prob_yes = 0.95
+                    certainty_label = f"obs_low={observed_low}°F < cap={cap_strike}°F morning_done"
+
+        if our_prob_yes is None:
+            # Outcome not yet deterministic — skip, don't guess
+            return None
+
+        # Calculate edge
+        kalshi_yes_prob = yes_ask / 100.0 if yes_ask > 0 else 0
+        kalshi_no_prob = no_ask / 100.0 if no_ask > 0 else 0
+        our_prob_no = 1.0 - our_prob_yes
+
+        yes_edge = our_prob_yes - kalshi_yes_prob if kalshi_yes_prob > 0 else 0
+        no_edge = our_prob_no - kalshi_no_prob if kalshi_no_prob > 0 else 0
+
+        if yes_edge >= no_edge and yes_edge > 0:
+            side, edge, our_prob, kalshi_prob, price_cents = "yes", yes_edge, our_prob_yes, kalshi_yes_prob, yes_ask
+        elif no_edge > yes_edge and no_edge > 0:
+            side, edge, our_prob, kalshi_prob, price_cents = "no", no_edge, our_prob_no, kalshi_no_prob, no_ask
+        else:
+            return None
+
+        # Require meaningful edge — but lower bar than forecast since this is near-certain
+        MIN_OBSERVED_EDGE = 0.10
+        if edge < MIN_OBSERVED_EDGE:
+            return None
+
+        # High confidence since this is based on actuals, not forecast
+        confidence = 0.95 if our_prob_yes >= 0.90 or our_prob_yes <= 0.10 else 0.80
+
+        enriched_title = self._enrich_weather_title(ticker, title)
+
+        self.engine.log_event(
+            "info",
+            f"OBSERVED ARBITRAGE: {ticker} {side} edge={edge:.1%} (our={our_prob:.0%} vs kalshi={kalshi_prob:.0%}) "
+            f"obs_count={obs_count} {certainty_label} | {enriched_title[:60]}",
+            strategy="weather",
+        )
+
+        signal_id = self.engine.record_signal(
+            strategy="weather",
+            ticker=ticker,
+            side=side,
+            our_prob=our_prob,
+            kalshi_prob=kalshi_prob,
+            market_title=enriched_title,
+            confidence=confidence,
+            signal_source="weather_observed_arbitrage",
+            details=f"{certainty_label} obs_count={obs_count} local_hour={local_hour}",
+        )
+
+        count = self.engine.calculate_position_size(
+            strategy="weather",
+            edge=edge,
+            price_cents=price_cents,
+            confidence=confidence,
+            ticker=ticker,
+        )
+
+        if count <= 0:
+            return {
+                "ticker": ticker, "title": title, "side": side, "edge": edge,
+                "our_prob": our_prob, "kalshi_prob": kalshi_prob, "confidence": confidence,
+                "action": "skip", "reason": "position_size_zero",
+            }
+
+        return {
+            "strategy": "weather",
+            "ticker": ticker,
+            "title": title,
+            "side": side,
+            "edge": edge,
+            "our_prob": our_prob,
+            "kalshi_prob": kalshi_prob,
+            "confidence": confidence,
+            "count": count,
+            "price_cents": price_cents,
+            "signal_id": signal_id,
+            "signal_source": "weather_observed_arbitrage",
         }
 
     # ── Cross-Market Sports Strategy ───────────────────────────────

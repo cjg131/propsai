@@ -1930,6 +1930,7 @@ class KalshiAgent:
                     None, self.nba_data.build_full_feature_set
                 )
                 players = feature_data.get("players", {})
+                schedule = feature_data.get("schedule", {})
                 self.engine.log_event(
                     "info",
                     f"Built features for {len(players)} players",
@@ -1949,6 +1950,141 @@ class KalshiAgent:
                 name = (pf.get("name") or "").strip().lower()
                 if name:
                     name_to_player[name] = pf
+
+            # Step 3b: Enrich players with BallDontLie rolling averages + rest/matchup features
+            # These are the most predictive features in the model but were always 0 without this.
+            try:
+                from app.services.balldontlie import get_balldontlie
+                bdl = get_balldontlie()
+
+                # Get all active player IDs from BDL (name -> BDL player dict)
+                active_players = await loop.run_in_executor(None, bdl.get_active_players)
+                bdl_name_map: dict[str, dict] = {}
+                for ap in active_players:
+                    fname = (ap.get("first_name") or "").strip()
+                    lname = (ap.get("last_name") or "").strip()
+                    full = f"{fname} {lname}".lower().strip()
+                    if full:
+                        bdl_name_map[full] = ap
+
+                # Fetch game logs for all players we care about (bulk, one request)
+                bdl_ids_needed = []
+                name_to_bdl_id: dict[str, int] = {}
+                for pname in name_to_player:
+                    bdl_p = bdl_name_map.get(pname)
+                    if not bdl_p:
+                        # Try partial match on last name
+                        parts = pname.split()
+                        if parts:
+                            last = parts[-1]
+                            for bn, bp in bdl_name_map.items():
+                                if bn.endswith(last) and len(last) >= 4:
+                                    bdl_p = bp
+                                    break
+                    if bdl_p:
+                        bid = bdl_p.get("id")
+                        if bid:
+                            bdl_ids_needed.append(bid)
+                            name_to_bdl_id[pname] = bid
+
+                if bdl_ids_needed:
+                    bulk_logs = await loop.run_in_executor(
+                        None, bdl.get_bulk_game_logs, bdl_ids_needed
+                    )
+                    # Enrich each player with BDL features
+                    from datetime import date as _date
+                    today = _date.today()
+                    for pname, pf in name_to_player.items():
+                        bid = name_to_bdl_id.get(pname)
+                        if not bid or bid not in bulk_logs:
+                            continue
+                        logs = bulk_logs[bid]
+                        if not logs:
+                            continue
+                        # Rolling averages
+                        gl_feats = bdl.build_player_game_log_features(logs)
+                        pf.update(gl_feats)
+                        # Rest / schedule load features
+                        rest_feats = bdl.build_rest_features_from_logs(logs, today)
+                        pf["rest_days"] = rest_feats.get("days_rest", pf.get("rest_days", 2))
+                        pf["is_b2b"] = bool(rest_feats.get("is_b2b", 0))
+                        pf["games_last_7"] = rest_feats.get("games_last_7", pf.get("games_last_7", 3))
+                        pf["is_3_in_4"] = bool(rest_feats.get("is_3_in_4", 0))
+                        # Matchup features (vs today's opponent)
+                        opp_team = pf.get("opponent", "")
+                        if opp_team:
+                            # Find BDL team ID for opponent
+                            opp_bdl_id = None
+                            for log in logs[:5]:
+                                game = log.get("game", {})
+                                team_id = log.get("team", {}).get("id")
+                                home_id = game.get("home_team_id")
+                                vis_id = game.get("visitor_team_id")
+                                opp_id = vis_id if team_id == home_id else home_id
+                                if opp_id:
+                                    opp_bdl_id = opp_id
+                                    break
+                            if opp_bdl_id:
+                                mu_feats = bdl.build_matchup_features(logs, opp_bdl_id)
+                                pf.update(mu_feats)
+
+                    self.engine.log_event(
+                        "info",
+                        f"BDL enrichment: {len(bulk_logs)}/{len(bdl_ids_needed)} players enriched with rolling averages",
+                        strategy="nba_props",
+                    )
+            except Exception as e:
+                logger.warning("BDL enrichment failed", error=str(e))
+
+            # Step 3c: Fetch Odds API game lines (spread, over_under) and wire into player features
+            # These are key SmartPredictor features that were always 0 without this.
+            try:
+                from app.services.odds_api import get_odds_api as _get_odds_api
+                _odds_client = _get_odds_api()
+                game_lines_dict = await _odds_client.get_game_lines()
+                # get_game_lines() returns {event_id: {home_team, away_team, spread_home, spread_away, total}}
+                game_lines_map: dict[str, dict] = {}
+                for gl in game_lines_dict.values():
+                    home = (gl.get("home_team") or "").upper()
+                    away = (gl.get("away_team") or "").upper()
+                    spread_home = gl.get("spread_home", 0.0) or 0.0
+                    spread_away = gl.get("spread_away", 0.0) or 0.0
+                    total = gl.get("total", 220.0) or 220.0
+                    if home:
+                        game_lines_map[home] = {"spread": spread_home, "over_under": total}
+                    if away:
+                        game_lines_map[away] = {"spread": spread_away, "over_under": total}
+                # Inject into each player's feature dict
+                for pf in name_to_player.values():
+                    team = (pf.get("team") or "").upper()
+                    gl_entry = game_lines_map.get(team, {})
+                    if gl_entry:
+                        pf["spread"] = gl_entry["spread"]
+                        pf["over_under"] = gl_entry["over_under"]
+                logger.info(f"Game lines: enriched players from {len(game_lines_map)} team lines")
+            except Exception as e:
+                logger.debug("Game lines enrichment failed", error=str(e))
+
+            # Step 3d: Fetch NewsSentimentService player sentiment and wire into player features
+            # injury_mentioned / rest_mentioned / news_sentiment were always 0 without this.
+            try:
+                from app.services.news_sentiment import get_news_sentiment as _get_ns
+                _ns_svc = _get_ns()
+                known_players = set(name_to_player.keys())
+                player_sentiment = await loop.run_in_executor(
+                    None, _ns_svc.build_player_sentiment, known_players, 48
+                )
+                for pname, sent in player_sentiment.items():
+                    pf = name_to_player.get(pname)
+                    if pf:
+                        pf["news_sentiment"] = sent.get("news_sentiment", 0.0)
+                        pf["injury_mentioned"] = sent.get("injury_mentioned", 0)
+                        pf["rest_mentioned"] = sent.get("rest_mentioned", 0)
+                        pf["hot_streak_mentioned"] = sent.get("hot_streak_mentioned", 0)
+                mentioned = sum(1 for v in player_sentiment.values() if v.get("news_volume", 0) > 0)
+                logger.info(f"News sentiment: {mentioned}/{len(known_players)} players with news")
+            except Exception as e:
+                logger.debug("News sentiment enrichment failed", error=str(e))
 
             # Step 4: Fetch Odds API consensus props for cross-reference
             # {"player_name|prop_type": {consensus_over_prob, line, books_count}}
@@ -1983,6 +2119,22 @@ class KalshiAgent:
             except Exception as e:
                 logger.debug("SportsDataIO news fetch failed", error=str(e))
 
+            # Step 5b: Fetch SportsDataIO injury report and build player status lookup
+            # get_injuries() was never called — wire it in now to penalize injured players
+            sdio_injuries: dict[str, str] = {}  # player_name_lower -> injury status
+            try:
+                from app.services.sportsdataio import get_sportsdataio as _get_sdio
+                _sdio = _get_sdio()
+                injury_items = await _sdio.get_injuries()
+                for inj in injury_items:
+                    pname = (inj.get("Name") or inj.get("PlayerName") or "").lower().strip()
+                    status = (inj.get("Status") or "").strip()
+                    if pname and status:
+                        sdio_injuries[pname] = status
+                logger.info(f"SportsDataIO injuries: {len(sdio_injuries)} players with injury status")
+            except Exception as e:
+                logger.debug("SportsDataIO injuries fetch failed", error=str(e))
+
             # Step 6: Evaluate each market
             for market in props_markets:
                 try:
@@ -1990,6 +2142,7 @@ class KalshiAgent:
                         market, name_to_player, loop,
                         odds_props_lookup=odds_props_lookup,
                         sdio_news=sdio_news,
+                        sdio_injuries=sdio_injuries,
                     )
                     if result:
                         results.append(result)
@@ -2014,6 +2167,7 @@ class KalshiAgent:
         loop: asyncio.AbstractEventLoop,
         odds_props_lookup: dict[str, dict] | None = None,
         sdio_news: dict[str, list[dict]] | None = None,
+        sdio_injuries: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Evaluate a single NBA prop market using SmartPredictor."""
         ticker = market.get("ticker", "")
@@ -2065,6 +2219,29 @@ class KalshiAgent:
             logger.debug("Player not found in data", player=player_name)
             return None
 
+        # ── SportsDataIO injury status: skip Out/Doubtful, penalize Questionable ──
+        injury_status_detail = ""
+        if sdio_injuries and player_name:
+            inj_key = player_name.lower().strip()
+            inj_status = sdio_injuries.get(inj_key, "")
+            if not inj_status:
+                # Partial match on last name
+                parts = inj_key.split()
+                if parts:
+                    last = parts[-1]
+                    for ik, iv in sdio_injuries.items():
+                        if ik.endswith(last) and len(last) >= 4:
+                            inj_status = iv
+                            break
+            if inj_status:
+                status_upper = inj_status.upper()
+                if status_upper in ("OUT", "DOUBTFUL", "IR", "SUSPENDED"):
+                    logger.debug(f"Skipping {player_name}: injury status={inj_status}")
+                    return None
+                elif status_upper in ("QUESTIONABLE", "DAY-TO-DAY", "DTD"):
+                    injury_status_detail = f" inj={inj_status}"
+                    # Will apply confidence penalty after prediction
+
         if not self.predictor:
             return None
 
@@ -2087,6 +2264,10 @@ class KalshiAgent:
         # Kalshi "yes" typically means "over the line"
         our_prob_yes = over_prob
         confidence = confidence_score / 100.0  # Normalize to 0-1
+
+        # Apply injury status confidence penalty for Questionable/DTD players
+        if injury_status_detail:
+            confidence = max(0.10, confidence - 0.15)
 
         # ── Cross-reference: Odds API consensus probability ──────────────────
         # If sportsbooks' consensus agrees with our prediction, boost confidence.
@@ -2171,7 +2352,7 @@ class KalshiAgent:
             "info",
             f"NBA pred: {player_name} {prop_type} line={line} pred={predicted_value:.1f} "
             f"over_p={over_prob:.2f} → {side} edge={edge:.1%} conf={confidence:.2f}"
-            f"{odds_detail}{news_detail} | {title[:50]}",
+            f"{injury_status_detail}{odds_detail}{news_detail} | {title[:50]}",
             strategy="nba_props",
         )
 

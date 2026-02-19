@@ -45,6 +45,13 @@ PROP_STAT_MAP = {
     "steals": "stl_pg",
     "blocks": "blk_pg",
     "turnovers": "tov_pg",
+    # Combined props — map to the dominant component stat
+    "pra": "pts_pg",           # points+rebounds+assists → use pts as anchor
+    "points_rebounds": "pts_pg",
+    "points_assists": "pts_pg",
+    "rebounds_assists": "reb_pg",
+    "first_basket": "pts_pg",  # first basket scorer → scoring rate proxy
+    "double_double": "pts_pg", # double-double → scoring/rebounding rate proxy
 }
 
 # BDL rolling-average key for each prop
@@ -56,6 +63,12 @@ PROP_BDL_KEY = {
     "steals": "stl",
     "blocks": "blk",
     "turnovers": "tov",
+    "pra": "pts",
+    "points_rebounds": "pts",
+    "points_assists": "pts",
+    "rebounds_assists": "reb",
+    "first_basket": "pts",
+    "double_double": "pts",
 }
 
 # Opponent defense column for each prop (from SportsDataIO team features)
@@ -67,6 +80,12 @@ PROP_OPP_DEF = {
     "steals": "opp_stl_allowed",
     "blocks": "opp_blk_allowed",
     "turnovers": "opp_pts_allowed",
+    "pra": "opp_pts_allowed",
+    "points_rebounds": "opp_pts_allowed",
+    "points_assists": "opp_pts_allowed",
+    "rebounds_assists": "opp_reb_allowed",
+    "first_basket": "opp_pts_allowed",
+    "double_double": "opp_pts_allowed",
 }
 
 # Focused feature columns — only features that vary meaningfully during training.

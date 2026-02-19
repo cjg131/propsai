@@ -2836,10 +2836,9 @@ class KalshiAgent:
         except Exception as e:
             self.engine.log_event("warning", f"Kalshi WebSocket error: {e}, using REST fallback")
 
-        self._weather_task = asyncio.create_task(self._staggered_loop(self._weather_loop, 0))
-        self._monitor_task = asyncio.create_task(self._staggered_loop(self._monitor_loop, 20))
-        self._crypto_task = asyncio.create_task(self._staggered_loop(self._crypto_loop, 60))
-        self._main_task = asyncio.create_task(self._staggered_loop(self._main_strategy_loop, 180))
+        # Boot cycle: run ALL strategies once immediately, rank globally, deploy best signals.
+        # After this completes the independent loops take over on their normal schedules.
+        asyncio.create_task(self._boot_then_start_loops())
 
     async def stop(self) -> None:
         """Stop the autonomous agent loops."""
@@ -2857,8 +2856,60 @@ class KalshiAgent:
 
         logger.info("Kalshi agent stopped")
 
-    async def _weather_loop(self) -> None:
+    async def _boot_then_start_loops(self) -> None:
+        """
+        On agent startup: run ALL strategies concurrently, merge every candidate
+        into one pool, rank globally by edge×confidence, and deploy the best signals.
+        Then start the independent recurring loops.
+        """
+        self.engine.log_event("info", "Boot cycle: running all strategies concurrently")
+        try:
+            # Run weather, crypto, sports, NBA props concurrently
+            # Finance/econ only if market hours
+            tasks = [
+                self.run_weather_cycle(),
+                self.run_crypto_cycle(),
+                self.run_sports_cycle(),
+                self.run_nba_props_cycle(),
+            ]
+            if self._is_us_market_hours():
+                tasks.append(self.run_finance_cycle())
+                tasks.append(self.run_econ_cycle())
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            all_candidates: list[dict[str, Any]] = []
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning("Boot cycle strategy error", error=str(r))
+                    continue
+                if isinstance(r, list):
+                    tradeable = [c for c in r if c.get("action") != "skip"]
+                    all_candidates.extend(tradeable)
+
+            self.engine.log_event(
+                "info",
+                f"Boot cycle: {len(all_candidates)} total candidates across all strategies",
+            )
+
+            if all_candidates:
+                await self.execute_ranked_signals(all_candidates)
+
+        except Exception as e:
+            self.engine.log_event("error", f"Boot cycle failed: {e}")
+            logger.error("Boot cycle error", error=str(e))
+
+        # Start recurring loops in sleep-first mode so they don't immediately
+        # re-run what the boot cycle just executed.
+        self._weather_task = asyncio.create_task(self._weather_loop(sleep_first=True))
+        self._monitor_task = asyncio.create_task(self._monitor_loop(sleep_first=True))
+        self._crypto_task = asyncio.create_task(self._crypto_loop(sleep_first=True))
+        self._main_task = asyncio.create_task(self._main_strategy_loop(sleep_first=True))
+
+    async def _weather_loop(self, sleep_first: bool = False) -> None:
         """Weather strategy loop — runs every 1 hour. Collects candidates and executes via global ranking."""
+        if sleep_first:
+            await asyncio.sleep(60 * 60)
         while self._running:
             try:
                 if not self.engine.kill_switch:
@@ -2875,9 +2926,11 @@ class KalshiAgent:
 
             await asyncio.sleep(60 * 60)
 
-    async def _crypto_loop(self) -> None:
+    async def _crypto_loop(self, sleep_first: bool = False) -> None:
         """Crypto strategy loop — runs every 2 minutes (15-min markets need fast reaction).
         Crypto runs on its own fast loop and executes via global ranking."""
+        if sleep_first:
+            await asyncio.sleep(2 * 60)
         while self._running:
             try:
                 if not self.engine.kill_switch:
@@ -2901,12 +2954,14 @@ class KalshiAgent:
             return False
         return 9 <= now_et.hour < 17
 
-    async def _main_strategy_loop(self) -> None:
+    async def _main_strategy_loop(self, sleep_first: bool = False) -> None:
         """
         Unified strategy loop for sports, finance, econ, NBA props.
         Runs every 5 minutes. Collects candidates from all strategies,
         ranks them globally, and executes the best ones.
         """
+        if sleep_first:
+            await asyncio.sleep(5 * 60)
         while self._running:
             try:
                 if not self.engine.kill_switch:
@@ -2953,8 +3008,10 @@ class KalshiAgent:
 
             await asyncio.sleep(5 * 60)
 
-    async def _monitor_loop(self) -> None:
+    async def _monitor_loop(self, sleep_first: bool = False) -> None:
         """Position monitor + settlement loop — runs every 2 minutes."""
+        if sleep_first:
+            await asyncio.sleep(2 * 60)
         last_summary_date = ""
         while self._running:
             try:

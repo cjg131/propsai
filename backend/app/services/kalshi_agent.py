@@ -2862,43 +2862,26 @@ class KalshiAgent:
         into one pool, rank globally by edge×confidence, and deploy the best signals.
         Then start the independent recurring loops.
         """
-        self.engine.log_event("info", "Boot cycle: running all strategies concurrently")
+        self.engine.log_event("info", "Boot cycle: running all strategies sequentially")
         try:
-            # Run weather, crypto, sports, NBA props concurrently.
-            # Each strategy gets 90s — if it times out we still execute whatever
-            # the other strategies already found.
-            BOOT_TIMEOUT = 90
+            all_candidates: list[dict[str, Any]] = []
 
-            async def _timed(coro, name: str):
+            for name, coro in [
+                ("weather", self.run_weather_cycle()),
+                ("crypto", self.run_crypto_cycle()),
+                ("sports", self.run_sports_cycle()),
+                ("nba_props", self.run_nba_props_cycle()),
+            ] + ([
+                ("finance", self.run_finance_cycle()),
+                ("econ", self.run_econ_cycle()),
+            ] if self._is_us_market_hours() else []):
                 try:
-                    return await asyncio.wait_for(coro, timeout=BOOT_TIMEOUT)
-                except asyncio.TimeoutError:
-                    self.engine.log_event("warning", f"Boot cycle: {name} timed out after {BOOT_TIMEOUT}s")
-                    return []
+                    result = await coro
+                    tradeable = [c for c in result if c.get("action") != "skip"]
+                    all_candidates.extend(tradeable)
+                    self.engine.log_event("info", f"Boot cycle: {name} → {len(tradeable)} candidates")
                 except Exception as e:
                     self.engine.log_event("warning", f"Boot cycle: {name} error: {e}")
-                    return []
-
-            coros = [
-                _timed(self.run_weather_cycle(), "weather"),
-                _timed(self.run_crypto_cycle(), "crypto"),
-                _timed(self.run_sports_cycle(), "sports"),
-                _timed(self.run_nba_props_cycle(), "nba_props"),
-            ]
-            if self._is_us_market_hours():
-                coros.append(_timed(self.run_finance_cycle(), "finance"))
-                coros.append(_timed(self.run_econ_cycle(), "econ"))
-
-            results = await asyncio.gather(*coros, return_exceptions=True)
-
-            all_candidates: list[dict[str, Any]] = []
-            for r in results:
-                if isinstance(r, Exception):
-                    logger.warning("Boot cycle strategy error", error=str(r))
-                    continue
-                if isinstance(r, list):
-                    tradeable = [c for c in r if c.get("action") != "skip"]
-                    all_candidates.extend(tradeable)
 
             self.engine.log_event(
                 "info",

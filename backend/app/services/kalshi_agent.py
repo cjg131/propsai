@@ -2864,19 +2864,32 @@ class KalshiAgent:
         """
         self.engine.log_event("info", "Boot cycle: running all strategies concurrently")
         try:
-            # Run weather, crypto, sports, NBA props concurrently
-            # Finance/econ only if market hours
-            tasks = [
-                self.run_weather_cycle(),
-                self.run_crypto_cycle(),
-                self.run_sports_cycle(),
-                self.run_nba_props_cycle(),
+            # Run weather, crypto, sports, NBA props concurrently.
+            # Each strategy gets 90s — if it times out we still execute whatever
+            # the other strategies already found.
+            BOOT_TIMEOUT = 90
+
+            async def _timed(coro, name: str):
+                try:
+                    return await asyncio.wait_for(coro, timeout=BOOT_TIMEOUT)
+                except asyncio.TimeoutError:
+                    self.engine.log_event("warning", f"Boot cycle: {name} timed out after {BOOT_TIMEOUT}s")
+                    return []
+                except Exception as e:
+                    self.engine.log_event("warning", f"Boot cycle: {name} error: {e}")
+                    return []
+
+            coros = [
+                _timed(self.run_weather_cycle(), "weather"),
+                _timed(self.run_crypto_cycle(), "crypto"),
+                _timed(self.run_sports_cycle(), "sports"),
+                _timed(self.run_nba_props_cycle(), "nba_props"),
             ]
             if self._is_us_market_hours():
-                tasks.append(self.run_finance_cycle())
-                tasks.append(self.run_econ_cycle())
+                coros.append(_timed(self.run_finance_cycle(), "finance"))
+                coros.append(_timed(self.run_econ_cycle(), "econ"))
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*coros, return_exceptions=True)
 
             all_candidates: list[dict[str, Any]] = []
             for r in results:

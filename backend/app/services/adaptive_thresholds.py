@@ -28,7 +28,7 @@ DB_PATH = Path(__file__).parent.parent / "data" / "trading_engine.db"
 DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
     "weather": {"min_edge": 0.08, "min_confidence": 0.30},
     "sports": {"min_edge": 0.03, "min_confidence": 0.85},
-    "crypto": {"min_edge": 0.08, "min_confidence": 0.20},
+    "crypto": {"min_edge": 0.05, "min_confidence": 0.15},
     "finance": {"min_edge": 0.05, "min_confidence": 0.25},
     "econ": {"min_edge": 0.05, "min_confidence": 0.25},
     "nba_props": {"min_edge": 0.05, "min_confidence": 0.30},

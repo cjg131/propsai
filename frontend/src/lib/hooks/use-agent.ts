@@ -82,6 +82,7 @@ export interface AgentTrade {
   pnl: number;
   settled_at: string;
   notes: string;
+  thesis: string;
 }
 
 export interface AgentSignal {

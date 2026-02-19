@@ -28,6 +28,9 @@ import {
   LineChart,
   Landmark,
   Dribbble,
+  ChevronDown,
+  ChevronRight,
+  FileText,
 } from "lucide-react";
 import {
   useAgentStatus,
@@ -47,6 +50,7 @@ import {
   useRunFinanceCycle,
   useRunEconCycle,
   useRunNbaPropsCycle,
+  type AgentTrade,
 } from "@/lib/hooks/use-agent";
 
 function StatusBadge({ active, label }: { active: boolean; label: string }) {
@@ -80,6 +84,132 @@ function PnlDisplay({ value }: { value: number }) {
     <span className={`font-mono font-bold ${color}`}>
       {value >= 0 ? "+" : ""}${value.toFixed(2)}
     </span>
+  );
+}
+
+function TradeRow({ trade }: { trade: AgentTrade }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasThesis = Boolean(trade.thesis);
+  const isSettled = trade.action === "sell" || trade.status === "settled";
+
+  return (
+    <>
+      <tr
+        className={`border-b border-muted/50 hover:bg-muted/30 ${hasThesis ? "cursor-pointer" : ""}`}
+        onClick={() => hasThesis && setExpanded((e) => !e)}
+      >
+        <td className="py-2 pr-1 w-4">
+          {hasThesis ? (
+            expanded ? (
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3 w-3 text-muted-foreground" />
+            )
+          ) : null}
+        </td>
+        <td className="py-2 pr-3 font-mono text-xs">
+          {new Date(trade.timestamp).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </td>
+        <td className="py-2 pr-3">
+          <Badge variant="outline" className="text-[10px]">
+            {trade.strategy}
+          </Badge>
+        </td>
+        <td
+          className="py-2 pr-3 max-w-[300px] truncate"
+          title={trade.market_title}
+        >
+          {trade.market_title || trade.ticker}
+        </td>
+        <td className="py-2 pr-3">
+          <Badge
+            variant="outline"
+            className={
+              trade.side === "yes"
+                ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
+                : "bg-red-500/10 text-red-600 border-red-500/30"
+            }
+          >
+            {trade.side.toUpperCase()}
+          </Badge>
+        </td>
+        <td className="py-2 pr-3">
+          <Badge
+            variant="outline"
+            className={
+              trade.action === "sell"
+                ? "bg-orange-500/10 text-orange-600 border-orange-500/30"
+                : "bg-blue-500/10 text-blue-600 border-blue-500/30"
+            }
+          >
+            {(trade.action || "buy").toUpperCase()}
+          </Badge>
+        </td>
+        <td className="py-2 pr-3 text-right font-mono">{trade.count}x</td>
+        <td className="py-2 pr-3 text-right font-mono">{trade.price_cents}c</td>
+        <td className="py-2 pr-3 text-right font-mono">
+          {(trade.edge * 100).toFixed(1)}%
+        </td>
+        <td className="py-2 pr-3 text-right">
+          {trade.pnl != null && trade.pnl !== 0 ? (
+            <PnlDisplay value={trade.pnl} />
+          ) : isSettled ? (
+            <PnlDisplay value={trade.pnl ?? 0} />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="py-2">
+          {isSettled ? (
+            (trade.pnl ?? 0) > 0 ? (
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            ) : (
+              <XCircle className="h-4 w-4 text-red-500" />
+            )
+          ) : (
+            <Clock className="h-4 w-4 text-amber-500" />
+          )}
+        </td>
+      </tr>
+      {expanded && hasThesis && (
+        <tr className="border-b border-muted/50 bg-muted/20">
+          <td colSpan={11} className="px-4 py-3">
+            <div className="flex gap-2 items-start">
+              <FileText className="h-4 w-4 text-blue-500 mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide">
+                  Trade Thesis
+                </p>
+                <p className="text-sm text-foreground leading-relaxed">
+                  {trade.thesis}
+                </p>
+                {trade.result && isSettled && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    <span className="font-medium">Outcome:</span>{" "}
+                    Market resolved{" "}
+                    <span
+                      className={
+                        (trade.pnl ?? 0) > 0
+                          ? "text-emerald-600 font-semibold"
+                          : "text-red-500 font-semibold"
+                      }
+                    >
+                      {(trade.pnl ?? 0) > 0 ? "WIN" : "LOSS"}
+                    </span>{" "}
+                    · P&L: <PnlDisplay value={trade.pnl ?? 0} />
+                  </p>
+                )}
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -660,6 +790,7 @@ export default function AgentPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b text-left text-muted-foreground">
+                      <th className="pb-2 pr-1 w-4"></th>
                       <th className="pb-2 pr-3">Time</th>
                       <th className="pb-2 pr-3">Strategy</th>
                       <th className="pb-2 pr-3">Market</th>
@@ -674,83 +805,7 @@ export default function AgentPage() {
                   </thead>
                   <tbody>
                     {tradesData.trades.map((trade) => (
-                      <tr
-                        key={trade.id}
-                        className="border-b border-muted/50 hover:bg-muted/30"
-                      >
-                        <td className="py-2 pr-3 font-mono text-xs">
-                          {new Date(trade.timestamp).toLocaleString([], {
-                            month: "short",
-                            day: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </td>
-                        <td className="py-2 pr-3">
-                          <Badge variant="outline" className="text-[10px]">
-                            {trade.strategy}
-                          </Badge>
-                        </td>
-                        <td
-                          className="py-2 pr-3 max-w-[350px] truncate"
-                          title={trade.market_title}
-                        >
-                          {trade.market_title || trade.ticker}
-                        </td>
-                        <td className="py-2 pr-3">
-                          <Badge
-                            variant="outline"
-                            className={
-                              trade.side === "yes"
-                                ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
-                                : "bg-red-500/10 text-red-600 border-red-500/30"
-                            }
-                          >
-                            {trade.side.toUpperCase()}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-3">
-                          <Badge
-                            variant="outline"
-                            className={
-                              trade.action === "sell"
-                                ? "bg-orange-500/10 text-orange-600 border-orange-500/30"
-                                : "bg-blue-500/10 text-blue-600 border-blue-500/30"
-                            }
-                          >
-                            {(trade.action || "buy").toUpperCase()}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-3 text-right font-mono">
-                          {trade.count}x
-                        </td>
-                        <td className="py-2 pr-3 text-right font-mono">
-                          {trade.price_cents}c
-                        </td>
-                        <td className="py-2 pr-3 text-right font-mono">
-                          {(trade.edge * 100).toFixed(1)}%
-                        </td>
-                        <td className="py-2 pr-3 text-right">
-                          {trade.pnl != null && trade.pnl !== 0 ? (
-                            <PnlDisplay value={trade.pnl} />
-                          ) : trade.status === "settled" ? (
-                            <PnlDisplay value={trade.pnl ?? 0} />
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td className="py-2">
-                          {trade.action === "sell" || trade.status === "settled" ? (
-                            (trade.pnl ?? 0) > 0 ? (
-                              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            ) : (
-                              <XCircle className="h-4 w-4 text-red-500" />
-                            )
-                          ) : (
-                            <Clock className="h-4 w-4 text-amber-500" />
-                          )}
-                        </td>
-                      </tr>
+                      <TradeRow key={trade.id} trade={trade} />
                     ))}
                   </tbody>
                 </table>

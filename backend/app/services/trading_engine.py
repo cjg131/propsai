@@ -111,9 +111,17 @@ class TradingEngine:
                 result TEXT DEFAULT '',
                 pnl REAL DEFAULT 0,
                 settled_at TEXT DEFAULT '',
-                notes TEXT DEFAULT ''
+                notes TEXT DEFAULT '',
+                thesis TEXT DEFAULT ''
             )
         """)
+
+        # Migration: add thesis column to existing DBs
+        try:
+            c.execute("ALTER TABLE trades ADD COLUMN thesis TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -504,6 +512,7 @@ class TradingEngine:
         signal_source: str = "",
         signal_id: str = "",
         notes: str = "",
+        thesis: str = "",
     ) -> dict[str, Any]:
         """
         Execute a trade (paper or live).
@@ -622,6 +631,7 @@ class TradingEngine:
             "edge": edge,
             "signal_source": signal_source,
             "notes": notes,
+            "thesis": thesis,
         }
 
         conn = sqlite3.connect(str(DB_PATH))
@@ -630,8 +640,8 @@ class TradingEngine:
             """INSERT INTO trades
             (id, timestamp, strategy, ticker, market_title, side, action, count,
              price_cents, cost, fee, order_type, paper_mode, order_id, status,
-             our_prob, kalshi_prob, edge, signal_source, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             our_prob, kalshi_prob, edge, signal_source, notes, thesis)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trade_id,
                 trade["timestamp"],
@@ -653,6 +663,7 @@ class TradingEngine:
                 edge,
                 signal_source,
                 notes,
+                thesis,
             ),
         )
 
@@ -745,7 +756,9 @@ class TradingEngine:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute("""
-            SELECT id, ticker, side, action, count, cost, fee, strategy
+            SELECT id, ticker, market_title, side, action, count, price_cents,
+                   cost, fee, strategy, our_prob, kalshi_prob, edge,
+                   signal_source, notes, thesis
             FROM trades
             WHERE status = 'filled'
             ORDER BY ticker

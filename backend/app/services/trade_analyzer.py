@@ -33,6 +33,7 @@ DB_PATH = Path(__file__).parent.parent / "data" / "trading_engine.db"
 
 # Rate limiting: max analyses per hour
 MAX_ANALYSES_PER_HOUR = 10
+MAX_THESES_PER_HOUR = 30  # Theses are cheaper — allow more
 MODEL = "gpt-5.2"
 FALLBACK_MODEL = "gpt-4o-mini"
 
@@ -45,6 +46,7 @@ class TradeAnalyzer:
         api_key = getattr(settings, "openai_api_key", "")
         self.client = AsyncOpenAI(api_key=api_key) if api_key else None
         self._analysis_timestamps: list[float] = []
+        self._thesis_timestamps: list[float] = []
         self._init_db()
 
     def _init_db(self) -> None:
@@ -80,6 +82,138 @@ class TradeAnalyzer:
         self._analysis_timestamps = [t for t in self._analysis_timestamps if t > cutoff]
         return len(self._analysis_timestamps) >= MAX_ANALYSES_PER_HOUR
 
+    def _thesis_rate_limited(self) -> bool:
+        """Check if we've exceeded the hourly thesis generation limit."""
+        now = time.time()
+        cutoff = now - 3600
+        self._thesis_timestamps = [t for t in self._thesis_timestamps if t > cutoff]
+        return len(self._thesis_timestamps) >= MAX_THESES_PER_HOUR
+
+    async def generate_thesis(self, candidate: dict[str, Any]) -> str:
+        """
+        Generate a natural language pre-trade thesis using GPT-5.2.
+        Called before a trade is placed. Returns a 2-3 sentence thesis string,
+        or empty string if unavailable (rate limited, no API key, etc.).
+
+        The thesis explains WHY this trade is being placed based on all signal data.
+        """
+        if not self.client or self._thesis_rate_limited():
+            return ""
+
+        strategy = candidate.get("strategy", "")
+        title = candidate.get("title", "")
+        side = candidate.get("side", "yes")
+        edge = candidate.get("edge", 0)
+        confidence = candidate.get("confidence", 0)
+        our_prob = candidate.get("our_prob", 0)
+        kalshi_prob = candidate.get("kalshi_prob", 0)
+        signal_source = candidate.get("signal_source", "")
+        price_cents = candidate.get("price_cents", 0)
+
+        # Build signal detail string from candidate metadata
+        signal_details: list[str] = []
+
+        if strategy == "finance":
+            fin_index = candidate.get("finance_index", "SP500")
+            signal_details += [
+                f"Index: {fin_index}",
+                f"Signal source: {signal_source}",
+                f"Our probability: {our_prob:.1%}",
+                f"Kalshi implied: {kalshi_prob:.1%}",
+                f"Edge: {edge:.1%}",
+                f"Confidence: {confidence:.1%}",
+                f"Market price: {price_cents}c",
+                f"Side: {side.upper()} (betting market resolves {side})",
+            ]
+        elif strategy == "weather":
+            signal_details += [
+                f"Signal source: {signal_source}",
+                f"Our probability: {our_prob:.1%}",
+                f"Kalshi implied: {kalshi_prob:.1%}",
+                f"Edge: {edge:.1%}",
+                f"Confidence: {confidence:.1%} (forecast source agreement)",
+                f"Side: {side.upper()}",
+            ]
+        elif strategy in ("sports", "nba_props"):
+            signal_details += [
+                f"Signal source: {signal_source}",
+                f"Our probability: {our_prob:.1%}",
+                f"Sharp book implied: {kalshi_prob:.1%}",
+                f"Edge: {edge:.1%}",
+                f"Confidence: {confidence:.1%}",
+                f"Side: {side.upper()}",
+            ]
+        elif strategy == "crypto":
+            signal_details += [
+                f"Signal source: {signal_source}",
+                f"Our probability (p_up): {our_prob:.1%}",
+                f"Kalshi implied: {kalshi_prob:.1%}",
+                f"Edge: {edge:.1%}",
+                f"Confidence: {confidence:.1%}",
+                f"Side: {side.upper()}",
+            ]
+        elif strategy == "econ":
+            signal_details += [
+                f"Signal source: {signal_source}",
+                f"Our probability: {our_prob:.1%}",
+                f"Kalshi implied: {kalshi_prob:.1%}",
+                f"Edge: {edge:.1%}",
+                f"Confidence: {confidence:.1%}",
+                f"Side: {side.upper()}",
+            ]
+
+        signal_block = "\n".join(signal_details)
+
+        prompt = f"""You are an automated Kalshi prediction market trading bot. You are about to place the following trade. Write a 2-3 sentence thesis explaining WHY this trade is being placed based on the signal data.
+
+Market: {title}
+Strategy: {strategy}
+
+Signal Data:
+{signal_block}
+
+Write the thesis in plain English as if explaining to a human investor. Be specific about what the data shows and why it creates an edge. Do NOT use phrases like "the model predicts" — write as if you are the trading system explaining your reasoning. Keep it under 60 words."""
+
+        try:
+            model = MODEL
+            try:
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a quantitative trading system explaining your trade decisions. "
+                                "Be concise, specific, and data-driven. Write in first person as the system."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=120,
+                )
+            except Exception:
+                model = FALLBACK_MODEL
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a quantitative trading system explaining your trade decisions. Be concise and data-driven.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=120,
+                )
+
+            self._thesis_timestamps.append(time.time())
+            return (response.choices[0].message.content or "").strip()
+
+        except Exception as e:
+            logger.debug("Thesis generation failed", error=str(e))
+            return ""
+
     def _get_trade_context(self, trade: dict[str, Any]) -> str:
         """Build context string from trade data for the LLM prompt."""
         parts = [
@@ -99,6 +233,9 @@ class TradeAnalyzer:
             f"P&L: ${trade.get('pnl', 0):+.2f}",
             f"Result: {trade.get('result', '')}",
         ]
+        thesis = trade.get("thesis", "")
+        if thesis:
+            parts.insert(3, f"Original Thesis: {thesis}")
         return "\n".join(parts)
 
     async def analyze_trade(

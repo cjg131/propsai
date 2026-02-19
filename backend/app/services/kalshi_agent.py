@@ -332,11 +332,14 @@ class KalshiAgent:
             strategy = c.get("strategy", "")
             exclusive_key: str | None = None
 
-            if strategy == "finance" and c.get("is_bracket"):
+            if strategy == "finance":
                 fin_index = c.get("finance_index", "")
                 fin_expiry = c.get("finance_expiry", "")
                 if fin_index and fin_expiry:
-                    exclusive_key = f"finance_bracket_{fin_index}_{fin_expiry}"
+                    # Both bracket AND threshold markets on the same index+expiry are
+                    # mutually correlated — only trade the single highest-edge one.
+                    market_type = "bracket" if c.get("is_bracket") else "threshold"
+                    exclusive_key = f"finance_{market_type}_{fin_index}_{fin_expiry}"
 
             elif strategy == "sports":
                 ticker = c.get("ticker", "")
@@ -410,6 +413,13 @@ class KalshiAgent:
                 if count <= 0:
                     continue
 
+            # Generate pre-trade thesis via GPT-5.2 (non-blocking best-effort)
+            thesis = ""
+            try:
+                thesis = await self.trade_analyzer.generate_thesis(candidate)
+            except Exception:
+                pass
+
             trade = await self.engine.execute_trade(
                 strategy=strategy,
                 ticker=ticker,
@@ -422,6 +432,7 @@ class KalshiAgent:
                 signal_source=candidate.get("signal_source", ""),
                 signal_id=candidate.get("signal_id", ""),
                 notes=candidate.get("notes", ""),
+                thesis=thesis,
             )
 
             if trade and trade.get("status") not in ("blocked", "error", "timeout"):

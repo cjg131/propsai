@@ -149,7 +149,7 @@ class BallDontLieClient:
                     params["player_ids[]"] = [params["player_ids[]"], pid]
 
             try:
-                data = self._get_all_pages("stats", params, max_pages=20)
+                data = self._get_all_pages("stats", params, max_pages=5)
                 for row in data:
                     pid = row.get("player", {}).get("id")
                     if pid:

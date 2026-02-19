@@ -137,11 +137,18 @@ class PolymarketData:
                 continue
 
             slug = mkt.get("slug") or mkt.get("id") or question[:40]
+            # clobTokenIds is a JSON string like '["123","456"]' — parse it
+            clob_raw = mkt.get("clobTokenIds", "[]")
+            try:
+                clob_ids = json.loads(clob_raw) if isinstance(clob_raw, str) else (clob_raw or [])
+                token_id = clob_ids[0] if clob_ids else ""
+            except (json.JSONDecodeError, IndexError, TypeError):
+                token_id = ""
             matched[str(slug)] = {
                 "title": mkt.get("title") or question,
                 "question": mkt.get("question") or question,
                 "poly_price": round(yes_price * 100, 1),
-                "token_id": mkt.get("clobTokenIds", [""])[0] if mkt.get("clobTokenIds") else "",
+                "token_id": token_id,
             }
 
         self._cache[cache_key] = matched

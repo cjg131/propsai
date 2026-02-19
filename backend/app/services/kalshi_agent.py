@@ -2408,6 +2408,8 @@ class KalshiAgent:
                             name_to_bdl_id[pname] = bid
 
                 if bdl_ids_needed:
+                    # Cap to 50 players to prevent multi-minute bulk fetches
+                    bdl_ids_needed = bdl_ids_needed[:50]
                     bulk_logs = await loop.run_in_executor(
                         None, bdl.get_bulk_game_logs, bdl_ids_needed
                     )
@@ -2453,6 +2455,25 @@ class KalshiAgent:
                         f"BDL enrichment: {len(bulk_logs)}/{len(bdl_ids_needed)} players enriched with rolling averages",
                         strategy="nba_props",
                     )
+
+                # Map BDL season_avg_* fields → pts_pg/reb_pg/ast_pg etc.
+                # _build_feature_row reads pts_pg (from PROP_STAT_MAP), but BDL writes season_avg_pts.
+                # Without this mapping, avg_stat=0 for every player and predictions are meaningless.
+                BDL_TO_PG = {
+                    "season_avg_pts": "pts_pg",
+                    "season_avg_reb": "reb_pg",
+                    "season_avg_ast": "ast_pg",
+                    "season_avg_fg3m": "three_pm_pg",
+                    "season_avg_stl": "stl_pg",
+                    "season_avg_blk": "blk_pg",
+                    "season_avg_tov": "tov_pg",
+                    "season_avg_min": "mpg",
+                }
+                for pf in name_to_player.values():
+                    for bdl_key, pg_key in BDL_TO_PG.items():
+                        if bdl_key in pf and pg_key not in pf:
+                            pf[pg_key] = pf[bdl_key]
+
             except Exception as e:
                 logger.warning("BDL enrichment failed", error=str(e))
 

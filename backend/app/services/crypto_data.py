@@ -25,17 +25,25 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 
 # ── API endpoints ─────────────────────────────────────────────────
-# Binance.US public REST API (free, no key needed, US-accessible)
-BINANCE_SPOT_BASE = "https://api.binance.us/api/v3"
-# OKX public API for funding rates (free, no key needed, US-accessible)
+# Coinbase Exchange public REST API (free, no key needed, globally accessible)
+COINBASE_BASE = "https://api.exchange.coinbase.com"
+# OKX public API for funding rates (free, no key needed, globally accessible)
 OKX_PUBLIC_BASE = "https://www.okx.com/api/v5/public"
 
-# Coin → Binance spot symbol
+# Coin → Coinbase product ID
 CRYPTO_SYMBOLS = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
-    "XRP": "XRPUSDT",
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+    "XRP": "XRP-USD",
+}
+
+# Coinbase granularity in seconds for each interval
+COINBASE_GRANULARITY = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
 }
 
 # Coin → OKX perpetual swap instrument ID
@@ -79,40 +87,41 @@ class CryptoDataService:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    # ── Raw data fetchers (Binance public API, no key needed) ─────
+    # ── Raw data fetchers (Coinbase public API, no key needed) ─────
 
     async def get_klines(
         self, coin: str, interval: str = "1m", limit: int = 30
     ) -> list[dict[str, float]]:
-        """Fetch OHLCV klines from Binance spot API.
+        """Fetch OHLCV klines from Coinbase Exchange API.
         Supports real 1m, 5m, 15m, 1h intervals.
         """
-        symbol = CRYPTO_SYMBOLS.get(coin)
-        if not symbol:
+        product = CRYPTO_SYMBOLS.get(coin)
+        if not product:
             return []
 
+        granularity = COINBASE_GRANULARITY.get(interval, 60)
         client = await self._get_client()
 
         try:
-            url = f"{BINANCE_SPOT_BASE}/klines"
-            params = {"symbol": symbol, "interval": interval, "limit": limit}
+            url = f"{COINBASE_BASE}/products/{product}/candles"
+            params = {"granularity": granularity}
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             raw = resp.json()
         except Exception as e:
-            logger.warning("Binance klines failed", coin=coin, interval=interval, error=str(e))
+            logger.warning("Coinbase klines failed", coin=coin, interval=interval, error=str(e))
             return []
 
+        # Coinbase candle: [time, low, high, open, close, volume] — newest first
         candles = []
-        for k in raw:
-            # Binance kline: [open_time, open, high, low, close, volume, close_time, ...]
+        for k in reversed(raw[:limit]):
             candles.append({
-                "open": float(k[1]),
+                "open": float(k[3]),
                 "high": float(k[2]),
-                "low": float(k[3]),
+                "low": float(k[1]),
                 "close": float(k[4]),
                 "volume": float(k[5]),
-                "close_time": k[6] / 1000.0,
+                "close_time": float(k[0]),
             })
 
         return candles
@@ -122,7 +131,7 @@ class CryptoDataService:
         Positive rate = longs pay shorts (bearish pressure).
         Negative rate = shorts pay longs (bullish pressure).
         """
-        # Map Binance symbol to OKX instrument
+        # Map Coinbase product ID to coin key
         coin = None
         for c, s in CRYPTO_SYMBOLS.items():
             if s == symbol:
@@ -146,21 +155,20 @@ class CryptoDataService:
         return None
 
     async def get_spot_price(self, coin: str) -> float | None:
-        """Fetch current spot price from Binance."""
-        symbol = CRYPTO_SYMBOLS.get(coin)
-        if not symbol:
+        """Fetch current spot price from Coinbase."""
+        product = CRYPTO_SYMBOLS.get(coin)
+        if not product:
             return None
 
         client = await self._get_client()
         try:
-            url = f"{BINANCE_SPOT_BASE}/ticker/price"
-            params = {"symbol": symbol}
-            resp = await client.get(url, params=params)
+            url = f"{COINBASE_BASE}/products/{product}/ticker"
+            resp = await client.get(url)
             resp.raise_for_status()
             data = resp.json()
             return float(data["price"])
         except Exception as e:
-            logger.debug("Binance spot price failed", coin=coin, error=str(e))
+            logger.debug("Coinbase spot price failed", coin=coin, error=str(e))
         return None
 
     # ── Signal computation ───────────────────────────────────────────
@@ -282,7 +290,7 @@ class CryptoDataService:
 
         symbol = CRYPTO_SYMBOLS.get(coin, "")
 
-        # Fetch real 1-min and 5-min candles + funding rate from Binance
+        # Fetch real 1-min and 5-min candles + funding rate from Coinbase/OKX
         candles_1m, candles_5m, spot_price, funding_rate = await asyncio.gather(
             self.get_klines(coin, "1m", 30),
             self.get_klines(coin, "5m", 30),
@@ -368,7 +376,7 @@ class CryptoDataService:
         coins = list(SUPPORTED_COINS)
         for i, coin in enumerate(coins):
             if i > 0:
-                await asyncio.sleep(1)  # Binance allows 1200 req/min, light delay is fine
+                await asyncio.sleep(1)  # Coinbase rate limit is generous, light delay is fine
             price = kalshi_prices.get(coin, 50)
             signal = await self.get_crypto_signal(coin, kalshi_price=price)
             if signal is not None:

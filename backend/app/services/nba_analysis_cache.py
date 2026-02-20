@@ -124,8 +124,29 @@ async def build_nba_analysis(force: bool = False) -> dict[str, Any]:
                         "position": ap.get("position", ""),
                     }
 
+            # Fetch Kalshi NBA props markets to prioritize active players
+            kalshi_player_names: set[str] = set()
+            try:
+                import httpx as _httpx
+                _resp = _httpx.get(
+                    "https://api.elections.kalshi.com/trade-api/v2/markets",
+                    params={"status": "open", "limit": 1000, "series_ticker": "KXNBA"},
+                    timeout=10,
+                )
+                for _m in _resp.json().get("markets", []):
+                    _title = (_m.get("title") or "").lower()
+                    # Extract player name from title like "Will LeBron James score 20+ points?"
+                    for _pname in bdl_name_map:
+                        _parts = _pname.split()
+                        if len(_parts) >= 2 and _parts[-1] in _title:
+                            kalshi_player_names.add(_pname)
+            except Exception:
+                pass
+
             # Fetch game logs for all known players (bulk)
+            # Prioritize players with active Kalshi markets so they always get data
             bdl_ids_needed = []
+            bdl_ids_needed_low = []
             name_to_bdl_id: dict[str, int] = {}
             for pname in name_to_player:
                 bdl_p = bdl_name_map.get(pname)
@@ -140,11 +161,16 @@ async def build_nba_analysis(force: bool = False) -> dict[str, Any]:
                 if bdl_p:
                     bid = bdl_p.get("id")
                     if bid:
-                        bdl_ids_needed.append(bid)
                         name_to_bdl_id[pname] = bid
+                        if pname in kalshi_player_names:
+                            bdl_ids_needed.append(bid)  # high priority
+                        else:
+                            bdl_ids_needed_low.append(bid)  # fill remaining slots
+
+            # Kalshi-active players first, then fill up to 300 with others
+            bdl_ids_needed = list(dict.fromkeys(bdl_ids_needed + bdl_ids_needed_low))[:300]
 
             if bdl_ids_needed:
-                bdl_ids_needed = bdl_ids_needed[:600]  # cap — covers all ~523 active players
                 bulk_logs = await loop.run_in_executor(
                     None, bdl.get_bulk_game_logs, bdl_ids_needed
                 )

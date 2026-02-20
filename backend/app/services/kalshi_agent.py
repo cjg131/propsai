@@ -2279,16 +2279,79 @@ class KalshiAgent:
     # ── NBA Props Strategy ─────────────────────────────────────────
 
     def _ensure_nba_services(self) -> bool:
-        """Lazy-initialize NBA data service and predictor (they use sync HTTP)."""
+        """Lazy-initialize NBA data service and predictor (they use sync HTTP).
+        Also triggers a background retrain if model artifacts are >7 days old.
+        """
         try:
             if self.nba_data is None:
                 self.nba_data = get_nba_data()
             if self.predictor is None:
                 self.predictor = get_smart_predictor()
+
+            # ── Weekly retrain: kick off if .joblib files are stale ──────
+            self._maybe_trigger_retrain()
+
             return True
         except Exception as e:
             logger.warning("NBA services init failed", error=str(e))
             return False
+
+    _retrain_triggered_today: str = ""  # date string — only trigger once per day
+
+    def _maybe_trigger_retrain(self) -> None:
+        """Trigger a background SmartPredictor retrain if models are >7 days old."""
+        import time
+        from datetime import date as _date
+        from app.services.smart_predictor import ARTIFACTS_DIR
+
+        today = str(_date.today())
+        if self._retrain_triggered_today == today:
+            return  # Already checked today
+
+        smart_dir = ARTIFACTS_DIR / "smart"
+        if not smart_dir.exists():
+            return
+
+        # Find the oldest .joblib file
+        joblib_files = list(smart_dir.glob("*.joblib"))
+        if not joblib_files:
+            return
+
+        oldest_mtime = min(f.stat().st_mtime for f in joblib_files)
+        age_days = (time.time() - oldest_mtime) / 86400
+
+        if age_days < 7:
+            return  # Models are fresh enough
+
+        self._retrain_triggered_today = today
+        logger.info(f"NBA models are {age_days:.1f} days old — triggering background retrain")
+        self.engine.log_event(
+            "info",
+            f"NBA models stale ({age_days:.1f}d old) — background retrain started",
+            strategy="nba_props",
+        )
+
+        import threading
+
+        def _retrain_worker():
+            try:
+                from app.services.nba_analysis_cache import build_nba_analysis
+                import asyncio
+                loop = asyncio.new_event_loop()
+                cache_data = loop.run_until_complete(build_nba_analysis(force=True))
+                loop.close()
+                enriched = cache_data.get("name_to_player", {})
+                if enriched:
+                    predictor = get_smart_predictor()
+                    predictor.train_all_props(enriched)
+                    logger.info("Background NBA retrain complete")
+                else:
+                    logger.warning("Background NBA retrain skipped: no enriched players")
+            except Exception as e:
+                logger.error(f"Background NBA retrain failed: {e}")
+
+        t = threading.Thread(target=_retrain_worker, daemon=True, name="nba-retrain")
+        t.start()
 
     async def run_nba_props_cycle(self) -> list[dict[str, Any]]:
         """

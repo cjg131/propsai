@@ -224,15 +224,162 @@ class BallDontLieClient:
             return row_count >= expected_rows * 0.8
 
     # ------------------------------------------------------------------
+    # Supabase persistence helpers
+    # ------------------------------------------------------------------
+
+    def _bdl_row_to_supabase(self, row: dict, season: int) -> dict | None:
+        """Convert a BDL stats row to a player_game_stats upsert dict."""
+        player = row.get("player", {})
+        game = row.get("game", {})
+        team = row.get("team", {})
+        pid = player.get("id")
+        gid = game.get("id")
+        tid = team.get("id")
+        if not pid or not gid:
+            return None
+        try:
+            mins_str = str(row.get("min") or "0")
+            if ":" in mins_str:
+                parts = mins_str.split(":")
+                minutes = float(parts[0]) + float(parts[1]) / 60
+            else:
+                minutes = float(mins_str) if mins_str else 0.0
+        except (ValueError, IndexError):
+            minutes = 0.0
+        return {
+            "player_id": str(pid),
+            "game_id": str(gid),
+            "team_id": str(tid) if tid else None,
+            "minutes": round(minutes, 2),
+            "points": int(row.get("pts") or 0),
+            "rebounds": int(row.get("reb") or 0),
+            "assists": int(row.get("ast") or 0),
+            "steals": int(row.get("stl") or 0),
+            "blocks": int(row.get("blk") or 0),
+            "turnovers": int(row.get("turnover") or 0),
+            "three_pointers_made": int(row.get("fg3m") or 0),
+            "three_pointers_attempted": int(row.get("fg3a") or 0),
+            "field_goals_made": int(row.get("fgm") or 0),
+            "field_goals_attempted": int(row.get("fga") or 0),
+            "free_throws_made": int(row.get("ftm") or 0),
+            "free_throws_attempted": int(row.get("fta") or 0),
+            "offensive_rebounds": int(row.get("oreb") or 0),
+            "defensive_rebounds": int(row.get("dreb") or 0),
+            "personal_fouls": int(row.get("pf") or 0),
+        }
+
+    def sync_to_supabase(self, data: list[dict], season: int) -> int:
+        """
+        Upsert BDL box scores to Supabase player_game_stats.
+        Returns number of rows upserted. Batches in groups of 500.
+        Non-blocking: errors are logged but don't raise.
+        """
+        try:
+            from app.services.supabase_client import get_supabase
+            sb = get_supabase()
+        except Exception as e:
+            logger.warning(f"BDL Supabase sync skipped (client unavailable): {e}")
+            return 0
+
+        rows = [self._bdl_row_to_supabase(r, season) for r in data]
+        rows = [r for r in rows if r is not None]
+        if not rows:
+            return 0
+
+        upserted = 0
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            try:
+                sb.table("player_game_stats").upsert(
+                    batch, on_conflict="player_id,game_id"
+                ).execute()
+                upserted += len(batch)
+            except Exception as e:
+                logger.warning(f"BDL Supabase upsert batch {i//batch_size} failed: {e}")
+
+        logger.info(f"BDL: synced {upserted}/{len(rows)} rows to Supabase for season {season}")
+        return upserted
+
+    def load_from_supabase(self, season: int) -> list[dict]:
+        """
+        Load box scores for a season from Supabase player_game_stats.
+        Reconstructs BDL-format dicts so the rest of the pipeline works unchanged.
+        Returns [] if Supabase unavailable or no data.
+        """
+        try:
+            from app.services.supabase_client import get_supabase
+            sb = get_supabase()
+        except Exception:
+            return []
+
+        try:
+            # Supabase has a 1000-row default limit — page through all rows
+            all_rows = []
+            offset = 0
+            page_size = 1000
+            while True:
+                result = (
+                    sb.table("player_game_stats")
+                    .select("player_id,game_id,team_id,minutes,points,rebounds,assists,steals,blocks,turnovers,three_pointers_made,three_pointers_attempted,field_goals_made,field_goals_attempted,free_throws_made,free_throws_attempted,offensive_rebounds,defensive_rebounds,personal_fouls")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                batch = result.data or []
+                if not batch:
+                    break
+                all_rows.extend(batch)
+                if len(batch) < page_size:
+                    break
+                offset += page_size
+
+            if not all_rows:
+                return []
+
+            # Reconstruct BDL-format rows so train_all_props works unchanged
+            bdl_rows = []
+            for r in all_rows:
+                mins = r.get("minutes") or 0
+                mins_int = int(mins)
+                mins_frac = int((mins - mins_int) * 60)
+                bdl_rows.append({
+                    "player": {"id": int(r["player_id"]) if str(r["player_id"]).isdigit() else r["player_id"]},
+                    "game": {"id": int(r["game_id"]) if str(r["game_id"]).isdigit() else r["game_id"]},
+                    "team": {"id": int(r["team_id"]) if r.get("team_id") and str(r["team_id"]).isdigit() else r.get("team_id")},
+                    "min": f"{mins_int}:{mins_frac:02d}",
+                    "pts": r.get("points", 0),
+                    "reb": r.get("rebounds", 0),
+                    "ast": r.get("assists", 0),
+                    "stl": r.get("steals", 0),
+                    "blk": r.get("blocks", 0),
+                    "turnover": r.get("turnovers", 0),
+                    "fg3m": r.get("three_pointers_made", 0),
+                    "fg3a": r.get("three_pointers_attempted", 0),
+                    "fgm": r.get("field_goals_made", 0),
+                    "fga": r.get("field_goals_attempted", 0),
+                    "ftm": r.get("free_throws_made", 0),
+                    "fta": r.get("free_throws_attempted", 0),
+                    "oreb": r.get("offensive_rebounds", 0),
+                    "dreb": r.get("defensive_rebounds", 0),
+                    "pf": r.get("personal_fouls", 0),
+                })
+            logger.info(f"BDL: loaded {len(bdl_rows)} rows from Supabase")
+            return bdl_rows
+        except Exception as e:
+            logger.warning(f"BDL Supabase load failed: {e}")
+            return []
+
+    # ------------------------------------------------------------------
     # Season stats fetching (current + historical)
     # ------------------------------------------------------------------
 
     def get_season_stats(self, season: int = CURRENT_SEASON, max_pages: int = 400) -> list[dict]:
         """
-        Fetch ALL player box scores for a season. Three-tier caching:
+        Fetch ALL player box scores for a season. Four-tier caching:
           1. In-memory (instant, lost on restart)
-          2. File on disk (survives restarts)
-          3. API fetch with robust retry (full or incremental)
+          2. File on disk (survives restarts, lost on volume wipe)
+          3. Supabase (permanent, survives everything)
+          4. BDL API fetch with robust retry (full or incremental)
 
         For the 2025-26 season with 55 games played: ~28,500 rows, ~285 pages.
         """
@@ -278,7 +425,18 @@ class BallDontLieClient:
                 self._save_file_cache(file_data, season)
                 return file_data
 
-        # Tier 3: Full fetch — cache missing, truncated, or stale
+        # Tier 3: Supabase — permanent storage, survives container rebuilds
+        # Only use for past seasons (current season needs incremental updates)
+        if season < CURRENT_SEASON:
+            sb_data = self.load_from_supabase(season)
+            if self._is_cache_complete({"row_count": len(sb_data)}, season):
+                logger.info(f"BDL: using Supabase for season {season} ({len(sb_data)} rows)")
+                self._season_cache[season] = sb_data
+                self._season_cache_date[season] = today_str
+                self._save_file_cache(sb_data, season)
+                return sb_data
+
+        # Tier 4: Full fetch from BDL API — cache missing, truncated, or stale
         if file_data and not self._is_cache_complete(meta, season):
             logger.warning(
                 f"BDL: cache for season {season} looks truncated "
@@ -297,6 +455,13 @@ class BallDontLieClient:
                 self._season_cache[season] = data
                 self._season_cache_date[season] = today_str
                 self._save_file_cache(data, season)
+                # Persist to Supabase so future cold starts are instant
+                import threading
+                threading.Thread(
+                    target=self.sync_to_supabase,
+                    args=(data, season),
+                    daemon=True,
+                ).start()
             return data
         except Exception as e:
             logger.warning(f"BDL season stats fetch failed: {e}")

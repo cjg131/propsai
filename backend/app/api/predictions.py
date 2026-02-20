@@ -180,7 +180,7 @@ async def generate_predictions():
     try:
         import asyncio
 
-        from app.services.nba_data import get_nba_data
+        from app.services.nba_analysis_cache import build_nba_analysis
         from app.services.odds_api import get_odds_api
         from app.services.smart_predictor import PROP_STAT_MAP, get_smart_predictor
 
@@ -345,48 +345,36 @@ async def generate_predictions():
                     "game_id": mapped_game_id,
                 }
 
-        # ── Step 2: Build enriched features from SportsDataIO ────────
-        logger.info("Step 2: Building enriched player features from SportsDataIO...")
-        nba = get_nba_data()
+        # ── Steps 2-5: Enriched player features from shared NBA analysis cache ──
+        # The cache is built once per hour and shared with the Kalshi agent.
+        # This avoids re-fetching BDL game logs on every /generate call.
+        logger.info("Step 2: Loading enriched player features from shared NBA analysis cache...")
         loop = asyncio.get_event_loop()
-        feature_data = await loop.run_in_executor(None, nba.build_full_feature_set)
-        enriched_players = feature_data["players"]
-        schedule = feature_data["schedule"]
+        cache_data = await build_nba_analysis()
+        sdio_by_name: dict[str, dict] = cache_data.get("name_to_player", {})
+        schedule = cache_data.get("schedule", {})
+        logger.info(f"NBA analysis cache: {len(sdio_by_name)} players")
 
-        if not enriched_players:
+        if not sdio_by_name:
             return {"status": "error", "message": "No enriched player data available."}
 
-        # Build SportsDataIO name → enriched player data lookup
-        sdio_by_name: dict[str, dict] = {}
-        for pid, pf in enriched_players.items():
-            pname = (pf.get("name") or "").strip().lower()
-            if pname:
-                sdio_by_name[pname] = pf
-
-        # ── Step 3: Fetch BallDontLie game logs for active players ───
-        # This gives us rolling averages, matchup history, home/away splits,
-        # rest features, and consistency metrics.
-        logger.info("Step 3: Fetching BallDontLie game logs for active players...")
+        # ── Step 3: BDL bulk game logs for raw stat arrays (line edge signal) ──
+        # The cache has rolling averages, but we also need _raw_pts/_raw_reb etc.
+        # for the line edge signal computation. Fetch only for active players.
+        logger.info("Step 3: Fetching BDL game logs for line edge signal computation...")
         from app.services.balldontlie import get_balldontlie
-        from app.utils.travel import calculate_fatigue_score, get_timezone_change, get_travel_distance
-
         bdl = get_balldontlie()
 
-        # Build BDL name → id mapping from active players
         bdl_active = await loop.run_in_executor(None, bdl.get_active_players)
         bdl_name_to_id: dict[str, int] = {}
+        bdl_team_abbr_to_id: dict[str, int] = {}
         for p in bdl_active:
             full = f"{p['first_name']} {p['last_name']}".lower()
             bdl_name_to_id[full] = p["id"]
-
-        # Map Odds API team names to BDL team IDs for matchup lookup
-        bdl_team_abbr_to_id: dict[str, int] = {}
-        for p in bdl_active:
             t = p.get("team", {})
             if t.get("abbreviation"):
                 bdl_team_abbr_to_id[t["abbreviation"]] = t["id"]
 
-        # Fetch game logs for all active players with odds
         bdl_ids_to_fetch = []
         bdl_id_to_name: dict[int, str] = {}
         for odds_name in active_players_from_odds:
@@ -395,65 +383,26 @@ async def generate_predictions():
                 bdl_ids_to_fetch.append(bdl_id)
                 bdl_id_to_name[bdl_id] = odds_name
 
-        logger.info(f"Fetching game logs for {len(bdl_ids_to_fetch)} players from BallDontLie...")
+        logger.info(f"Fetching game logs for {len(bdl_ids_to_fetch)} active players...")
         all_game_logs = await loop.run_in_executor(
             None, bdl.get_bulk_game_logs, bdl_ids_to_fetch
         )
 
-        # ── Step 4: Enrich each player with full feature set ─────────
-        logger.info("Step 4: Computing full feature set (40+ features per player)...")
-
-        # Get game spread/O-U from Odds API events for game script features
-        event_game_info: dict[str, dict] = {}
-        for ev in odds_events:
-            eid = ev.get("id", "")
-            event_game_info[eid] = {
-                "home_team": ev.get("home_team", ""),
-                "away_team": ev.get("away_team", ""),
-            }
-
-        # Get spreads from The Odds API (h2h market gives implied spread)
-        # For now, use a simple proxy: team win% difference → spread estimate
-        # We'll also check if odds_events have spread info
+        # Attach raw stat arrays to player dicts for line edge signal
+        def _parse_min(m):
+            if not m or m in ("0", "00", ""): return 0.0
+            try:
+                if ":" in str(m): p_ = str(m).split(":"); return float(p_[0]) + float(p_[1]) / 60
+                return float(m)
+            except (ValueError, IndexError): return 0.0
 
         for odds_name in active_players_from_odds:
             player = sdio_by_name.get(odds_name)
             if not player:
                 continue
-
             bdl_id = bdl_name_to_id.get(odds_name)
             game_logs = all_game_logs.get(bdl_id, []) if bdl_id else []
-
-            # 3a. Rolling averages + trend + consistency from game logs
-            # ALSO override SportsDataIO per-game averages with BDL's
-            # DNP-filtered averages (SportsDataIO includes 0-minute games)
             if game_logs:
-                gl_features = bdl.build_player_game_log_features(game_logs)
-                player.update(gl_features)
-                # Override SportsDataIO per-game stats with accurate BDL values
-                bdl_to_sdio = {
-                    "season_avg_pts": "pts_pg",
-                    "season_avg_reb": "reb_pg",
-                    "season_avg_ast": "ast_pg",
-                    "season_avg_stl": "stl_pg",
-                    "season_avg_blk": "blk_pg",
-                    "season_avg_tov": "tov_pg",
-                    "season_avg_fg3m": "three_pm_pg",
-                    "season_avg_min": "mpg",
-                }
-                for bdl_key, sdio_key in bdl_to_sdio.items():
-                    if bdl_key in gl_features:
-                        player[sdio_key] = gl_features[bdl_key]
-                if "game_log_count" in gl_features:
-                    player["games_played"] = gl_features["game_log_count"]
-
-                # Store raw stat arrays for line edge signal computation
-                def _parse_min(m):
-                    if not m or m in ("0", "00", ""): return 0.0
-                    try:
-                        if ":" in str(m): p_ = str(m).split(":"); return float(p_[0]) + float(p_[1]) / 60
-                        return float(m)
-                    except (ValueError, IndexError): return 0.0
                 played = [g for g in game_logs if _parse_min(g.get("min", "0")) > 0]
                 played.sort(key=lambda g: g.get("game", {}).get("date", ""))
                 player["_raw_pts"] = [g.get("pts", 0) or 0 for g in played]
@@ -461,44 +410,16 @@ async def generate_predictions():
                 player["_raw_ast"] = [g.get("ast", 0) or 0 for g in played]
                 player["_raw_fg3m"] = [g.get("fg3m", 0) or 0 for g in played]
 
-            # 3b. Matchup history (player vs tonight's opponent)
-            opp_abbr = player.get("opponent", "")
-            opp_bdl_id = bdl_team_abbr_to_id.get(opp_abbr)
-            if game_logs and opp_bdl_id:
-                matchup_feats = bdl.build_matchup_features(game_logs, opp_bdl_id)
-                player.update(matchup_feats)
-
-            # 3c. Rest features from actual game log dates
-            if game_logs:
-                rest_feats = bdl.build_rest_features_from_logs(game_logs)
-                player.update(rest_feats)
-
-            # 3d. Travel / fatigue scoring
-            team_abbr = player.get("team", "")
+        # ── Step 4: Spread/O-U from Odds API game lines ──────────────
+        for odds_name in active_players_from_odds:
+            player = sdio_by_name.get(odds_name)
+            if not player:
+                continue
             is_home = player.get("is_home", False)
             opp_abbr = player.get("opponent", "")
-            if is_home:
-                # Playing at home — travel from last away game location
-                travel_dist = 0.0
-                tz_change = 0
-            else:
-                # Away game — travel from home to opponent city
-                travel_dist = get_travel_distance(team_abbr, opp_abbr)
-                tz_change = get_timezone_change(team_abbr, opp_abbr)
-
-            player["travel_distance"] = travel_dist
-            player["timezone_change"] = tz_change
-            player["fatigue_score"] = calculate_fatigue_score(
-                travel_dist, tz_change,
-                player.get("is_b2b", False),
-                player.get("rest_days", 2),
-            )
-
-            # 3e. Game script / blowout risk — use REAL Vegas lines
-            # Look up real spread and total from The Odds API
+            team_abbr = player.get("team", "")
             game_id = player.get("game_id", "")
             real_lines = game_id_to_lines.get(str(game_id), {})
-            # Fallback: try team name key
             if not real_lines:
                 opp_full = player.get("opponent_full", "").lower()
                 team_full = player.get("team_full", "").lower()
@@ -506,143 +427,36 @@ async def generate_predictions():
                     real_lines = game_id_to_lines.get(f"{opp_full}@{team_full}", {})
                 else:
                     real_lines = game_id_to_lines.get(f"{team_full}@{opp_full}", {})
-
             if real_lines and "spread_home" in real_lines:
-                # Real Vegas spread (negative = favored)
-                if is_home:
-                    spread = real_lines.get("spread_home", 0)
-                else:
-                    spread = real_lines.get("spread_away", 0)
+                spread = real_lines.get("spread_home" if is_home else "spread_away", 0)
                 over_under = real_lines.get("total", 220)
-                logger.debug(f"  {odds_name}: real spread={spread}, O/U={over_under}")
             else:
-                # Fallback: estimate from win% differential
                 team_win = player.get("team_win_pct", 0.5)
-                opp_win = 0.5
-                opp_team_data = feature_data.get("teams", {}).get(opp_abbr, {})
-                if opp_team_data:
-                    opp_win = opp_team_data.get("win_pct", 0.5)
-                spread = (opp_win - team_win) * 30
-                if not is_home:
-                    spread += 3
-                else:
-                    spread -= 3
+                spread = 0.0
                 pace_factor = player.get("pace_factor", 1.0)
                 over_under = round(220 * pace_factor, 1)
-
             player["spread"] = round(spread, 1)
             player["over_under"] = round(over_under, 1)
             player["blowout_risk"] = min(abs(spread) / 20.0, 1.0)
 
-            # 3f. Injury impact on teammates
-            # Check which players on this team are NOT in the active odds list
-            # (meaning they're injured/out) and sum their usage rates
-            team_players = [
-                (n, sdio_by_name[n]) for n in sdio_by_name
-                if sdio_by_name[n].get("team") == team_abbr
-            ]
-            missing_usage = 0.0
-            missing_count = 0
-            for tp_name, tp_data in team_players:
-                if tp_name not in active_players_from_odds:
-                    usage = tp_data.get("usage_rate", 0)
-                    starter = tp_data.get("starter_pct", 0)
-                    if starter > 0.5 and usage > 15:
-                        missing_usage += usage
-                        missing_count += 1
-
-            player["missing_teammate_usage"] = round(missing_usage, 1)
-            # Boost: redistribute missing usage proportionally
-            player_usage = player.get("usage_rate", 20)
-            if missing_usage > 0 and player_usage > 0:
-                # Player gets a share of missing usage proportional to their own usage
-                team_remaining_usage = sum(
-                    sdio_by_name[n].get("usage_rate", 0)
-                    for n, _ in team_players
-                    if n in active_players_from_odds
-                )
-                share = player_usage / max(team_remaining_usage, 1)
-                player["lineup_boost_points"] = round(missing_usage * share * 0.5, 1)
-                player["lineup_boost_rebounds"] = round(missing_count * share * 1.0, 1)
-                player["lineup_boost_assists"] = round(missing_count * share * 0.5, 1)
-            else:
-                player["lineup_boost_points"] = 0
-                player["lineup_boost_rebounds"] = 0
-                player["lineup_boost_assists"] = 0
-
-            # 3g. Opponent positional defense (#5)
-            # Map player position to a defensive stat category
-            pos = (player.get("position") or "").upper()
-            opp_team_data = feature_data.get("teams", {}).get(opp_abbr, {})
-            # Approximate: guards face perimeter D, bigs face interior D
-            if pos in ("PG", "SG", "G"):
-                pos_def = opp_team_data.get("opp_three_pct", 0)  # 3pt defense
-            elif pos in ("PF", "C", "F-C", "C-F"):
-                pos_def = opp_team_data.get("opp_reb_pg", 0)  # rebounding allowed
-            else:
-                pos_def = 0
-            player["opp_pos_defense"] = pos_def
-
-            # 3h. B2B decay factor (#7)
-            # Players typically drop ~5-10% on back-to-backs
-            # Use their own B2B history if available, else default
-            if player.get("is_b2b"):
-                # Check if we have B2B-specific data from game logs
-                b2b_games = player.get("b2b_game_count", 0)
-                if b2b_games > 0:
-                    player["b2b_decay_factor"] = player.get("b2b_avg_drop", -0.08)
-                else:
-                    player["b2b_decay_factor"] = -0.08  # default 8% drop
-            else:
-                player["b2b_decay_factor"] = 0.0
-
-            # 3i. Altitude factor (#9)
-            # Denver is at 5,280 ft — visiting teams show fatigue
-            opp_city = opp_abbr if not is_home else team_abbr
-            if opp_city == "DEN" and not is_home:
-                # Playing AT Denver as visitor — altitude penalty
-                player["altitude_factor"] = -0.05  # ~5% penalty
-            elif team_abbr == "DEN" and is_home:
-                # Denver playing at home — altitude advantage
-                player["altitude_factor"] = 0.03  # ~3% boost (acclimated)
-            else:
-                player["altitude_factor"] = 0.0
-
-            # 3j. Referee impact (#8) — placeholder
-            # Would need referee assignment data (not available in current APIs)
-            player["ref_foul_rate"] = 0.0
-
-        # ── Step 5: News sentiment from RSS + NewsAPI ──────────────
-        logger.info("Step 5: Fetching news sentiment (RSS + NewsAPI)...")
-        from app.services.news_sentiment import get_news_sentiment
-        news_svc = get_news_sentiment()
-        player_sentiment = await loop.run_in_executor(
-            None, news_svc.build_player_sentiment, active_players_from_odds
+        news_mentioned = sum(
+            1 for p in sdio_by_name.values() if p.get("news_volume", 0) > 0
         )
-        # Merge sentiment features into player dicts
-        news_mentioned = 0
-        for pname, sentiment in player_sentiment.items():
-            player = sdio_by_name.get(pname)
-            if player:
-                player.update(sentiment)
-                if sentiment.get("news_volume", 0) > 0:
-                    news_mentioned += 1
-        logger.info(f"News sentiment: {news_mentioned} players mentioned in recent articles")
+        logger.info(f"News sentiment: {news_mentioned} players with news (from cache)")
 
-        # ── Step 5b: Player prop correlations ────────────────────────
-        logger.info("Step 5b: Computing player prop correlations...")
+        # ── Step 5: Player prop correlations ─────────────────────────
+        logger.info("Step 5: Computing player prop correlations...")
         from app.services.correlation_engine import build_all_player_correlations
         player_correlations = build_all_player_correlations(all_game_logs, bdl_id_to_name)
         logger.info(f"Correlations computed for {len(player_correlations)} players")
 
-        # ── Step 5c: Smart usage redistribution model ────────────────
-        logger.info("Step 5c: Building smart redistribution model...")
+        # ── Step 5b: Smart usage redistribution model ─────────────────
+        logger.info("Step 5b: Building smart redistribution model...")
         from app.services.redistribution import build_redistribution_model, get_redistribution_boost
         multi_season_stats = await loop.run_in_executor(None, bdl.get_multi_season_stats)
         redist_model = build_redistribution_model(multi_season_stats)
         logger.info(f"Redistribution model built for {len(redist_model)} teams")
 
-        # Apply smart redistribution boosts (overrides simple proportional boost)
         for odds_name in active_players_from_odds:
             player = sdio_by_name.get(odds_name)
             if not player:
@@ -652,8 +466,6 @@ async def generate_predictions():
             bdl_player_id = bdl_name_to_id.get(odds_name)
             if not bdl_team_id or not bdl_player_id:
                 continue
-
-            # Find missing teammates (players on team NOT in active odds)
             team_players_on_team = [
                 (n, bdl_name_to_id.get(n))
                 for n in sdio_by_name
@@ -664,7 +476,6 @@ async def generate_predictions():
                 if n not in active_players_from_odds and bid
                 and sdio_by_name[n].get("starter_pct", 0) > 0.5
             ]
-
             if missing_bdl_ids:
                 boost = get_redistribution_boost(
                     redist_model, bdl_team_id, bdl_player_id, missing_bdl_ids

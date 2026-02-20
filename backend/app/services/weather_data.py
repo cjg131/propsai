@@ -347,7 +347,7 @@ class TomorrowIOClient:
 
     _cache: dict[str, dict] = {}
     _cache_ts: dict[str, float] = {}
-    _CACHE_TTL: float = 86400.0  # 24 hours — daily forecast doesn't change meaningfully
+    _CACHE_TTL: float = 3600.0  # 1 hour — keeps us under 25 req/hr free tier (20 cities = 20 req/hr)
 
     def __init__(self, api_key: str = "") -> None:
         self.api_key = api_key
@@ -359,7 +359,7 @@ class TomorrowIOClient:
         Fetches BOTH daily summary AND hourly data. The hourly data gives us
         per-hour temperatures which we aggregate to get true daily max/min —
         more accurate than the daily summary alone.
-        Results are cached for 24 hours per city+date to stay within free-tier limits.
+        Results are cached for 1 hour per city+date to stay within free-tier limits (25 req/hr).
         """
         if not self.api_key:
             return None
@@ -461,7 +461,7 @@ class VisualCrossingClient:
 
     _cache: dict[str, dict] = {}
     _cache_ts: dict[str, float] = {}
-    _CACHE_TTL: float = 86400.0  # 24 hours — daily forecast doesn't change meaningfully
+    _CACHE_TTL: float = 3600.0  # 1 hour — refreshes data while staying within API limits
 
     def __init__(self, api_key: str = "") -> None:
         self.api_key = api_key
@@ -469,7 +469,7 @@ class VisualCrossingClient:
 
     async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
         """Get Visual Crossing forecast for a specific date.
-        Results are cached for 24 hours per city+date to minimize API usage.
+        Results are cached for 1 hour per city+date to minimize redundant API calls.
         """
         if not self.api_key:
             return None

@@ -369,6 +369,24 @@ class KalshiAgent:
         # Sort by edge * confidence descending
         candidates.sort(key=lambda c: c.get("edge", 0) * c.get("confidence", 0), reverse=True)
 
+        # ── Skip tickers where we already hold an open position on the same side ──
+        # Prevents re-entering the same market every cycle (econ CPI stacking, etc.)
+        open_positions = self.engine.get_open_positions()
+        open_keys: set[str] = {
+            f"{p['ticker']}_{p['side']}" for p in open_positions.get("positions", [])
+        }
+
+        pre_filter = len(candidates)
+        candidates = [
+            c for c in candidates
+            if f"{c.get('ticker', '')}_{c.get('side', '')}" not in open_keys
+        ]
+        if pre_filter != len(candidates):
+            self.engine.log_event(
+                "info",
+                f"Position dedup: skipped {pre_filter - len(candidates)} candidates already held",
+            )
+
         total_exposure = self.engine.get_total_exposure()
         effective_bankroll = self.engine.get_effective_bankroll()
         available_capital = max(0, effective_bankroll - total_exposure)

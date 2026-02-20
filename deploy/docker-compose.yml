@@ -12,6 +12,10 @@ services:
     volumes:
       # Persist SQLite database across container restarts
       - backend-data:/app/app/data
+      # Persist BDL season cache (avoids re-fetching 100k+ rows on rebuild)
+      - backend-cache:/app/app/cache
+      # Persist trained model artifacts (avoids retraining from scratch on rebuild)
+      - backend-models:/app/app/models/artifacts
       # Mount Kalshi private key (read-only)
       - ./env/kalshi.key:/app/kalshi.key:ro
     ports:
@@ -58,3 +62,5 @@ services:
 
 volumes:
   backend-data:
+  backend-cache:
+  backend-models:

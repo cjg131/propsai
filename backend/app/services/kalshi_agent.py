@@ -2408,8 +2408,8 @@ class KalshiAgent:
                             name_to_bdl_id[pname] = bid
 
                 if bdl_ids_needed:
-                    # Cap to 50 players to prevent multi-minute bulk fetches
-                    bdl_ids_needed = bdl_ids_needed[:50]
+                    # Cap to 150 players (covers all Kalshi prop players + extras)
+                    bdl_ids_needed = bdl_ids_needed[:150]
                     bulk_logs = await loop.run_in_executor(
                         None, bdl.get_bulk_game_logs, bdl_ids_needed
                     )
@@ -2471,8 +2471,10 @@ class KalshiAgent:
                 }
                 for pf in name_to_player.values():
                     for bdl_key, pg_key in BDL_TO_PG.items():
-                        if bdl_key in pf and pg_key not in pf:
-                            pf[pg_key] = pf[bdl_key]
+                        # Overwrite if pg_key is missing OR None/0 — BDL value is always better than zero
+                        if bdl_key in pf and pf.get(bdl_key) is not None:
+                            if not pf.get(pg_key):
+                                pf[pg_key] = pf[bdl_key]
 
             except Exception as e:
                 logger.warning("BDL enrichment failed", error=str(e))

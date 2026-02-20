@@ -456,6 +456,17 @@ class SmartPredictor:
             for stype, skey in STAT_KEYS.items():
                 stat_arrays[stype] = [g.get(skey, 0) or 0 for g in games]
 
+            # Derived combo stat arrays (sum of components per game)
+            pts = stat_arrays["points"]
+            reb = stat_arrays["rebounds"]
+            ast = stat_arrays["assists"]
+            stat_arrays["pra"] = [p + r + a for p, r, a in zip(pts, reb, ast)]
+            stat_arrays["points_rebounds"] = [p + r for p, r in zip(pts, reb)]
+            stat_arrays["points_assists"] = [p + a for p, a in zip(pts, ast)]
+            stat_arrays["rebounds_assists"] = [r + a for r, a in zip(reb, ast)]
+            stat_arrays["first_basket"] = pts  # proxy: scoring rate
+            stat_arrays["double_double"] = pts  # proxy: scoring/rebounding rate
+
             # Game IDs for looking up team totals
             all_game_ids = [g.get("game", {}).get("id") for g in games]
             # Starter detection: minutes > 20 in majority of games = likely starter
@@ -967,7 +978,7 @@ class SmartPredictor:
         for name, model in prop_data["models"].items():
             try:
                 pred = model.predict(X)[0]
-                base_preds[name] = pred
+                base_preds[name] = max(float(pred), 0.0)
             except Exception:
                 pass
 

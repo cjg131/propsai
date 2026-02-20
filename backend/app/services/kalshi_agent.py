@@ -2788,6 +2788,13 @@ class KalshiAgent:
             edge, side = no_edge, "no"
             our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_ask
 
+        # Price range filter: skip extreme ends of the market where pricing is reliable
+        # YES <20c = longshot the market correctly prices; NO >80c = near-certainty, model over-confident
+        if side == "yes" and price_cents < 20:
+            return None
+        if side == "no" and price_cents > 80:
+            return None
+
         nba_thresh = self.adaptive.get_thresholds("nba_props")
 
         # Log prediction details for every evaluated prop (debug NO bias)

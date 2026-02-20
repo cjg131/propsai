@@ -31,14 +31,14 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
     "crypto": {"min_edge": 0.05, "min_confidence": 0.15},
     "finance": {"min_edge": 0.05, "min_confidence": 0.25},
     "econ": {"min_edge": 0.05, "min_confidence": 0.25},
-    "nba_props": {"min_edge": 0.05, "min_confidence": 0.30},
+    "nba_props": {"min_edge": 0.08, "min_confidence": 0.45},
 }
 
 # Hard limits
 MIN_EDGE_FLOOR = 0.03
 MIN_EDGE_CEILING = 0.15
 MIN_CONF_FLOOR = 0.15
-MIN_CONF_CEILING = 0.50
+MIN_CONF_CEILING = 0.70
 
 ROLLING_WINDOW = 50  # Number of trades to look back
 

@@ -144,7 +144,7 @@ async def build_nba_analysis(force: bool = False) -> dict[str, Any]:
                         name_to_bdl_id[pname] = bid
 
             if bdl_ids_needed:
-                bdl_ids_needed = bdl_ids_needed[:300]  # cap — covers all active players
+                bdl_ids_needed = bdl_ids_needed[:600]  # cap — covers all ~523 active players
                 bulk_logs = await loop.run_in_executor(
                     None, bdl.get_bulk_game_logs, bdl_ids_needed
                 )

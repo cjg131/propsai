@@ -2532,6 +2532,12 @@ class KalshiAgent:
             logger.debug("Player not found in data", player=player_name)
             return None
 
+        # Skip players with no game log data — predictions would be garbage
+        has_stats = any(player.get(k) for k in ("pts_pg", "reb_pg", "ast_pg", "last3_pts", "last3_reb"))
+        if not has_stats:
+            logger.debug("Skipping player with no game log data", player=player_name)
+            return None
+
         # ── SportsDataIO injury status: skip Out/Doubtful, penalize Questionable ──
         injury_status_detail = ""
         if sdio_injuries and player_name:

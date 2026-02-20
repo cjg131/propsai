@@ -3467,24 +3467,6 @@ class KalshiAgent:
                     await self.run_monitor_cycle()
                     await self.run_settlement_cycle()
 
-                    # Proactive kill-switch: fire if daily loss limit breached
-                    today_pnl = self.engine.get_today_pnl()
-                    effective = self.engine.get_effective_bankroll()
-                    dynamic_loss_limit = effective * 0.20
-                    if today_pnl < -dynamic_loss_limit and not self.engine.kill_switch:
-                        self.engine.kill_switch = True
-                        self.engine.log_event(
-                            "kill_switch",
-                            f"Daily loss limit hit: ${today_pnl:.2f} < -${dynamic_loss_limit:.2f} "
-                            f"(20% of effective bankroll ${effective:.2f}) — kill switch activated",
-                            strategy="monitor",
-                        )
-                        logger.warning(
-                            "Kill switch activated: daily loss limit breached",
-                            today_pnl=today_pnl,
-                            limit=-dynamic_loss_limit,
-                        )
-
                     # Daily summary at midnight UTC
                     today = datetime.now(UTC).strftime("%Y-%m-%d")
                     if today != last_summary_date:

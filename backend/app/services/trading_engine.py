@@ -387,12 +387,6 @@ class TradingEngine:
         if cycle_deployed + cost > max_cycle:
             return False, f"Strategy '{strategy}' cycle cap: ${cycle_deployed + cost:.2f} would exceed ${max_cycle:.2f}/cycle"
 
-        # Check daily loss limit (dynamic: 20% of effective bankroll)
-        today_pnl = self.get_today_pnl()
-        dynamic_loss_limit = effective * 0.20
-        if today_pnl < -dynamic_loss_limit:
-            return False, f"Daily loss limit reached: ${today_pnl:.2f} (limit: -${dynamic_loss_limit:.2f})"
-
         return True, "OK"
 
     def calculate_position_size(
@@ -1191,14 +1185,12 @@ class TradingEngine:
         total_exposure = self.get_total_exposure()
         max_deployable = effective * self.max_total_exposure_pct
         remaining = max_deployable - total_exposure
-        dynamic_loss_limit = effective * 0.20
         return {
             "paper_mode": self.paper_mode,
             "kill_switch": self.kill_switch,
             "bankroll": self.bankroll,
             "effective_bankroll": round(effective, 2),
             "strategy_enabled": self.strategy_enabled,
-            "daily_loss_limit": round(dynamic_loss_limit, 2),
             "max_bet_size": round(effective * self.max_bet_pct, 2),
             "today_pnl": self.get_today_pnl(),
             "today_trades": self.get_today_trade_count(),

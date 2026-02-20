@@ -345,6 +345,10 @@ class OpenMeteoClient:
 class TomorrowIOClient:
     """Tomorrow.io API client (free tier — 5-day forecast with percentiles)."""
 
+    _cache: dict[str, dict] = {}
+    _cache_ts: dict[str, float] = {}
+    _CACHE_TTL: float = 86400.0  # 24 hours — daily forecast doesn't change meaningfully
+
     def __init__(self, api_key: str = "") -> None:
         self.api_key = api_key
         self._http = httpx.AsyncClient(timeout=15.0)
@@ -355,6 +359,7 @@ class TomorrowIOClient:
         Fetches BOTH daily summary AND hourly data. The hourly data gives us
         per-hour temperatures which we aggregate to get true daily max/min —
         more accurate than the daily summary alone.
+        Results are cached for 24 hours per city+date to stay within free-tier limits.
         """
         if not self.api_key:
             return None
@@ -366,6 +371,12 @@ class TomorrowIOClient:
         if target_date is None:
             target_date = datetime.now(UTC).date()
         target_str = target_date.isoformat()
+
+        import time as _time
+        _now = _time.time()
+        cache_key = f"{city_key}_{target_str}"
+        if cache_key in TomorrowIOClient._cache and (_now - TomorrowIOClient._cache_ts.get(cache_key, 0)) < TomorrowIOClient._CACHE_TTL:
+            return TomorrowIOClient._cache[cache_key]
 
         try:
             # Fetch daily + hourly in one request using comma-separated timesteps
@@ -421,7 +432,7 @@ class TomorrowIOClient:
                 high_temp_f = high_from_daily
                 low_temp_f = low_from_daily
 
-            return {
+            result = {
                 "source": "tomorrow_io",
                 "city": city_key,
                 "date": target_day.get("time", "")[:10],
@@ -433,6 +444,9 @@ class TomorrowIOClient:
                 "wind_speed": values.get("windSpeedMax"),
                 "hourly_count": len(hourly_temps_for_date),
             }
+            TomorrowIOClient._cache[cache_key] = result
+            TomorrowIOClient._cache_ts[cache_key] = _now
+            return result
 
         except Exception as e:
             logger.warning("Tomorrow.io forecast failed", city=city_key, error=str(e))
@@ -445,12 +459,18 @@ class TomorrowIOClient:
 class VisualCrossingClient:
     """Visual Crossing Weather API client ($35/month)."""
 
+    _cache: dict[str, dict] = {}
+    _cache_ts: dict[str, float] = {}
+    _CACHE_TTL: float = 86400.0  # 24 hours — daily forecast doesn't change meaningfully
+
     def __init__(self, api_key: str = "") -> None:
         self.api_key = api_key
         self._http = httpx.AsyncClient(timeout=15.0)
 
     async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
-        """Get Visual Crossing forecast for a specific date."""
+        """Get Visual Crossing forecast for a specific date.
+        Results are cached for 24 hours per city+date to minimize API usage.
+        """
         if not self.api_key:
             return None
 
@@ -461,6 +481,12 @@ class VisualCrossingClient:
         if target_date is None:
             target_date = datetime.now(UTC).date()
         target_str = target_date.isoformat()
+
+        import time as _time
+        _now = _time.time()
+        cache_key = f"{city_key}_{target_str}"
+        if cache_key in VisualCrossingClient._cache and (_now - VisualCrossingClient._cache_ts.get(cache_key, 0)) < VisualCrossingClient._CACHE_TTL:
+            return VisualCrossingClient._cache[cache_key]
 
         try:
             location = f"{config['lat']},{config['lon']}"
@@ -481,7 +507,7 @@ class VisualCrossingClient:
                 return None
 
             day = days[0]
-            return {
+            result = {
                 "source": "visual_crossing",
                 "city": city_key,
                 "date": day.get("datetime", ""),
@@ -493,6 +519,9 @@ class VisualCrossingClient:
                 "humidity": day.get("humidity"),
                 "conditions": day.get("conditions", ""),
             }
+            VisualCrossingClient._cache[cache_key] = result
+            VisualCrossingClient._cache_ts[cache_key] = _now
+            return result
 
         except Exception as e:
             logger.warning("Visual Crossing forecast failed", city=city_key, error=str(e))

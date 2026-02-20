@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS player_game_stats (
     dk_fantasy_score DOUBLE PRECISION,
     fd_fantasy_score DOUBLE PRECISION,
     yahoo_fantasy_score DOUBLE PRECISION,
+    season INTEGER,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(player_id, game_id)
 );
@@ -128,6 +129,39 @@ CREATE TABLE IF NOT EXISTS player_game_stats (
 CREATE INDEX idx_pgs_player ON player_game_stats(player_id);
 CREATE INDEX idx_pgs_game ON player_game_stats(game_id);
 CREATE INDEX idx_pgs_player_game ON player_game_stats(player_id, game_id);
+
+-- ============================================================
+-- BDL GAME STATS (BallDontLie box scores — separate from SportsDataIO)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS bdl_game_stats (
+    id BIGSERIAL PRIMARY KEY,
+    player_id TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    team_id TEXT,
+    minutes DOUBLE PRECISION,
+    points INTEGER DEFAULT 0,
+    rebounds INTEGER DEFAULT 0,
+    assists INTEGER DEFAULT 0,
+    steals INTEGER DEFAULT 0,
+    blocks INTEGER DEFAULT 0,
+    turnovers INTEGER DEFAULT 0,
+    three_pointers_made INTEGER DEFAULT 0,
+    three_pointers_attempted INTEGER DEFAULT 0,
+    field_goals_made INTEGER DEFAULT 0,
+    field_goals_attempted INTEGER DEFAULT 0,
+    free_throws_made INTEGER DEFAULT 0,
+    free_throws_attempted INTEGER DEFAULT 0,
+    offensive_rebounds INTEGER DEFAULT 0,
+    defensive_rebounds INTEGER DEFAULT 0,
+    personal_fouls INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(player_id, game_id, season)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bdl_player ON bdl_game_stats(player_id);
+CREATE INDEX IF NOT EXISTS idx_bdl_season ON bdl_game_stats(season);
+CREATE INDEX IF NOT EXISTS idx_bdl_player_season ON bdl_game_stats(player_id, season);
 
 -- ============================================================
 -- REFEREES

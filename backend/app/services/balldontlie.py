@@ -250,6 +250,7 @@ class BallDontLieClient:
             "player_id": str(pid),
             "game_id": str(gid),
             "team_id": str(tid) if tid else None,
+            "season": season,
             "minutes": round(minutes, 2),
             "points": int(row.get("pts") or 0),
             "rebounds": int(row.get("reb") or 0),
@@ -270,7 +271,7 @@ class BallDontLieClient:
 
     def sync_to_supabase(self, data: list[dict], season: int) -> int:
         """
-        Upsert BDL box scores to Supabase player_game_stats.
+        Upsert BDL box scores to Supabase bdl_game_stats.
         Returns number of rows upserted. Batches in groups of 500.
         Non-blocking: errors are logged but don't raise.
         """
@@ -291,8 +292,8 @@ class BallDontLieClient:
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i + batch_size]
             try:
-                sb.table("player_game_stats").upsert(
-                    batch, on_conflict="player_id,game_id"
+                sb.table("bdl_game_stats").upsert(
+                    batch, on_conflict="player_id,game_id,season"
                 ).execute()
                 upserted += len(batch)
             except Exception as e:
@@ -314,14 +315,15 @@ class BallDontLieClient:
             return []
 
         try:
-            # Supabase has a 1000-row default limit — page through all rows
+            # Supabase has a 1000-row default limit — page through all rows for this season
             all_rows = []
             offset = 0
             page_size = 1000
             while True:
                 result = (
-                    sb.table("player_game_stats")
+                    sb.table("bdl_game_stats")
                     .select("player_id,game_id,team_id,minutes,points,rebounds,assists,steals,blocks,turnovers,three_pointers_made,three_pointers_attempted,field_goals_made,field_goals_attempted,free_throws_made,free_throws_attempted,offensive_rebounds,defensive_rebounds,personal_fouls")
+                    .eq("season", season)
                     .range(offset, offset + page_size - 1)
                     .execute()
                 )

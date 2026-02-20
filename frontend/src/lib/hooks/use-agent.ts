@@ -37,6 +37,15 @@ export interface DailyPnl {
   trades: number;
 }
 
+export interface PriceBucketStat {
+  bucket: string;
+  strategy: string;
+  side: string;
+  trades: number;
+  wins: number;
+  total_pnl: number;
+}
+
 export interface AgentPerformance {
   bankroll: number;
   paper_mode: boolean;
@@ -53,6 +62,7 @@ export interface AgentPerformance {
     roi: number;
   };
   by_strategy: Record<string, StrategyStats>;
+  by_price_bucket: PriceBucketStat[];
   daily_pnl: DailyPnl[];
   today_pnl: number;
   today_trades: number;

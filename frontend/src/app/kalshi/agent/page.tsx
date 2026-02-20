@@ -19,7 +19,6 @@ import {
   DollarSign,
   BarChart3,
   RefreshCw,
-  AlertTriangle,
   CheckCircle2,
   XCircle,
   Clock,
@@ -215,7 +214,7 @@ function TradeRow({ trade }: { trade: AgentTrade }) {
 
 export default function AgentPage() {
   const [activeTab, setActiveTab] = useState<
-    "positions" | "overview" | "trades" | "signals" | "log"
+    "positions" | "overview" | "trades" | "signals" | "quality" | "log"
   >("positions");
 
   const { data: status, isLoading: statusLoading } = useAgentStatus();
@@ -605,6 +604,7 @@ export default function AgentPage() {
             { key: "overview", label: "Daily P&L" },
             { key: "trades", label: "Trades" },
             { key: "signals", label: "Signals" },
+            { key: "quality", label: "Signal Quality" },
             { key: "log", label: "Agent Log" },
           ] as const
         ).map((tab) => (
@@ -911,6 +911,123 @@ export default function AgentPage() {
             )}
           </CardContent>
         </Card>
+      )}
+
+      {activeTab === "quality" && (
+        <div className="space-y-4">
+          {/* Overall signal quality summary */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <BarChart3 className="h-4 w-4 text-violet-500" />
+                Win Rate by Price Bucket
+                <span className="text-xs font-normal text-muted-foreground ml-1">(settled trades only)</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {performance?.by_price_bucket && performance.by_price_bucket.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-muted-foreground">
+                        <th className="pb-2 pr-3">Price</th>
+                        <th className="pb-2 pr-3">Strategy</th>
+                        <th className="pb-2 pr-3">Side</th>
+                        <th className="pb-2 pr-3 text-right">Trades</th>
+                        <th className="pb-2 pr-3 text-right">Wins</th>
+                        <th className="pb-2 pr-3 text-right">Win Rate</th>
+                        <th className="pb-2 pr-3 text-right">P&L</th>
+                        <th className="pb-2">Health</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {performance.by_price_bucket.map((row, i) => {
+                        const wr = row.trades > 0 ? row.wins / row.trades : 0;
+                        const wrPct = (wr * 100).toFixed(0);
+                        const isGood = wr >= 0.55;
+                        const isBad = wr < 0.35 && row.trades >= 3;
+                        const wrColor = isGood
+                          ? "text-emerald-600 font-semibold"
+                          : isBad
+                          ? "text-red-500 font-semibold"
+                          : "text-amber-600";
+                        return (
+                          <tr key={i} className="border-b border-muted/50 hover:bg-muted/30">
+                            <td className="py-2 pr-3 font-mono text-xs">{row.bucket}</td>
+                            <td className="py-2 pr-3">
+                              <Badge variant="outline" className="text-[10px]">{row.strategy}</Badge>
+                            </td>
+                            <td className="py-2 pr-3">
+                              <Badge
+                                variant="outline"
+                                className={row.side === "yes"
+                                  ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30 text-[10px]"
+                                  : "bg-red-500/10 text-red-600 border-red-500/30 text-[10px]"}
+                              >
+                                {row.side.toUpperCase()}
+                              </Badge>
+                            </td>
+                            <td className="py-2 pr-3 text-right font-mono">{row.trades}</td>
+                            <td className="py-2 pr-3 text-right font-mono">{row.wins}</td>
+                            <td className={`py-2 pr-3 text-right font-mono ${wrColor}`}>{wrPct}%</td>
+                            <td className="py-2 pr-3 text-right">
+                              <PnlDisplay value={row.total_pnl} />
+                            </td>
+                            <td className="py-2">
+                              {row.trades < 3 ? (
+                                <span className="text-xs text-muted-foreground">low n</span>
+                              ) : isGood ? (
+                                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                              ) : isBad ? (
+                                <XCircle className="h-4 w-4 text-red-500" />
+                              ) : (
+                                <Clock className="h-4 w-4 text-amber-500" />
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">
+                  No settled trades yet. Data will appear after markets resolve.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Current thresholds */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Zap className="h-4 w-4 text-amber-500" />
+                Active Filters (NBA Props)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div className="rounded-lg bg-muted/50 p-3">
+                  <div className="text-xs text-muted-foreground mb-1">YES min price</div>
+                  <div className="font-mono font-bold text-emerald-600">20c</div>
+                </div>
+                <div className="rounded-lg bg-muted/50 p-3">
+                  <div className="text-xs text-muted-foreground mb-1">NO max price</div>
+                  <div className="font-mono font-bold text-red-500">80c</div>
+                </div>
+                <div className="rounded-lg bg-muted/50 p-3">
+                  <div className="text-xs text-muted-foreground mb-1">Min confidence</div>
+                  <div className="font-mono font-bold">45%</div>
+                </div>
+                <div className="rounded-lg bg-muted/50 p-3">
+                  <div className="text-xs text-muted-foreground mb-1">Min edge</div>
+                  <div className="font-mono font-bold">8%</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {activeTab === "log" && (

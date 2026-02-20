@@ -1148,6 +1148,32 @@ class TradingEngine:
         """)
         by_strategy = {row["strategy"]: dict(row) for row in c.fetchall()}
 
+        # Win rate by price bucket (10c buckets) — key diagnostic for model calibration
+        c.execute("""
+            SELECT
+                CASE
+                    WHEN price_cents < 10 THEN '01-09c'
+                    WHEN price_cents < 20 THEN '10-19c'
+                    WHEN price_cents < 30 THEN '20-29c'
+                    WHEN price_cents < 40 THEN '30-39c'
+                    WHEN price_cents < 50 THEN '40-49c'
+                    WHEN price_cents < 60 THEN '50-59c'
+                    WHEN price_cents < 70 THEN '60-69c'
+                    WHEN price_cents < 80 THEN '70-79c'
+                    WHEN price_cents < 90 THEN '80-89c'
+                    ELSE '90-99c'
+                END as bucket,
+                strategy,
+                side,
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl), 0) as total_pnl
+            FROM trades WHERE status = 'settled' OR action = 'sell'
+            GROUP BY bucket, strategy, side
+            ORDER BY strategy, bucket
+        """)
+        by_price_bucket = [dict(r) for r in c.fetchall()]
+
         # Daily P&L
         c.execute("""
             SELECT date, SUM(net_pnl) as net_pnl, SUM(trades_count) as trades
@@ -1174,6 +1200,7 @@ class TradingEngine:
                 "roi": overall["total_pnl"] / overall["total_wagered"] if overall["total_wagered"] else 0,
             },
             "by_strategy": by_strategy,
+            "by_price_bucket": by_price_bucket,
             "daily_pnl": daily,
             "today_pnl": self.get_today_pnl(),
             "today_trades": self.get_today_trade_count(),

@@ -167,8 +167,9 @@ async def build_nba_analysis(force: bool = False) -> dict[str, Any]:
                         else:
                             bdl_ids_needed_low.append(bid)  # fill remaining slots
 
-            # Kalshi-active players first, then fill up to 300 with others
-            bdl_ids_needed = list(dict.fromkeys(bdl_ids_needed + bdl_ids_needed_low))[:300]
+            # Kalshi-active players first, then fill up to 600 with others
+            # get_bulk_game_logs reads from file cache first so this is fast
+            bdl_ids_needed = list(dict.fromkeys(bdl_ids_needed + bdl_ids_needed_low))[:600]
 
             if bdl_ids_needed:
                 bulk_logs = await loop.run_in_executor(

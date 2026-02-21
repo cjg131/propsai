@@ -127,35 +127,51 @@ class BallDontLieClient:
         """
         Fetch game logs for multiple players.
         Returns {bdl_player_id: [game_log_dicts]}.
-        BDL allows multiple player_ids[] in one request.
+
+        Tries file cache first (built by get_season_stats). Falls back to
+        direct API calls only for players missing from the cache.
         """
         all_logs: dict[int, list[dict]] = defaultdict(list)
+        needed_ids: list[int] = list(bdl_player_ids)
 
-        # BDL supports up to ~30 player IDs per request
-        batch_size = 25
-        for i in range(0, len(bdl_player_ids), batch_size):
-            batch = bdl_player_ids[i:i + batch_size]
-            params: dict = {
-                "season": season,
-                "start_date": f"{season}-10-01",
-                "per_page": 100,
-            }
-            # Add multiple player_ids
-            for pid in batch:
-                params.setdefault("player_ids[]", [])
-                if isinstance(params["player_ids[]"], list):
-                    params["player_ids[]"].append(pid)
-                else:
-                    params["player_ids[]"] = [params["player_ids[]"], pid]
+        # ── Tier 1: File cache (already has all current-season games) ──
+        file_data, meta = self._load_file_cache(season)
+        if file_data:
+            for row in file_data:
+                pid = row.get("player", {}).get("id")
+                if pid and pid in needed_ids:
+                    all_logs[pid].append(row)
+            covered = set(all_logs.keys())
+            needed_ids = [pid for pid in needed_ids if pid not in covered]
+            logger.info(
+                f"BDL bulk: {len(covered)} players from file cache, "
+                f"{len(needed_ids)} need API fetch"
+            )
 
-            try:
-                data = self._get_all_pages("stats", params, max_pages=5)
-                for row in data:
-                    pid = row.get("player", {}).get("id")
-                    if pid:
-                        all_logs[pid].append(row)
-            except Exception as e:
-                logger.warning(f"BDL bulk game logs batch failed: {e}")
+        # ── Tier 2: API fetch for any players missing from cache ──
+        if needed_ids:
+            batch_size = 25
+            for i in range(0, len(needed_ids), batch_size):
+                batch = needed_ids[i:i + batch_size]
+                params: dict = {
+                    "season": season,
+                    "start_date": f"{season}-10-01",
+                    "per_page": 100,
+                }
+                for pid in batch:
+                    params.setdefault("player_ids[]", [])
+                    if isinstance(params["player_ids[]"], list):
+                        params["player_ids[]"].append(pid)
+                    else:
+                        params["player_ids[]"] = [params["player_ids[]"], pid]
+                try:
+                    data = self._get_all_pages("stats", params, max_pages=5)
+                    for row in data:
+                        pid = row.get("player", {}).get("id")
+                        if pid:
+                            all_logs[pid].append(row)
+                except Exception as e:
+                    logger.warning(f"BDL bulk game logs batch failed: {e}")
 
         logger.info(f"BDL: fetched game logs for {len(all_logs)} players ({sum(len(v) for v in all_logs.values())} total games)")
         return dict(all_logs)

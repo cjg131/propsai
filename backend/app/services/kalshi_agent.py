@@ -2449,6 +2449,9 @@ class KalshiAgent:
                 logger.debug("SportsDataIO injuries fetch failed", error=str(e))
 
             # Step 6: Evaluate each market
+            # We need our_prob_yes (P(>=line)) for every candidate to enforce monotonicity,
+            # so store it temporarily on the candidate dict.
+            raw_results: list[dict[str, Any]] = []
             for market in props_markets:
                 try:
                     result = await self._evaluate_nba_prop(
@@ -2458,9 +2461,65 @@ class KalshiAgent:
                         sdio_injuries=sdio_injuries,
                     )
                     if result:
-                        results.append(result)
+                        raw_results.append(result)
                 except Exception as e:
                     logger.debug("NBA prop eval failed", ticker=market.get("ticker"), error=str(e))
+
+            # Step 7: Enforce monotonicity across lines for the same player+prop.
+            # P(>=higher_line) must be <= P(>=lower_line). If not, the model gave
+            # contradictory signals (e.g. YES 16+ rebounds but NO 10+ rebounds).
+            # Drop the violating candidate — keep only the internally consistent ones.
+            from collections import defaultdict as _dd
+            # Group by (player_name, prop_type) → list of (line, over_prob_yes, candidate)
+            # over_prob_yes = our_prob if side==yes, else 1-our_prob
+            _groups: dict[str, list[tuple[float, float, dict]]] = _dd(list)
+            for c in raw_results:
+                notes = c.get("notes", "")
+                # notes format: "{player_name} {prop_type} line={line} pred={pred}"
+                try:
+                    import re as _re
+                    _m = _re.search(r'line=([\d.]+)', notes)
+                    _line = float(_m.group(1)) if _m else None
+                    # Reconstruct over_prob_yes from side + our_prob
+                    _over_p = c["our_prob"] if c["side"] == "yes" else 1.0 - c["our_prob"]
+                    # Group key: extract player+prop from notes (everything before " line=")
+                    _key = _re.sub(r'\s+line=.*', '', notes).strip()
+                    if _line is not None:
+                        _groups[_key].append((_line, _over_p, c))
+                except Exception:
+                    results.append(c)  # can't parse — keep as-is
+                    continue
+
+            _dropped = 0
+            for _key, _entries in _groups.items():
+                if len(_entries) == 1:
+                    results.append(_entries[0][2])
+                    continue
+                # Sort ascending by line
+                _entries.sort(key=lambda x: x[0])
+                # Enforce: over_prob must be non-increasing as line increases
+                # Walk from lowest to highest line; cap each over_prob at the previous one
+                _prev_over_p = 1.0
+                _keep: list[dict] = []
+                for _line, _over_p, _c in _entries:
+                    if _over_p > _prev_over_p + 0.02:  # 2% tolerance for model noise
+                        # Monotonicity violated — this candidate is incoherent, drop it
+                        _dropped += 1
+                        logger.info(
+                            f"NBA monotonicity drop: {_key} line={_line} "
+                            f"over_p={_over_p:.3f} > prev={_prev_over_p:.3f}",
+                        )
+                    else:
+                        _prev_over_p = min(_prev_over_p, _over_p)
+                        _keep.append(_c)
+                results.extend(_keep)
+
+            if _dropped:
+                self.engine.log_event(
+                    "info",
+                    f"NBA monotonicity filter: dropped {_dropped} incoherent candidates",
+                    strategy="nba_props",
+                )
 
         except Exception as e:
             self.engine.log_event("error", f"NBA props cycle failed: {e}", strategy="nba_props")

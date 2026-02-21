@@ -373,7 +373,7 @@ class KalshiAgent:
         # Prevents re-entering the same market every cycle (econ CPI stacking, etc.)
         open_positions = self.engine.get_open_positions()
         open_keys: set[str] = {
-            f"{p['ticker']}_{p['side']}" for p in open_positions.get("positions", [])
+            f"{p['ticker']}_{p['side']}" for p in open_positions
         }
 
         pre_filter = len(candidates)

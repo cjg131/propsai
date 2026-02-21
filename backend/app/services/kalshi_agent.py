@@ -3297,8 +3297,6 @@ class KalshiAgent:
 
     async def _weather_loop(self, sleep_first: bool = False) -> None:
         """Weather strategy loop — runs every 1 hour. Collects candidates and executes via global ranking."""
-        if sleep_first:
-            await asyncio.sleep(60 * 60)
         while self._running:
             try:
                 if not self.engine.kill_switch:

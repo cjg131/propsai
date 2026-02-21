@@ -352,12 +352,6 @@ class TradingEngine:
         if not self.strategy_enabled.get(strategy, False):
             return False, f"Strategy '{strategy}' is disabled"
 
-        # Check daily loss limit — halt all trading if exceeded
-        today_pnl = self.get_today_pnl()
-        if today_pnl <= -self.daily_loss_limit:
-            self.kill_switch = True
-            return False, f"Daily loss limit hit: ${today_pnl:.2f} <= -${self.daily_loss_limit:.2f} — kill switch activated"
-
         effective = self.get_effective_bankroll()
         if effective <= 0:
             return False, f"Effective bankroll is ${effective:.2f} — no capital available"

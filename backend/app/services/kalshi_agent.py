@@ -903,7 +903,15 @@ class KalshiAgent:
 
         # Require meaningful edge — but lower bar than forecast since this is near-certain
         MIN_OBSERVED_EDGE = 0.10
-        if edge < MIN_OBSERVED_EDGE:
+        # Cap at 30%: edges >30% mean Kalshi has already priced in the outcome (e.g. 6¢ market).
+        # We'd just be agreeing with the market and paying the spread on a near-settled contract.
+        MAX_OBSERVED_EDGE = 0.30
+        if edge < MIN_OBSERVED_EDGE or edge > MAX_OBSERVED_EDGE:
+            return None
+
+        # Require Kalshi price >= 20¢ on our side — if it's already at 6-9¢, the market
+        # has already resolved this in price and there's no real opportunity left.
+        if price_cents < 20:
             return None
 
         # High confidence since this is based on actuals, not forecast

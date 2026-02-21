@@ -27,8 +27,8 @@ class LSTMNetwork(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size, device=x.device)
         out, _ = self.lstm(x, (h0, c0))
         out = self.fc(out[:, -1, :])
         return out.squeeze(-1)
@@ -94,12 +94,25 @@ class LSTMPredictor(BasePredictor):
         criterion = nn.MSELoss()
 
         self.model.train()
+        best_loss = float("inf")
+        patience = 3
+        patience_counter = 0
+        
         for epoch in range(15):
             optimizer.zero_grad()
             output = self.model(X_tensor)
             loss = criterion(output, y_tensor)
             loss.backward()
             optimizer.step()
+            
+            current_loss = loss.item()
+            if current_loss < best_loss:
+                best_loss = current_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break  # Early stopping triggered
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         if self.model is None:

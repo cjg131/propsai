@@ -149,27 +149,52 @@ class KalshiClient:
     async def _get(self, path: str, params: dict[str, Any] | None = None, auth: bool = False) -> dict[str, Any]:
         """Make a GET request to the Kalshi API."""
         async with self._semaphore:
-            await self._throttle()
-            headers = self._auth_headers("GET", path.split("?")[0]) if auth else {}
-            resp = await self._http.get(path, params=params, headers=headers)
+            for attempt in range(3):
+                await self._throttle()
+                headers = self._auth_headers("GET", path.split("?")[0]) if auth else {}
+                resp = await self._http.get(path, params=params, headers=headers)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 30))
+                    logger.warning(f"Kalshi API rate limited (429), backing off for {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            # If we exhausted retries
             resp.raise_for_status()
             return resp.json()
 
     async def _post(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any]:
         """Make an authenticated POST request."""
         async with self._semaphore:
-            await self._throttle()
-            headers = self._auth_headers("POST", path)
-            resp = await self._http.post(path, json=json_data, headers=headers)
+            for attempt in range(3):
+                await self._throttle()
+                headers = self._auth_headers("POST", path)
+                resp = await self._http.post(path, json=json_data, headers=headers)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 30))
+                    logger.warning(f"Kalshi API rate limited (429), backing off for {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
             resp.raise_for_status()
             return resp.json()
 
     async def _delete(self, path: str) -> dict[str, Any]:
         """Make an authenticated DELETE request."""
         async with self._semaphore:
-            await self._throttle()
-            headers = self._auth_headers("DELETE", path)
-            resp = await self._http.delete(path, headers=headers)
+            for attempt in range(3):
+                await self._throttle()
+                headers = self._auth_headers("DELETE", path)
+                resp = await self._http.delete(path, headers=headers)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 30))
+                    logger.warning(f"Kalshi API rate limited (429), backing off for {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
             resp.raise_for_status()
             return resp.json()
 

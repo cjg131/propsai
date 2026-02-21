@@ -288,7 +288,8 @@ class CrossMarketScanner:
         # Group by market_key (first segment of outcome_key) and normalize within each group.
         raw_consensus: dict[str, float] = {}
         for key, probs in sharp_probs.items():
-            raw_consensus[key] = sum(probs) / len(probs)
+            if probs:
+                raw_consensus[key] = sum(probs) / len(probs)
 
         # Normalize within each market type to remove vig
         from collections import defaultdict as _dd

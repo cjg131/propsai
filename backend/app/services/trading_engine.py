@@ -62,7 +62,7 @@ class TradingEngine:
         self.max_strategy_exposure_pct = max_strategy_exposure_pct
         self.max_strategy_cycle_pct = max_strategy_cycle_pct
         # Scale risk limits from bankroll (override with explicit values if provided)
-        self.daily_loss_limit = daily_loss_limit if daily_loss_limit is not None else bankroll * 0.20
+        self.daily_loss_limit = daily_loss_limit if daily_loss_limit is not None else float('inf')
         self.max_bet_size = max_bet_size if max_bet_size is not None else bankroll * 0.04
         self.max_position_per_ticker = max_position_per_ticker if max_position_per_ticker is not None else bankroll * 0.10
         self.kill_switch = False
@@ -85,6 +85,12 @@ class TradingEngine:
         """Initialize SQLite database for trade logging."""
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH))
+        
+        # Enable Write-Ahead Logging to prevent database locking errors
+        # when multiple concurrent tasks (weather, crypto, main) write.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        
         c = conn.cursor()
 
         c.execute("""

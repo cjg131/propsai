@@ -460,7 +460,8 @@ class KalshiWebSocket:
 
     def add_callback(self, callback: Callable) -> None:
         """Register a callback for all WS messages."""
-        self._callbacks.append(callback)
+        if callback not in self._callbacks:
+            self._callbacks.append(callback)
 
     @property
     def connected(self) -> bool:

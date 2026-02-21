@@ -2915,6 +2915,28 @@ class KalshiAgent:
                         actions.append({"action": "exit", "reason": "dead_contract", "ticker": ticker,
                                         "pnl": unrealized_pnl})
                         continue
+                        
+                    # ── DECISION 0c: DYNAMIC TAKE PROFIT (95c rule) ──
+                    # If YES reaches 95c, probability of winning is very high. 
+                    # Instead of waiting days for settlement to free up $1.00, sell now for 0.95 
+                    # to free up the capital immediately for other trades.
+                    if mark_price >= 95 and unrealized_pnl > 0:
+                        await self.engine.exit_trade(
+                            strategy=pos["strategy"],
+                            ticker=ticker,
+                            side=pos["side"],
+                            count=pos["contracts"],
+                            price_cents=mark_price,
+                            reason=f"dynamic_take_profit mark={mark_price}c (freeing capital)",
+                        )
+                        self.engine.log_event(
+                            "paper_trade",
+                            f"DYNAMIC TP {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — P&L: ${unrealized_pnl:+.2f}",
+                            strategy="monitor",
+                        )
+                        actions.append({"action": "take_profit", "ticker": ticker,
+                                        "pnl": unrealized_pnl, "profit_pct": 1.0})
+                        continue
 
                     # ── DECISION 1: EXIT — edge has flipped significantly ──
                     if current_edge < -0.05 and mark_price > 0:

@@ -581,9 +581,6 @@ class SmartPredictor:
                 # Matchup history: group by opponent
                 opp_stats: dict[int, list[float]] = defaultdict(list)
 
-                enriched.get("team_pace", 100)
-                enriched.get("team_win_pct", 0.5)
-
                 for i in range(3, n_total):
                     actual_stat = stat_vals[i]
                     actual_min = mins_vals[i]
@@ -989,12 +986,14 @@ class SmartPredictor:
         # Always use inverse-RMSE weighted average of base models.
         # Meta-model stacking consistently underperforms due to multicollinearity
         # between highly correlated base model predictions.
-        weights = prop_data["weights"]
-        total_w = sum(weights.get(k, 0) for k in base_preds)
+        # Filter weights to only include models that produced predictions
+        available_weights = {k: weights.get(k, 0) for k in base_preds}
+        total_w = sum(available_weights.values())
         if total_w > 0:
+            # Renormalize weights based on available models
             predicted_value = sum(
-                base_preds[k] * weights.get(k, 0) for k in base_preds
-            ) / total_w
+                base_preds[k] * (available_weights[k] / total_w) for k in base_preds
+            )
         else:
             predicted_value = float(np.mean(list(base_preds.values())))
 

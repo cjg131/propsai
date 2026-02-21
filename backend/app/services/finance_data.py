@@ -93,7 +93,8 @@ class FinanceDataService:
             result = data["chart"]["result"][0]
             meta = result["meta"]
             indicators = result.get("indicators", {})
-            quotes = indicators.get("quote", [{}])[0]
+            quotes_list = indicators.get("quote") or [{}]
+            quotes = quotes_list[0] if quotes_list else {}
             timestamps = result.get("timestamp", [])
 
             current_price = meta.get("regularMarketPrice", 0)

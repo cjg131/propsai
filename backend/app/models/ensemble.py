@@ -280,8 +280,7 @@ class EnsembleEngine:
 
         for name, model in self.base_models.items():
             try:
-                ext = ".pt" if name in ("lstm", "transformer") else ".joblib"
-                model.save(str(save_dir / f"{name}{ext}"))
+                model.save(str(save_dir / f"{name}.joblib"))
             except Exception as e:
                 logger.error(f"Error saving {name}", error=str(e))
 

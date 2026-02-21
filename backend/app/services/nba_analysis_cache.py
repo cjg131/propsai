@@ -293,7 +293,7 @@ async def build_nba_analysis(force: bool = False) -> dict[str, Any]:
 _singleton = None
 
 
-def get_nba_analysis_cache() -> "NBAAnalysisCacheService":
+def get_nba_analysis_cache() -> NBAAnalysisCacheService:
     global _singleton
     if _singleton is None:
         _singleton = NBAAnalysisCacheService()

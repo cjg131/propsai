@@ -304,6 +304,7 @@ async def get_signal_stats():
 async def reset_paper_trades():
     """Clear all paper trades, signals, and logs for a fresh start."""
     import sqlite3
+
     from app.services.trading_engine import DB_PATH
     engine = get_trading_engine()
     engine.log_event("control", "DB reset requested via API")
@@ -314,7 +315,6 @@ async def reset_paper_trades():
     c.execute("DELETE FROM signals")
     c.execute("DELETE FROM daily_pnl")
     c.execute("DELETE FROM agent_log")
-    deleted = c.rowcount
     conn.commit()
     conn.close()
 

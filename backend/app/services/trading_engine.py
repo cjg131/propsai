@@ -197,7 +197,7 @@ class TradingEngine:
 
     def get_effective_bankroll(self) -> float:
         """Real available capital = starting bankroll + all realized P&L.
-        
+
         This is the true bankroll after wins and losses are accounted for.
         All risk calculations should use this, not self.bankroll.
         """
@@ -243,7 +243,7 @@ class TradingEngine:
 
     def get_total_exposure(self, strategy: str | None = None) -> float:
         """Get total capital currently deployed in open (filled, unsettled) positions.
-        
+
         Nets buy cost against sell proceeds so that exited positions free up capital.
         buy cost is positive, sell cost is negative (proceeds), so SUM(cost) gives net.
         Excludes sell/exit trades from the exposure count since they reduce exposure.
@@ -293,10 +293,10 @@ class TradingEngine:
 
     def get_remaining_capital(self, strategy: str = "") -> float:
         """Get remaining deployable capital, respecting per-strategy caps.
-        
+
         Uses effective_bankroll (starting bankroll + realized P&L) so that
         losses reduce available capital in real time.
-        
+
         Limits:
           1. Global: total exposure <= effective_bankroll * max_total_exposure_pct
           2. Per-strategy total: strategy exposure <= effective_bankroll * max_strategy_exposure_pct
@@ -307,30 +307,30 @@ class TradingEngine:
         total_exposure = self.get_total_exposure()
         max_deployable = effective * self.max_total_exposure_pct
         remaining_global = max(0, max_deployable - total_exposure)
-        
+
         if not strategy:
             return remaining_global
-        
+
         # Per-strategy total exposure cap (soft)
         strategy_exposure = self.get_total_exposure(strategy=strategy)
         max_strategy = effective * self.max_strategy_exposure_pct
         remaining_strategy = max(0, max_strategy - strategy_exposure)
-        
+
         # Per-strategy cycle cap (prevents one cycle from deploying too much)
         cycle_deployed = self._cycle_deployed.get(strategy, 0.0)
         max_cycle = effective * self.max_strategy_cycle_pct
         remaining_cycle = max(0, max_cycle - cycle_deployed)
-        
+
         return min(remaining_global, remaining_strategy, remaining_cycle)
-    
+
     def start_cycle(self, strategy: str) -> None:
         """Call at the start of each strategy cycle to reset cycle deployment tracking."""
         self._cycle_deployed[strategy] = 0.0
-    
+
     def _record_cycle_deployment(self, strategy: str, amount: float) -> None:
         """Track how much capital was deployed in the current cycle for a strategy."""
         self._cycle_deployed[strategy] = self._cycle_deployed.get(strategy, 0.0) + amount
-    
+
     def _get_trade_count(self) -> int:
         """Get total number of buy trades placed."""
         conn = sqlite3.connect(str(DB_PATH))

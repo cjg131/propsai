@@ -811,7 +811,6 @@ class KalshiScanner:
 
                 for m in markets:
                     title = (m.get("title", "") or "").lower()
-                    ticker = m.get("ticker", "")
 
                     is_finance = any(kw in title for kw in [
                         "s&p", "s&p 500", "sp500", "nasdaq", "dow", "index",

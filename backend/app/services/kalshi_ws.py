@@ -20,9 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections import defaultdict
-from datetime import UTC, datetime
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed

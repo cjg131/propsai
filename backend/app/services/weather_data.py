@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx

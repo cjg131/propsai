@@ -416,7 +416,6 @@ async def generate_predictions():
             if not player:
                 continue
             is_home = player.get("is_home", False)
-            opp_abbr = player.get("opponent", "")
             team_abbr = player.get("team", "")
             game_id = player.get("game_id", "")
             real_lines = game_id_to_lines.get(str(game_id), {})
@@ -431,7 +430,6 @@ async def generate_predictions():
                 spread = real_lines.get("spread_home" if is_home else "spread_away", 0)
                 over_under = real_lines.get("total", 220)
             else:
-                team_win = player.get("team_win_pct", 0.5)
                 spread = 0.0
                 pace_factor = player.get("pace_factor", 1.0)
                 over_under = round(220 * pace_factor, 1)
@@ -491,7 +489,7 @@ async def generate_predictions():
         predictor = get_smart_predictor()
         if not predictor.is_trained:
             logger.info("Step 6: No saved models found — training from scratch...")
-            predictor.train_all_props(enriched_players)
+            predictor.train_all_props(list(sdio_by_name.values()))
         else:
             logger.info(f"Step 6: Using pre-trained models for {list(predictor.prop_models.keys())} (use /retrain to rebuild)")
 

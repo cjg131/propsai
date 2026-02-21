@@ -13,7 +13,6 @@ Data Sources (all free, no key needed):
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import UTC, datetime
 from typing import Any
 

@@ -12,25 +12,25 @@ from typing import Any
 
 from app.config import get_settings
 from app.logging_config import get_logger
+from app.services.adaptive_thresholds import get_adaptive_thresholds
 from app.services.cross_market_sports import CrossMarketScanner
-from app.services.cross_strategy_correlation import CrossStrategyCorrelation, get_cross_strategy_engine
+from app.services.cross_strategy_correlation import get_cross_strategy_engine
 from app.services.crypto_data import CryptoDataService
 from app.services.econ_data import EconDataService
 from app.services.finance_data import FinanceDataService
 from app.services.kalshi_api import get_kalshi_client
-from app.services.kalshi_ws import KalshiWebSocket, get_kalshi_ws
 from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs
+from app.services.kalshi_ws import KalshiWebSocket, get_kalshi_ws
 from app.services.nba_data import NBADataService, get_nba_data
-from app.services.parlay_pricer import price_parlay_legs, teams_match
-from app.services.smart_predictor import SmartPredictor, get_smart_predictor
-from app.services.adaptive_thresholds import get_adaptive_thresholds
-from app.services.polymarket_data import get_polymarket_data
-from app.services.signal_scorer import get_signal_scorer
 from app.services.news_sentiment import get_market_news_sentiment
+from app.services.parlay_pricer import price_parlay_legs, teams_match
+from app.services.polymarket_data import get_polymarket_data
+from app.services.referee_data import RefereeDataService, get_referee_data
+from app.services.signal_scorer import get_signal_scorer
+from app.services.smart_predictor import SmartPredictor, get_smart_predictor
 from app.services.trade_analyzer import get_trade_analyzer
 from app.services.trading_engine import get_trading_engine
 from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
-from app.services.referee_data import get_referee_data, RefereeDataService
 
 logger = get_logger(__name__)
 
@@ -162,8 +162,9 @@ class KalshiAgent:
         components: dict[str, float] = {}
         # Try to parse from signal details stored in the DB
         try:
-            from app.services.trading_engine import DB_PATH
             import sqlite3
+
+            from app.services.trading_engine import DB_PATH
             conn = sqlite3.connect(str(DB_PATH))
             c = conn.cursor()
             c.execute("SELECT details FROM signals WHERE trade_id = ?", (trade.get("id", ""),))
@@ -495,8 +496,10 @@ class KalshiAgent:
             )
 
             # Group by (city_code, target_date) so each group gets the right forecast
-            from datetime import UTC, date as _date, datetime as _datetime
             import re as _re
+            from datetime import UTC
+            from datetime import date as _date
+            from datetime import datetime as _datetime
             today_str = _datetime.now(UTC).date().isoformat()
             by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for m in weather_markets:
@@ -537,7 +540,6 @@ class KalshiAgent:
                 except Exception as e:
                     logger.debug("Observation fetch failed", city=city_key, error=str(e))
 
-            fetched_forecasts: dict[tuple[str, str], dict[str, Any]] = {}
             for i, ((city_key, target_date_str), city_markets) in enumerate(by_city_date.items()):
                 if city_key not in CITY_CONFIGS:
                     self.engine.log_event(
@@ -759,8 +761,9 @@ class KalshiAgent:
         - If outcome is not yet deterministic (early in day, close to threshold): skip
         - Minimum 3 observations required (data quality gate)
         """
-        from datetime import UTC, datetime as _dt, timezone as _tz
         import zoneinfo as _zi
+        from datetime import UTC
+        from datetime import datetime as _dt
 
         ticker = market.get("ticker", "")
         title = market.get("title", "")
@@ -813,7 +816,6 @@ class KalshiAgent:
 
         observed_high = obs.get("observed_high_f")
         observed_low = obs.get("observed_low_f")
-        current_temp = obs.get("current_temp_f")
         obs_count = obs.get("obs_count", 0)
 
         # Determine local time of day to assess if the day's high is likely set
@@ -2310,6 +2312,7 @@ class KalshiAgent:
         """Trigger a background SmartPredictor retrain if models are >7 days old."""
         import time
         from datetime import date as _date
+
         from app.services.smart_predictor import ARTIFACTS_DIR
 
         today = str(_date.today())
@@ -2343,8 +2346,9 @@ class KalshiAgent:
 
         def _retrain_worker():
             try:
-                from app.services.nba_analysis_cache import build_nba_analysis
                 import asyncio
+
+                from app.services.nba_analysis_cache import build_nba_analysis
                 loop = asyncio.new_event_loop()
                 cache_data = loop.run_until_complete(build_nba_analysis(force=True))
                 loop.close()
@@ -2711,11 +2715,11 @@ class KalshiAgent:
                 if any(kw in headline for kw in injury_keywords):
                     # Player may be limited/out — reduce confidence significantly
                     confidence = max(0.10, confidence - 0.20)
-                    news_detail = f" news=INJURY_RISK"
+                    news_detail = " news=INJURY_RISK"
                 elif any(kw in headline for kw in positive_keywords):
                     # Player confirmed healthy/active
                     confidence = min(0.95, confidence + 0.05)
-                    news_detail = f" news=HEALTHY"
+                    news_detail = " news=HEALTHY"
 
         # Calculate edge
         kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
@@ -3431,6 +3435,7 @@ class KalshiAgent:
     def _log_daily_summary(self) -> None:
         """Log a daily performance summary."""
         import sqlite3 as _sqlite3
+
         from app.services.trading_engine import DB_PATH
         try:
             yesterday = (datetime.now(UTC) - __import__("datetime").timedelta(days=1)).strftime("%Y-%m-%d")

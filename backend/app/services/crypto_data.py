@@ -13,7 +13,6 @@ Signals:
 from __future__ import annotations
 
 import asyncio
-import math
 import statistics
 from datetime import UTC, datetime
 from typing import Any

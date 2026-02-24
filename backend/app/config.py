@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     # Sentry
     sentry_dsn: str = Field(default="", description="Sentry DSN for error tracking")
 
+    # Notifications
+    discord_webhook_url: str = Field(
+        default="", description="Discord webhook URL for trade alerts"
+    )
+
     # App Settings
     app_env: str = Field(default="development", description="Application environment")
     app_debug: bool = Field(default=True, description="Debug mode")
@@ -81,7 +86,11 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",")]
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 def get_settings() -> Settings:

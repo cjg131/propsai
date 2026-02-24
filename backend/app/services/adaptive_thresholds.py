@@ -14,13 +14,15 @@ Rules:
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 DB_PATH = Path(__file__).parent.parent / "data" / "trading_engine.db"
 

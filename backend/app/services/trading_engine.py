@@ -7,14 +7,17 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 DB_PATH = Path(__file__).parent.parent / "data" / "trading_engine.db"
 
@@ -69,7 +72,30 @@ class TradingEngine:
         # Track per-strategy deployment within current cycle
         self._cycle_deployed: dict[str, float] = {}
 
-        # Strategy-level toggles
+        # Runtime health snapshots (updated by agent loop)
+        self._runtime_api_healthy = True
+        self._runtime_db_healthy = True
+        self._runtime_ws_healthy = True
+        self._last_monitor_heartbeat = ""
+
+        # Live guardrail configuration
+        self.max_total_resting_orders = int(os.environ.get("MAX_TOTAL_RESTING_ORDERS", "50"))
+        self.max_resting_orders_per_strategy = int(os.environ.get("MAX_RESTING_ORDERS_PER_STRATEGY", "15"))
+        self.max_order_failures_window = int(os.environ.get("MAX_ORDER_FAILURES_WINDOW", "5"))
+        self.order_failure_window_mins = int(os.environ.get("ORDER_FAILURE_WINDOW_MINS", "15"))
+        self.require_ws_for_live = os.environ.get("REQUIRE_WS_FOR_LIVE", "false").lower() == "true"
+        self.enable_auto_kill_on_failures = os.environ.get("AUTO_KILL_ON_ORDER_FAILURES", "true").lower() == "true"
+
+        # Order failure tracking for circuit breaking
+        self._recent_order_failures: list[float] = []
+        self._last_order_success_ts: float = 0.0
+
+        # Circuit breaker state
+        self._cooldown_until: float = 0.0
+        self._last_cooldown_date: str = ""
+        self._cooldown_pnl_threshold: float = 0.0
+
+        # Enable/disable specific strategies
         self.strategy_enabled = {
             "weather": True,
             "sports": True,
@@ -259,12 +285,12 @@ class TradingEngine:
         if strategy:
             c.execute(
                 """SELECT COALESCE(SUM(cost + fee), 0) FROM trades
-                   WHERE status = 'filled' AND action = 'buy' AND strategy = ?""",
+                   WHERE status IN ('filled', 'resting', 'pending') AND action = 'buy' AND strategy = ?""",
                 (strategy,),
             )
         else:
             c.execute(
-                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND action = 'buy'"
+                "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status IN ('filled', 'resting', 'pending') AND action = 'buy'"
             )
         result = c.fetchone()[0]
         conn.close()
@@ -279,7 +305,7 @@ class TradingEngine:
                 SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END)
               - SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END) as net
             FROM trades
-            WHERE status = 'filled' AND ticker = ?
+            WHERE status IN ('filled', 'resting', 'pending') AND ticker = ?
         """, (ticker,))
         row = c.fetchone()
         conn.close()
@@ -290,7 +316,7 @@ class TradingEngine:
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute(
-            "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status = 'filled' AND ticker = ?",
+            "SELECT COALESCE(SUM(cost + fee), 0) FROM trades WHERE status IN ('filled', 'resting', 'pending') AND ticker = ?",
             (ticker,),
         )
         result = c.fetchone()[0]
@@ -337,6 +363,89 @@ class TradingEngine:
         """Track how much capital was deployed in the current cycle for a strategy."""
         self._cycle_deployed[strategy] = self._cycle_deployed.get(strategy, 0.0) + amount
 
+    def set_runtime_health(
+        self,
+        *,
+        api_healthy: bool | None = None,
+        db_healthy: bool | None = None,
+        ws_healthy: bool | None = None,
+    ) -> None:
+        """Update runtime health flags sourced from the agent monitor loop."""
+        if api_healthy is not None:
+            self._runtime_api_healthy = bool(api_healthy)
+        if db_healthy is not None:
+            self._runtime_db_healthy = bool(db_healthy)
+        if ws_healthy is not None:
+            self._runtime_ws_healthy = bool(ws_healthy)
+
+    def record_monitor_heartbeat(self) -> None:
+        """Record monitor loop heartbeat for health checks."""
+        self._last_monitor_heartbeat = datetime.now(UTC).isoformat()
+
+    def _prune_order_failures(self) -> None:
+        """Keep only recent order failures inside the configured time window."""
+        cutoff = time.time() - (self.order_failure_window_mins * 60)
+        self._recent_order_failures = [ts for ts in self._recent_order_failures if ts >= cutoff]
+
+    def _record_order_failure(self) -> None:
+        """Track live order failure and optionally auto-activate kill switch."""
+        now_ts = time.time()
+        self._recent_order_failures.append(now_ts)
+        self._prune_order_failures()
+
+        if self.enable_auto_kill_on_failures and len(self._recent_order_failures) >= self.max_order_failures_window:
+            if not self.kill_switch:
+                self.kill_switch = True
+                self.log_event(
+                    "critical",
+                    f"Kill switch auto-activated: {len(self._recent_order_failures)} order failures "
+                    f"in {self.order_failure_window_mins}m",
+                    strategy="risk",
+                )
+
+    def _record_order_success(self) -> None:
+        """Track successful order placements."""
+        self._last_order_success_ts = time.time()
+        self._prune_order_failures()
+
+    def get_resting_order_count(self, strategy: str | None = None) -> int:
+        """Get number of currently resting/pending orders."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        if strategy:
+            c.execute(
+                "SELECT COUNT(*) FROM trades WHERE status IN ('resting', 'pending') AND strategy = ?",
+                (strategy,),
+            )
+        else:
+            c.execute("SELECT COUNT(*) FROM trades WHERE status IN ('resting', 'pending')")
+        result = int(c.fetchone()[0] or 0)
+        conn.close()
+        return result
+
+    def get_guardrail_status(self) -> dict[str, Any]:
+        """Summarize live-trading guardrail state for health/status endpoints."""
+        self._prune_order_failures()
+        return {
+            "runtime_health": {
+                "api_healthy": self._runtime_api_healthy,
+                "db_healthy": self._runtime_db_healthy,
+                "ws_healthy": self._runtime_ws_healthy,
+                "last_monitor_heartbeat": self._last_monitor_heartbeat,
+            },
+            "resting_orders": {
+                "total": self.get_resting_order_count(),
+                "max_total": self.max_total_resting_orders,
+                "max_per_strategy": self.max_resting_orders_per_strategy,
+            },
+            "order_failures": {
+                "recent_failures": len(self._recent_order_failures),
+                "window_mins": self.order_failure_window_mins,
+                "max_before_kill": self.max_order_failures_window,
+                "last_success_ts": self._last_order_success_ts,
+            },
+        }
+
     def _get_trade_count(self) -> int:
         """Get total number of buy trades placed."""
         conn = sqlite3.connect(str(DB_PATH))
@@ -354,6 +463,38 @@ class TradingEngine:
         """
         if self.kill_switch:
             return False, "Kill switch is active"
+
+        if not self.paper_mode:
+            if not self._runtime_api_healthy:
+                return False, "API health degraded — blocking new live trades"
+            if not self._runtime_db_healthy:
+                return False, "DB health degraded — blocking new live trades"
+            if self.require_ws_for_live and not self._runtime_ws_healthy:
+                return False, "WebSocket unhealthy (REQUIRE_WS_FOR_LIVE enabled)"
+            
+        # ── Circuit Breaker (2-Hour Cooldown) ──
+        import time
+        now_ts = time.time()
+        if now_ts < self._cooldown_until:
+            mins_left = int((self._cooldown_until - now_ts) / 60)
+            return False, f"Circuit breaker cooldown ({mins_left}m remaining)"
+            
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        effective = self.get_effective_bankroll()
+        
+        if today != self._last_cooldown_date:
+            self._last_cooldown_date = today
+            # Set initial drawdown threshold to -5% of bankroll for the day
+            self._cooldown_pnl_threshold = -(effective * 0.05)
+            
+        today_pnl = self.get_today_pnl()
+        if today_pnl <= self._cooldown_pnl_threshold:
+            self._cooldown_until = now_ts + (2 * 3600)  # 2 hours
+            # Lower the threshold by another 5% so it can trigger again if things get worse later
+            self._cooldown_pnl_threshold -= (effective * 0.05)
+            self.log_event("warning", f"CIRCUIT BREAKER TRIGGERED: Daily P&L hit ${today_pnl:.2f}. Pausing new trades for 2 hours.", strategy="risk")
+            return False, f"Circuit breaker triggered at ${today_pnl:.2f}"
+        # ───────────────────────────────────────
 
         if not self.strategy_enabled.get(strategy, False):
             return False, f"Strategy '{strategy}' is disabled"
@@ -464,6 +605,22 @@ class TradingEngine:
         # Let's keep it simple: edge is always positive when we have an advantage
         edge = abs(our_prob - kalshi_prob)
 
+        if not self.paper_mode:
+            resting_total = self.get_resting_order_count()
+            if resting_total >= self.max_total_resting_orders:
+                reason = f"Resting-order cap reached ({resting_total}/{self.max_total_resting_orders})"
+                self.log_event("blocked", reason, strategy=strategy)
+                return {"status": "blocked", "reason": reason}
+
+            strategy_resting = self.get_resting_order_count(strategy=strategy)
+            if strategy_resting >= self.max_resting_orders_per_strategy:
+                reason = (
+                    f"Strategy resting-order cap reached for {strategy} "
+                    f"({strategy_resting}/{self.max_resting_orders_per_strategy})"
+                )
+                self.log_event("blocked", reason, strategy=strategy)
+                return {"status": "blocked", "reason": reason}
+
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
         c.execute(
@@ -522,6 +679,22 @@ class TradingEngine:
         fee = _kalshi_maker_fee(count, price_cents)
         edge = abs(our_prob - kalshi_prob)
 
+        if not self.paper_mode:
+            resting_total = self.get_resting_order_count()
+            if resting_total >= self.max_total_resting_orders:
+                reason = f"Resting-order cap reached ({resting_total}/{self.max_total_resting_orders})"
+                self.log_event("blocked", reason, strategy=strategy)
+                return {"status": "blocked", "reason": reason}
+
+            strategy_resting = self.get_resting_order_count(strategy=strategy)
+            if strategy_resting >= self.max_resting_orders_per_strategy:
+                reason = (
+                    f"Strategy resting-order cap reached for {strategy} "
+                    f"({strategy_resting}/{self.max_resting_orders_per_strategy})"
+                )
+                self.log_event("blocked", reason, strategy=strategy)
+                return {"status": "blocked", "reason": reason}
+
         # Risk check
         allowed, reason = self.check_risk_limits(strategy, cost, ticker=ticker)
         if not allowed:
@@ -541,7 +714,7 @@ class TradingEngine:
                 strategy=strategy,
             )
         else:
-            # Live trade — place on Kalshi
+            # Live trade — place on Kalshi as a MAKER order
             try:
                 from app.services.kalshi_api import get_kalshi_client
 
@@ -566,43 +739,26 @@ class TradingEngine:
                     )
                 order_id = result.get("order", {}).get("order_id", "")
                 status = result.get("order", {}).get("status", "pending")
-                self.log_event(
-                    "live_trade",
-                    f"LIVE: {side.upper()} {count}x {ticker} @ {price_cents}c order_id={order_id} status={status}",
-                    strategy=strategy,
-                )
-
-                # Wait for fill confirmation (up to 30 seconds)
-                if status not in ("filled", "canceled", "error") and order_id:
-                    import asyncio as _asyncio
-                    for _attempt in range(6):
-                        await _asyncio.sleep(5)
-                        try:
-                            order_data = await client.get_order(order_id)
-                            order_info = order_data.get("order", order_data)
-                            status = order_info.get("status", status)
-                            fill_count = order_info.get("fill_count", 0)
-                            if status == "filled":
-                                count = fill_count or count
-                                cost = count * price_cents / 100.0
-                                fee = _kalshi_maker_fee(count, price_cents)
-                                self.log_event("live_trade", f"Order filled: {count}x @ {price_cents}c", strategy=strategy)
-                                break
-                            elif status in ("canceled", "error"):
-                                self.log_event("warning", f"Order {status}: {order_id}", strategy=strategy)
-                                return {"status": status, "reason": f"Order {status}"}
-                        except Exception:
-                            pass
-                    else:
-                        # Not filled after 30s — cancel and report timeout
-                        try:
-                            await client.cancel_order(order_id)
-                            self.log_event("warning", f"Order timeout, canceled: {order_id}", strategy=strategy)
-                        except Exception:
-                            pass
-                        return {"status": "timeout", "reason": "Order not filled within 30s"}
+                
+                # If it's resting on the book, mark it as 'resting' so the monitor loop can track it
+                if status in ("resting", "pending"):
+                    status = "resting"
+                    self._record_order_success()
+                    self.log_event(
+                        "live_trade",
+                        f"MAKER ORDER PLACED: {side.upper()} {count}x {ticker} @ {price_cents}c order_id={order_id}",
+                        strategy=strategy,
+                    )
+                elif status == "filled":
+                    self._record_order_success()
+                    self.log_event("live_trade", f"Order filled immediately: {count}x @ {price_cents}c", strategy=strategy)
+                elif status in ("canceled", "error"):
+                    self._record_order_failure()
+                    self.log_event("warning", f"Order {status}: {order_id}", strategy=strategy)
+                    return {"status": status, "reason": f"Order {status}"}
 
             except Exception as e:
+                self._record_order_failure()
                 self.log_event("error", f"Order failed: {e}", strategy=strategy)
                 return {"status": "error", "reason": str(e)}
 
@@ -634,48 +790,61 @@ class TradingEngine:
             "thesis": thesis,
         }
 
-        conn = sqlite3.connect(str(DB_PATH))
-        c = conn.cursor()
-        c.execute(
-            """INSERT INTO trades
-            (id, timestamp, strategy, ticker, market_title, side, action, count,
-             price_cents, cost, fee, order_type, paper_mode, order_id, status,
-             our_prob, kalshi_prob, edge, signal_source, notes, thesis)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                trade_id,
-                trade["timestamp"],
-                strategy,
-                ticker,
-                market_title,
-                side,
-                "buy",
-                count,
-                price_cents,
-                cost,
-                fee,
-                "limit",
-                1 if self.paper_mode else 0,
-                order_id,
-                status,
-                our_prob,
-                kalshi_prob,
-                edge,
-                signal_source,
-                notes,
-                thesis,
-            ),
-        )
+        # Send Discord notification (fire and forget)
+        from app.services.discord_webhook import send_discord_notification
+        import asyncio
+        mode = "PAPER" if self.paper_mode else "LIVE"
+        title = f"[{mode}] Trade Executed: {strategy.upper()}"
+        message = f"**{side.upper()}** {count}x `{ticker}` @ {price_cents}¢\nCost: ${cost:.2f} (Fee: ${fee:.2f})\nEdge: {edge:.1%}\n\n**Notes:** {notes}"
+        color = 0x2ecc71 if side == "yes" else 0xe74c3c
+        asyncio.create_task(send_discord_notification(title, message, color))
 
-        # Update signal if linked
-        if signal_id:
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            c = conn.cursor()
             c.execute(
-                "UPDATE signals SET acted_on = 1, trade_id = ? WHERE id = ?",
-                (trade_id, signal_id),
+                """INSERT INTO trades
+                (id, timestamp, strategy, ticker, market_title, side, action, count,
+                 price_cents, cost, fee, order_type, paper_mode, order_id, status,
+                 our_prob, kalshi_prob, edge, signal_source, notes, thesis)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    trade_id,
+                    trade["timestamp"],
+                    strategy,
+                    ticker,
+                    market_title,
+                    side,
+                    "buy",
+                    count,
+                    price_cents,
+                    cost,
+                    fee,
+                    "limit",
+                    1 if self.paper_mode else 0,
+                    order_id,
+                    status,
+                    our_prob,
+                    kalshi_prob,
+                    edge,
+                    signal_source,
+                    notes,
+                    thesis,
+                ),
             )
 
-        conn.commit()
-        conn.close()
+            # Update signal if linked
+            if signal_id:
+                c.execute(
+                    "UPDATE signals SET acted_on = 1, trade_id = ? WHERE id = ?",
+                    (trade_id, signal_id),
+                )
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.log_event("error", f"DB INSERT failed for trade {trade_id}: {e}", strategy=strategy)
+            logger.error(f"Trade DB insert failed: {e}", trade_id=trade_id, ticker=ticker)
 
         return trade
 
@@ -748,6 +917,15 @@ class TradingEngine:
             strategy=strategy,
         )
 
+        # Send Discord notification
+        from app.services.discord_webhook import send_discord_notification
+        import asyncio
+        mode = "PAPER" if trade.get("paper_mode") else "LIVE"
+        title = f"[{mode}] Trade Settled: {strategy.upper()}"
+        message = f"**{trade['ticker']}**\nResult: **{result.upper()}**\n**P&L:** ${pnl:+.2f}"
+        color = 0x2ecc71 if pnl > 0 else 0xe74c3c
+        asyncio.create_task(send_discord_notification(title, message, color))
+
         return {"trade_id": trade_id, "result": result, "pnl": pnl}
 
     def get_unsettled_trades(self) -> list[dict[str, Any]]:
@@ -766,6 +944,37 @@ class TradingEngine:
         trades = [dict(r) for r in c.fetchall()]
         conn.close()
         return trades
+
+    def get_resting_trades(self) -> list[dict[str, Any]]:
+        """Get all resting (unfilled limit) orders."""
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, timestamp, strategy, ticker, side, action, count, price_cents,
+                   order_id, status
+            FROM trades
+            WHERE status IN ('resting', 'pending')
+        """)
+        trades = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return trades
+
+    def update_trade_status(
+        self, trade_id: str, status: str, filled_count: int | None = None, cost: float | None = None, fee: float | None = None
+    ) -> None:
+        """Update the status of a resting trade (e.g. to 'filled' or 'canceled')."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        if filled_count is not None and cost is not None and fee is not None:
+            c.execute(
+                "UPDATE trades SET status = ?, count = ?, cost = ?, fee = ? WHERE id = ?",
+                (status, filled_count, cost, fee, trade_id)
+            )
+        else:
+            c.execute("UPDATE trades SET status = ? WHERE id = ?", (status, trade_id))
+        conn.commit()
+        conn.close()
 
     # ── Position Management ────────────────────────────────────────
 
@@ -800,9 +1009,9 @@ class TradingEngine:
                 paper_mode
             FROM trades
             WHERE status = 'filled'
-            GROUP BY ticker, side
-            HAVING SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END)
-                 - SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END) > 0
+            GROUP BY ticker, side, paper_mode
+            HAVING ABS(SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END)
+                 - SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END)) > 0
             ORDER BY MAX(timestamp) DESC
         """)
 
@@ -905,130 +1114,172 @@ class TradingEngine:
                 order_id = result.get("order", {}).get("order_id", "")
                 status = result.get("order", {}).get("status", "pending")
 
-                # Wait for fill confirmation (up to 30 seconds)
-                if status not in ("filled", "canceled", "error") and order_id:
-                    import asyncio as _asyncio
-                    for _attempt in range(6):
-                        await _asyncio.sleep(5)
-                        try:
-                            order_data = await client.get_order(order_id)
-                            order_info = order_data.get("order", order_data)
-                            status = order_info.get("status", status)
-                            if status == "filled":
-                                fill_count = order_info.get("fill_count", 0)
-                                if fill_count:
-                                    count = fill_count
-                                    cost = count * price_cents / 100.0
-                                    fee = _kalshi_maker_fee(count, price_cents)
-                                break
-                            elif status in ("canceled", "error"):
-                                self.log_event("warning", f"Exit order {status}: {order_id}", strategy=strategy)
-                                return {"status": status, "reason": f"Exit order {status}"}
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            await client.cancel_order(order_id)
-                            self.log_event("warning", f"Exit order timeout, canceled: {order_id}", strategy=strategy)
-                        except Exception:
-                            pass
-                        return {"status": "timeout", "reason": "Exit order not filled within 30s"}
+                if status in ("resting", "pending"):
+                    status = "resting"
+                    self.log_event(
+                        "live_trade",
+                        f"MAKER EXIT PLACED: {side.upper()} {count}x {ticker} @ {price_cents}c order_id={order_id}",
+                        strategy=strategy,
+                    )
+                elif status == "filled":
+                    fill_count = result.get("order", {}).get("fill_count", count)
+                    if fill_count:
+                        count = fill_count
+                        cost = count * price_cents / 100.0
+                        fee = _kalshi_maker_fee(count, price_cents)
+                elif status in ("canceled", "error"):
+                    self.log_event("warning", f"Exit order {status}: {order_id}", strategy=strategy)
+                    return {"status": status, "reason": f"Exit order {status}"}
 
             except Exception as e:
                 self.log_event("error", f"Exit order failed: {e}", strategy=strategy)
                 return {"status": "error", "reason": str(e)}
 
         # ── Compute realized P&L from entry price ──
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
 
-        # Look up average entry cost+fee from buy trades for this ticker+side
-        c.execute(
-            """SELECT SUM(count) as total_count, SUM(cost) as total_cost, SUM(fee) as total_fees,
-                      MAX(market_title) as market_title
-            FROM trades WHERE ticker = ? AND side = ? AND action = 'buy'
-            AND status = 'filled' AND paper_mode = ?""",
-            (ticker, side, 1 if self.paper_mode else 0),
-        )
-        entry_row = c.fetchone()
-        entry_cost_per_contract = 0.0
-        entry_fee_per_contract = 0.0
-        original_market_title = ""
-        if entry_row and entry_row["total_count"] and entry_row["total_count"] > 0:
-            entry_cost_per_contract = entry_row["total_cost"] / entry_row["total_count"]
-            entry_fee_per_contract = entry_row["total_fees"] / entry_row["total_count"]
-            original_market_title = entry_row["market_title"] or ""
+            # ── DUPLICATE SELL PREVENTION ──
+            # Check if we already have a filled sell for this ticker+side+count
+            # This prevents the reconciliation bug that created 297 phantom duplicate sells
+            c.execute(
+                """SELECT COUNT(*) FROM trades 
+                WHERE ticker = ? AND side = ? AND action = 'sell' 
+                AND status = 'filled' AND paper_mode = ?""",
+                (ticker, side, 1 if self.paper_mode else 0),
+            )
+            existing_sells = c.fetchone()[0]
+            
+            # Check total buy count to see if we've already fully exited
+            c.execute(
+                """SELECT SUM(count) as buy_count FROM trades 
+                WHERE ticker = ? AND side = ? AND action = 'buy' 
+                AND status = 'filled' AND paper_mode = ?""",
+                (ticker, side, 1 if self.paper_mode else 0),
+            )
+            buy_row = c.fetchone()
+            total_buy_count = buy_row[0] if buy_row and buy_row[0] else 0
+            
+            c.execute(
+                """SELECT SUM(count) as sell_count FROM trades 
+                WHERE ticker = ? AND side = ? AND action = 'sell' 
+                AND status = 'filled' AND paper_mode = ?""",
+                (ticker, side, 1 if self.paper_mode else 0),
+            )
+            sell_row = c.fetchone()
+            total_sell_count = sell_row[0] if sell_row and sell_row[0] else 0
+            
+            # If we've already sold as much as we bought, skip this duplicate exit
+            if total_sell_count >= total_buy_count:
+                conn.close()
+                self.log_event(
+                    "warning",
+                    f"Skipping duplicate exit: already sold {total_sell_count}/{total_buy_count} contracts for {ticker} {side}",
+                    strategy=strategy,
+                )
+                return {"status": "skipped", "reason": "Position already fully exited"}
 
-        # P&L = exit_proceeds - entry_cost - entry_fees(proportional) - exit_fee
-        exit_price_per = price_cents / 100.0
-        pnl = (exit_price_per - entry_cost_per_contract) * count - (entry_fee_per_contract * count) - fee
+            # Look up average entry cost+fee from buy trades for this ticker+side
+            c.execute(
+                """SELECT SUM(count) as total_count, SUM(cost) as total_cost, SUM(fee) as total_fees,
+                          MAX(market_title) as market_title
+                FROM trades WHERE ticker = ? AND side = ? AND action = 'buy'
+                AND status = 'filled' AND paper_mode = ?""",
+                (ticker, side, 1 if self.paper_mode else 0),
+            )
+            entry_row = c.fetchone()
+            entry_cost_per_contract = 0.0
+            entry_fee_per_contract = 0.0
+            original_market_title = ""
+            if entry_row and entry_row["total_count"] and entry_row["total_count"] > 0:
+                entry_cost_per_contract = entry_row["total_cost"] / entry_row["total_count"]
+                entry_fee_per_contract = entry_row["total_fees"] / entry_row["total_count"]
+                original_market_title = entry_row["market_title"] or ""
 
-        now = datetime.now(UTC).isoformat()
+            # P&L = exit_proceeds - entry_cost - entry_fees(proportional) - exit_fee
+            exit_price_per = price_cents / 100.0
+            pnl = (exit_price_per - entry_cost_per_contract) * count - (entry_fee_per_contract * count) - fee
 
-        trade = {
-            "id": trade_id,
-            "timestamp": now,
-            "strategy": strategy,
-            "ticker": ticker,
-            "market_title": original_market_title,
-            "side": side,
-            "action": sell_action,
-            "count": count,
-            "price_cents": price_cents,
-            "cost": -cost,  # Negative cost = proceeds
-            "fee": fee,
-            "order_type": "limit",
-            "paper_mode": self.paper_mode,
-            "order_id": order_id,
-            "status": status,
-            "our_prob": 0,
-            "kalshi_prob": 0,
-            "edge": 0,
-            "signal_source": "position_monitor",
-            "notes": f"EXIT: {reason}",
-            "pnl": round(pnl, 4),
-        }
+            now = datetime.now(UTC).isoformat()
 
-        c.execute(
-            """INSERT INTO trades
-            (id, timestamp, strategy, ticker, market_title, side, action, count,
-             price_cents, cost, fee, order_type, paper_mode, order_id, status,
-             our_prob, kalshi_prob, edge, signal_source, notes,
-             result, pnl, settled_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                trade_id, now, strategy, ticker, original_market_title,
-                side, sell_action, count, price_cents, -cost, fee,
-                "limit", 1 if self.paper_mode else 0, order_id, status,
-                0, 0, 0, "position_monitor", f"EXIT: {reason}",
-                "exit", round(pnl, 4), now,
-            ),
-        )
+            # Send Discord notification
+            from app.services.discord_webhook import send_discord_notification
+            import asyncio
+            mode = "PAPER" if self.paper_mode else "LIVE"
+            title = f"[{mode}] Trade Exited: {strategy.upper()}"
+            message = f"**{sell_action.upper()} {side.upper()}** {count}x `{ticker}` @ {price_cents}¢\nProceeds: ${cost:.2f} (Fee: ${fee:.2f})\n**P&L:** ${pnl:+.2f}\n\n**Reason:** {reason}"
+            color = 0x3498db
+            asyncio.create_task(send_discord_notification(title, message, color))
 
-        # Update daily P&L
-        date = now[:10]
-        c.execute(
-            """INSERT INTO daily_pnl (date, strategy, gross_pnl, fees, net_pnl, trades_count, wins, losses)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-            ON CONFLICT(date, strategy) DO UPDATE SET
-                gross_pnl = gross_pnl + ?,
-                fees = fees + ?,
-                net_pnl = net_pnl + ?,
-                trades_count = trades_count + 1,
-                wins = wins + ?,
-                losses = losses + ?""",
-            (
-                date, strategy,
-                round(pnl + fee, 4), fee, round(pnl, 4),
-                1 if pnl > 0 else 0, 1 if pnl <= 0 else 0,
-                round(pnl + fee, 4), fee, round(pnl, 4),
-                1 if pnl > 0 else 0, 1 if pnl <= 0 else 0,
-            ),
-        )
+            trade = {
+                "id": trade_id,
+                "timestamp": now,
+                "strategy": strategy,
+                "ticker": ticker,
+                "market_title": original_market_title,
+                "side": side,
+                "action": sell_action,
+                "count": count,
+                "price_cents": price_cents,
+                "cost": -cost,  # Negative cost = proceeds
+                "fee": fee,
+                "order_type": "limit",
+                "paper_mode": self.paper_mode,
+                "order_id": order_id,
+                "status": status,
+                "our_prob": 0,
+                "kalshi_prob": 0,
+                "edge": 0,
+                "signal_source": "position_monitor",
+                "notes": f"EXIT: {reason}",
+                "pnl": round(pnl, 4),
+            }
 
-        conn.commit()
-        conn.close()
+            c.execute(
+                """INSERT INTO trades
+                (id, timestamp, strategy, ticker, market_title, side, action, count,
+                 price_cents, cost, fee, order_type, paper_mode, order_id, status,
+                 our_prob, kalshi_prob, edge, signal_source, notes,
+                 result, pnl, settled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    trade_id, now, strategy, ticker, original_market_title,
+                    side, sell_action, count, price_cents, -cost, fee,
+                    "limit", 1 if self.paper_mode else 0, order_id, status,
+                    0, 0, 0, "position_monitor", f"EXIT: {reason}",
+                    "exit", round(pnl, 4), now,
+                ),
+            )
+
+            # Update daily P&L
+            date = now[:10]
+            c.execute(
+                """INSERT INTO daily_pnl (date, strategy, gross_pnl, fees, net_pnl, trades_count, wins, losses)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(date, strategy) DO UPDATE SET
+                    gross_pnl = gross_pnl + ?,
+                    fees = fees + ?,
+                    net_pnl = net_pnl + ?,
+                    trades_count = trades_count + 1,
+                    wins = wins + ?,
+                    losses = losses + ?""",
+                (
+                    date, strategy,
+                    round(pnl + fee, 4), fee, round(pnl, 4),
+                    1 if pnl > 0 else 0, 1 if pnl <= 0 else 0,
+                    round(pnl + fee, 4), fee, round(pnl, 4),
+                    1 if pnl > 0 else 0, 1 if pnl <= 0 else 0,
+                ),
+            )
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.log_event("error", f"DB INSERT failed for exit trade {trade_id}: {e}", strategy=strategy)
+            logger.error(f"Exit trade DB insert failed: {e}", trade_id=trade_id, ticker=ticker)
+            return {"status": "error", "reason": f"DB insert failed: {e}"}
 
         self.log_event(
             "exit_trade",
@@ -1231,6 +1482,7 @@ class TradingEngine:
             "max_deployable": round(max_deployable, 2),
             "remaining_capital": round(remaining, 2),
             "over_deployed": total_exposure > effective,
+            "guardrails": self.get_guardrail_status(),
         }
 
 

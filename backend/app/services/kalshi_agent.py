@@ -6,8 +6,9 @@ Runs on a schedule: weather 4x/day, sports 5min, crypto 2min, finance 10min, eco
 from __future__ import annotations
 
 import asyncio
+import os
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.config import get_settings
@@ -33,6 +34,8 @@ from app.services.trading_engine import get_trading_engine
 from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 
 class KalshiAgent:
@@ -106,6 +109,12 @@ class KalshiAgent:
         self._main_task: asyncio.Task | None = None
         self._crypto_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
+
+        # Resting-order cancel alerts (to detect persistent non-fills/chasing)
+        self._cancel_alert_window_mins = int(os.environ.get("CANCEL_ALERT_WINDOW_MINS", "30"))
+        self._cancel_alert_threshold = int(os.environ.get("CANCEL_ALERT_THRESHOLD", "6"))
+        self._auto_kill_on_cancel_storm = os.environ.get("AUTO_KILL_ON_CANCEL_STORM", "false").lower() == "true"
+        self._resting_cancel_timestamps: dict[str, list[float]] = {}
 
     # ── Cross-Strategy Correlation Helpers ────────────────────────────
 
@@ -285,17 +294,11 @@ class KalshiAgent:
         "AUS": "Austin", "DFW": "Dallas", "PHL": "Philadelphia", "DEN": "Denver",
         "SEA": "Seattle", "SFO": "San Francisco", "DCA": "Washington DC",
         "SLC": "Salt Lake City", "ATL": "Atlanta", "HOU": "Houston", "BOS": "Boston",
-        "LAS": "Las Vegas", "PHX": "Phoenix", "MSP": "Minneapolis", "NOL": "New Orleans",
-        "DET": "Detroit", "NOLA": "New Orleans",
     }
 
-    @staticmethod
-    def _enrich_weather_title(ticker: str, title: str) -> str:
-        """Prepend city name to weather market title if not already present."""
-        # Strip markdown bold markers left by some Kalshi titles
+    def _enrich_weather_title(self, ticker: str, title: str) -> str:
+        """Prefix weather market title with city name from ticker code, if missing."""
         title = title.replace("**", "")
-        # Extract city code from ticker: KXHIGHTBOS-... or KXHIGHMIA-... or KXHIGHDEN-...
-        # Pattern: KX(HIGH|LOW)(T?)<CITY>-...
         m = re.match(r'KX(?:HIGH|LOW)T?([A-Z]{2,4})-', ticker)
         if not m:
             return title
@@ -303,23 +306,112 @@ class KalshiAgent:
         city_name = KalshiAgent.WEATHER_CITY_CODES.get(city_code, "")
         if not city_name:
             return title
-        # Only prepend if city name isn't already in the title
         if city_name.lower() in title.lower():
             return title
         return f"[{city_name}] {title}"
+
+    def _record_resting_cancel(self, ticker: str) -> None:
+        """Track canceled resting orders per ticker and alert on cancel storms."""
+        now_ts = datetime.now(UTC).timestamp()
+        window_seconds = self._cancel_alert_window_mins * 60
+        series = self._resting_cancel_timestamps.setdefault(ticker, [])
+        series.append(now_ts)
+        series[:] = [ts for ts in series if ts >= now_ts - window_seconds]
+
+        if len(series) >= self._cancel_alert_threshold:
+            self.engine.log_event(
+                "warning",
+                f"Cancel storm detected for {ticker}: {len(series)} cancels in {self._cancel_alert_window_mins}m",
+                strategy="monitor",
+            )
+            if self._auto_kill_on_cancel_storm and not self.engine.kill_switch:
+                self.engine.kill_switch = True
+                self.engine.log_event(
+                    "critical",
+                    f"Kill switch auto-activated due to cancel storm on {ticker}",
+                    strategy="risk",
+                )
+
+    async def _reconcile_resting_orders(self) -> list[dict[str, Any]]:
+        """Reconcile DB resting orders against broker open resting orders."""
+        actions: list[dict[str, Any]] = []
+        if self.engine.paper_mode:
+            return actions
+
+        db_resting = self.engine.get_resting_trades()
+        if not db_resting:
+            return actions
+
+        try:
+            client = get_kalshi_client()
+            broker_resp = await client.get_orders(status="resting", limit=200)
+            broker_orders = broker_resp.get("orders", []) if isinstance(broker_resp, dict) else []
+            broker_open_ids = {
+                o.get("order_id") or o.get("id")
+                for o in broker_orders
+                if (o.get("order_id") or o.get("id"))
+            }
+
+            now_dt = datetime.now(UTC)
+            for rt in db_resting:
+                order_id = rt.get("order_id", "")
+                if not order_id or order_id.startswith("PAPER-"):
+                    continue
+                if order_id in broker_open_ids:
+                    continue
+
+                # If broker no longer reports it as open and it has aged enough,
+                # treat as canceled to avoid ghost resting exposure.
+                placed_dt = datetime.fromisoformat(rt["timestamp"].replace("Z", "+00:00"))
+                age_mins = (now_dt - placed_dt).total_seconds() / 60.0
+                if age_mins >= 2.0:
+                    self.engine.update_trade_status(rt["id"], "canceled")
+                    self.engine.log_event(
+                        "warning",
+                        f"Reconciliation canceled stale DB-resting order {order_id} (not open at broker)",
+                        strategy=rt.get("strategy", "monitor"),
+                    )
+                    actions.append({"action": "reconcile_cancel", "ticker": rt.get("ticker", ""), "order_id": order_id})
+
+            db_order_ids = {rt.get("order_id") for rt in db_resting if rt.get("order_id")}
+            orphan_broker = [oid for oid in broker_open_ids if oid not in db_order_ids]
+            if orphan_broker:
+                self.engine.log_event(
+                    "warning",
+                    f"Reconciliation found {len(orphan_broker)} broker resting orders missing in DB",
+                    strategy="monitor",
+                    details=",".join(orphan_broker[:10]),
+                )
+        except Exception as e:
+            logger.warning("Resting order reconciliation failed", error=str(e))
+
+        return actions
 
     # ── Global Signal Ranking & Execution ──────────────────────────
 
     async def execute_ranked_signals(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Rank all candidates globally by edge * confidence, then execute
-        the top ones.  Each cycle deploys up to 80% of AVAILABLE capital
-        (bankroll − current net exposure).  The remaining 20% is held back
+        the top ones.  Each cycle deploys up to 85% of AVAILABLE capital
+        (bankroll − current net exposure).  The remaining 15% is held back
         for the next cycle to DCA into existing positions or catch new
         opportunities.  Over multiple cycles the system can deploy up to
         100% of bankroll.
         """
         if not candidates:
+            return []
+
+        if (
+            not self.engine.paper_mode
+            and self.engine.require_ws_for_live
+            and not self.ws.get_status().get("connected", False)
+        ):
+            self.engine.set_runtime_health(ws_healthy=False)
+            self.engine.log_event(
+                "blocked",
+                "Global execution blocked: WebSocket disconnected and REQUIRE_WS_FOR_LIVE=true",
+                strategy="risk",
+            )
             return []
 
         # ── Deduplicate mutually exclusive outcomes ──────────────────────
@@ -391,7 +483,7 @@ class KalshiAgent:
         total_exposure = self.engine.get_total_exposure()
         effective_bankroll = self.engine.get_effective_bankroll()
         available_capital = max(0, effective_bankroll - total_exposure)
-        cycle_budget = available_capital * 0.80  # deploy 80% of what's free this cycle
+        cycle_budget = available_capital * 0.85  # deploy 85% of what's free this cycle (15% reserve)
 
         self.engine.log_event(
             "info",
@@ -497,7 +589,6 @@ class KalshiAgent:
 
             # Group by (city_code, target_date) so each group gets the right forecast
             import re as _re
-            from datetime import UTC
             from datetime import date as _date
             from datetime import datetime as _datetime
             today_str = _datetime.now(UTC).date().isoformat()
@@ -628,6 +719,15 @@ class KalshiAgent:
         """Evaluate a single weather market against consensus forecast."""
         yes_ask = market.get("yes_ask", 0)
         no_ask = market.get("no_ask", 0)
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+
+        # Safety filter: Max Spread Limit = 5¢
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
+
         strike_type = market.get("strike_type", "")
         floor_strike = market.get("floor_strike")
         cap_strike = market.get("cap_strike")
@@ -654,14 +754,18 @@ class KalshiAgent:
         if not yes_ask and not no_ask:
             return None
 
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
         # Safety filter: skip effectively-settled markets where either side is <=3c
         # (means the outcome is near-certain, no real edge to capture)
-        if yes_ask <= 3 or no_ask <= 3:
+        if yes_maker_price <= 3 or no_maker_price <= 3:
             return None
 
         # Safety filter: skip very cheap contracts (< 10c on either side)
         # These are long-shot bets with high loss rates even with edge
-        if min(yes_ask, no_ask) < 10:
+        if min(yes_maker_price, no_maker_price) < 10:
             return None
 
         # Safety filter: skip markets closing within 2 hours
@@ -682,6 +786,12 @@ class KalshiAgent:
 
         # Build consensus for this specific market's strike structure
         market_type = weather_info.get("market_type", "high_temp")
+        
+        # CRITICAL FIX: Skip HIGH temp markets - they have 9.1% win rate and lost $24.96
+        # Only trade LOW temp markets which are more predictable
+        if market_type == "high_temp":
+            return None
+        
         consensus = self.weather.build_consensus(
             forecasts,
             strike_type=strike_type,
@@ -696,8 +806,8 @@ class KalshiAgent:
         wx_thresh = self.adaptive.get_thresholds("weather")
         signal = self.weather.generate_signal(
             consensus,
-            kalshi_yes_price=yes_ask,
-            kalshi_no_price=no_ask,
+            kalshi_yes_price=yes_maker_price,
+            kalshi_no_price=no_maker_price,
             min_edge=wx_thresh["min_edge"],
             min_confidence=wx_thresh["min_confidence"],
             min_sources=2,
@@ -722,7 +832,7 @@ class KalshiAgent:
         )
 
         # Calculate position size
-        price_cents = yes_ask if signal["side"] == "yes" else no_ask
+        price_cents = yes_maker_price if signal["side"] == "yes" else no_maker_price
         count = self.engine.calculate_position_size(
             strategy="weather",
             edge=signal["edge"],
@@ -762,7 +872,6 @@ class KalshiAgent:
         - Minimum 3 observations required (data quality gate)
         """
         import zoneinfo as _zi
-        from datetime import UTC
         from datetime import datetime as _dt
 
         ticker = market.get("ticker", "")
@@ -795,6 +904,18 @@ class KalshiAgent:
         # Both sides must have real two-sided liquidity (not 100¢ = no sellers)
         if yes_ask >= 97 or no_ask >= 97:
             return None
+            
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
+
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
 
         if market.get("volume", 0) < 50:
             return None
@@ -889,17 +1010,17 @@ class KalshiAgent:
             return None
 
         # Calculate edge
-        kalshi_yes_prob = yes_ask / 100.0 if yes_ask > 0 else 0
-        kalshi_no_prob = no_ask / 100.0 if no_ask > 0 else 0
+        kalshi_yes_prob = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
+        kalshi_no_prob = no_maker_price / 100.0 if no_maker_price > 0 else 0
         our_prob_no = 1.0 - our_prob_yes
 
         yes_edge = our_prob_yes - kalshi_yes_prob if kalshi_yes_prob > 0 else 0
         no_edge = our_prob_no - kalshi_no_prob if kalshi_no_prob > 0 else 0
 
         if yes_edge >= no_edge and yes_edge > 0:
-            side, edge, our_prob, kalshi_prob, price_cents = "yes", yes_edge, our_prob_yes, kalshi_yes_prob, yes_ask
+            side, edge, our_prob, kalshi_prob, price_cents = "yes", yes_edge, our_prob_yes, kalshi_yes_prob, yes_maker_price
         elif no_edge > yes_edge and no_edge > 0:
-            side, edge, our_prob, kalshi_prob, price_cents = "no", no_edge, our_prob_no, kalshi_no_prob, no_ask
+            side, edge, our_prob, kalshi_prob, price_cents = "no", no_edge, our_prob_no, kalshi_no_prob, no_maker_price
         else:
             return None
 
@@ -1145,6 +1266,18 @@ class KalshiAgent:
         no_ask = market.get("no_ask", 0)
         floor_strike = market.get("floor_strike")
 
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
+
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
         # Skip multi-game / extended series tickers — these aggregate multiple
         # games and cannot be matched to a single Odds API event
         ticker_upper = ticker.upper()
@@ -1293,7 +1426,7 @@ class KalshiAgent:
             return None
 
         # Calculate edge: Kalshi YES price vs sharp probability
-        kalshi_implied = yes_ask / 100.0 if yes_ask else 0
+        kalshi_implied = yes_maker_price / 100.0 if yes_maker_price else 0
         if kalshi_implied <= 0:
             stats["no_edge"] += 1
             return None
@@ -1302,7 +1435,7 @@ class KalshiAgent:
         side = "yes"
 
         # Also check NO side
-        no_implied = no_ask / 100.0 if no_ask else 0
+        no_implied = no_maker_price / 100.0 if no_maker_price else 0
         no_sharp = 1.0 - sharp_prob
         no_edge = no_sharp - no_implied
         if no_edge > edge and no_implied > 0:
@@ -1404,7 +1537,7 @@ class KalshiAgent:
         )
 
         # Return candidate for global ranking (execution happens later)
-        price_cents = yes_ask if side == "yes" else no_ask
+        price_cents = yes_maker_price if side == "yes" else no_maker_price
         return {
             "strategy": "sports",
             "ticker": ticker,
@@ -1430,13 +1563,29 @@ class KalshiAgent:
         yes_ask = parlay_market.get("yes_ask", 0)
         no_ask = parlay_market.get("no_ask", 0)
 
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = parlay_market.get("yes_bid", 0)
+        no_bid = parlay_market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            if stats:
+                stats["illiquid"] += 1
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            if stats:
+                stats["illiquid"] += 1
+            return None
+
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
         # Safety filters
-        if yes_ask <= 3 or no_ask <= 3:
+        if yes_maker_price <= 3 or no_maker_price <= 3:
             if stats:
                 stats["illiquid"] += 1
             return None
         # Skip very cheap contracts (< 10c on either side)
-        if min(yes_ask, no_ask) < 10:
+        if min(yes_maker_price, no_maker_price) < 10:
             if stats:
                 stats["illiquid"] += 1
             return None
@@ -1473,9 +1622,9 @@ class KalshiAgent:
                 stats["low_confidence"] += 1
             return None
 
-        # Compare fair value to Kalshi price
-        kalshi_yes_prob = yes_ask / 100.0
-        kalshi_no_prob = no_ask / 100.0
+        # Compare fair value to Kalshi Maker price
+        kalshi_yes_prob = yes_maker_price / 100.0
+        kalshi_no_prob = no_maker_price / 100.0
 
         yes_edge = fair_prob - kalshi_yes_prob
         no_edge = (1.0 - fair_prob) - kalshi_no_prob
@@ -1544,7 +1693,7 @@ class KalshiAgent:
         )
 
         # Return candidate for global ranking (execution happens later)
-        price_cents = yes_ask if signal["side"] == "yes" else no_ask
+        price_cents = yes_maker_price if signal["side"] == "yes" else no_maker_price
         return {
             "strategy": "sports",
             "ticker": ticker,
@@ -1668,11 +1817,23 @@ class KalshiAgent:
         yes_ask = market.get("yes_ask", 0)
         no_ask = market.get("no_ask", 0)
 
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
+
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
         if not coin or coin not in signal_by_coin:
             return None
 
         # Safety filter: skip very cheap contracts (< 10c on either side)
-        if min(yes_ask, no_ask) < 10:
+        if min(yes_maker_price, no_maker_price) < 10:
             return None
 
         signal = signal_by_coin[coin]
@@ -1702,8 +1863,8 @@ class KalshiAgent:
             our_prob_yes = 1.0 - p_up
 
         # Calculate edge for both sides
-        kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
-        kalshi_no_implied = no_ask / 100.0 if no_ask > 0 else 0
+        kalshi_yes_implied = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
+        kalshi_no_implied = no_maker_price / 100.0 if no_maker_price > 0 else 0
 
         yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
         no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
@@ -1714,13 +1875,13 @@ class KalshiAgent:
             side = "yes"
             our_prob = our_prob_yes
             kalshi_prob = kalshi_yes_implied
-            price_cents = yes_ask
+            price_cents = yes_maker_price
         else:
             edge = no_edge
             side = "no"
             our_prob = 1.0 - our_prob_yes
             kalshi_prob = kalshi_no_implied
-            price_cents = no_ask
+            price_cents = no_maker_price
 
         thresholds = self.adaptive.get_thresholds("crypto")
         min_edge = thresholds["min_edge"]
@@ -1898,11 +2059,23 @@ class KalshiAgent:
         floor_strike = market.get("floor_strike")
         cap_strike = market.get("cap_strike")
 
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
+
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
         if not index or index not in signal_by_index:
             return None
 
         # Safety filter: skip very cheap contracts (< 10c on either side)
-        if min(yes_ask, no_ask) < 10:
+        if min(yes_maker_price, no_maker_price) < 10:
             return None
 
         signal = signal_by_index[index]
@@ -1981,52 +2154,66 @@ class KalshiAgent:
             # Hard reject: futures and intraday momentum directly contradict each other
             # (both must be non-trivial and pointing opposite directions)
             if abs(intraday_s) > 0.15 and abs(futures_s) > 0.15 and (intraday_s * futures_s < 0):
-                logger.debug("Finance thesis rejected: futures vs intraday contradiction",
-                             ticker=ticker, intraday=intraday_s, futures=futures_s)
+                logger.debug("Finance thesis rejected: futures vs intraday contradiction", ticker=ticker)
                 return None
 
             # Count signals aligned with trade direction (threshold: signal > 0.1 in direction)
             ALIGN_THRESHOLD = 0.10
             aligned = 0
-            if intraday_s * trade_direction > ALIGN_THRESHOLD:
-                aligned += 1
-            if futures_s * trade_direction > ALIGN_THRESHOLD:
-                aligned += 1
-            if vix_s * trade_direction > ALIGN_THRESHOLD:
-                aligned += 1
-            if ma_s * trade_direction > ALIGN_THRESHOLD:
-                aligned += 1
-            if news_s * trade_direction > 0.05:  # news sentiment threshold is lower
-                aligned += 1
+            if (intraday_s * trade_direction) > ALIGN_THRESHOLD: aligned += 1
+            if (futures_s * trade_direction) > ALIGN_THRESHOLD: aligned += 1
+            if (vix_s * trade_direction) > ALIGN_THRESHOLD: aligned += 1
+            if (ma_s * trade_direction) > ALIGN_THRESHOLD: aligned += 1
+            if (news_s * trade_direction) > ALIGN_THRESHOLD: aligned += 1
 
             if aligned < 3:
-                logger.debug(
-                    f"Finance thesis rejected: only {aligned}/5 signals aligned for {ticker} "
-                    f"({'UP' if is_up_market else 'DOWN'}) — "
-                    f"intraday={intraday_s:.2f} futures={futures_s:.2f} vix={vix_s:.2f} "
-                    f"ma={ma_s:.2f} news={news_s:.2f}"
-                )
+                logger.debug(f"Finance thesis rejected: only {aligned}/5 signals aligned", ticker=ticker)
                 return None
 
-            prob_details += f" aligned={aligned}/5 vix_level={vix_level:.1f}"
+            if is_bracket:
+                # For brackets, p_up is the probability of THIS specific bracket
+                our_prob_yes = p_up
+                prob_details = f" bracket={p_up:.3f}"
+            else:
+                # Threshold market (e.g., closing above X)
+                if floor_strike is None:
+                    return None
 
-        # Calculate edge
-        kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
-        kalshi_no_implied = no_ask / 100.0 if no_ask > 0 else 0
+                # Base probability of closing above strike
+                from app.services.smart_predictor import _calculate_probability_above_strike
+                base_prob = _calculate_probability_above_strike(
+                    current_price, floor_strike, volatility=vix_level / 100.0 if vix_level else 0.15
+                )
 
-        yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
-        no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
+                # Adjust based on momentum/sentiment
+                signal_direction = 1.0 if p_up > 0.5 else -1.0
+                alignment_bonus = (p_up - 0.5) * confidence * 0.20
+                our_prob_yes = min(0.99, max(0.01, base_prob + alignment_bonus))
 
-        if yes_edge >= no_edge:
-            edge, side = yes_edge, "yes"
-            our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_ask
-        else:
-            edge, side = no_edge, "no"
-            our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_ask
+                aligned = 1 if (base_prob > 0.5 and p_up > 0.5) or (base_prob < 0.5 and p_up < 0.5) else 0
+                prob_details = f" base={base_prob:.3f} adj={alignment_bonus:+.3f} aligned={aligned} vix={vix_level}"
 
-        fin_thresh = self.adaptive.get_thresholds("finance")
-        if edge < fin_thresh["min_edge"] or confidence < fin_thresh["min_confidence"]:
-            return None
+            # Check if title implies the opposite ("closing below X")
+            if "below" in title_lower or "under" in title_lower:
+                our_prob_yes = 1.0 - our_prob_yes
+
+            # Calculate edge
+            kalshi_yes_implied = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
+            kalshi_no_implied = no_maker_price / 100.0 if no_maker_price > 0 else 0
+
+            yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
+            no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
+
+            if yes_edge >= no_edge:
+                edge, side = yes_edge, "yes"
+                our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_maker_price
+            else:
+                edge, side = no_edge, "no"
+                our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_maker_price
+
+            fin_thresh = self.adaptive.get_thresholds("finance")
+            if edge < fin_thresh["min_edge"] or confidence < fin_thresh["min_confidence"]:
+                return None
 
         # Polymarket cross-reference: boost confidence if prices diverge
         poly_details = ""
@@ -2148,6 +2335,14 @@ class KalshiAgent:
         yes_ask = market.get("yes_ask", 0)
         no_ask = market.get("no_ask", 0)
 
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
+
         if not econ_type or econ_type not in econ_signals:
             return None
 
@@ -2223,22 +2418,36 @@ class KalshiAgent:
             return None
 
         # Calculate edge
-        kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
-        kalshi_no_implied = no_ask / 100.0 if no_ask > 0 else 0
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            return None
 
-        # Check if title says "above" or "below"
-        if "below" in title_lower or "under" in title_lower:
-            our_prob_yes = 1.0 - our_prob_yes
+        # Calculate Maker Prices (Pennying the bid)
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
+        # Safety filter: skip very cheap contracts (< 10c on either side)
+        if min(yes_maker_price, no_maker_price) < 10:
+            return None
+
+        kalshi_yes_implied = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
+        kalshi_prob_no = no_maker_price / 100.0 if no_maker_price > 0 else 0
+
+        our_prob_no = 1.0 - our_prob_yes
 
         yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
-        no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
+        no_edge = our_prob_no - kalshi_prob_no if kalshi_prob_no > 0 else 0
 
         if yes_edge >= no_edge:
             edge, side = yes_edge, "yes"
-            our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_ask
+            our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_maker_price
         else:
             edge, side = no_edge, "no"
-            our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_ask
+            our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_prob_no, no_maker_price
 
         econ_thresh = self.adaptive.get_thresholds("econ")
         if edge < econ_thresh["min_edge"] or confidence < econ_thresh["min_confidence"]:
@@ -2562,8 +2771,15 @@ class KalshiAgent:
         line = props_info.get("line")
         yes_ask = market.get("yes_ask", 0)
         no_ask = market.get("no_ask", 0)
+        if not yes_ask and not no_ask:
+            return None
 
-        if not prop_type or not player_name:
+        # Safety filter: Max Spread Limit = 5¢
+        yes_bid = market.get("yes_bid", 0)
+        no_bid = market.get("no_bid", 0)
+        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            return None
+        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
             return None
 
         # 12-hour time gate: parse game date from ticker and skip if >12hrs away
@@ -2721,19 +2937,23 @@ class KalshiAgent:
                     confidence = min(0.95, confidence + 0.05)
                     news_detail = " news=HEALTHY"
 
+        # Calculate Maker Prices
+        yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
+        no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
+
         # Calculate edge
-        kalshi_yes_implied = yes_ask / 100.0 if yes_ask > 0 else 0
-        kalshi_no_implied = no_ask / 100.0 if no_ask > 0 else 0
+        kalshi_yes_implied = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
+        kalshi_no_implied = no_maker_price / 100.0 if no_maker_price > 0 else 0
 
         yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
         no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
 
         if yes_edge >= no_edge:
             edge, side = yes_edge, "yes"
-            our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_ask
+            our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_maker_price
         else:
             edge, side = no_edge, "no"
-            our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_ask
+            our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_maker_price
 
         # Price range filter: skip extreme ends of the market where pricing is reliable
         # YES <20c = longshot the market correctly prices; NO >80c = near-certainty, model over-confident
@@ -2798,9 +3018,120 @@ class KalshiAgent:
         actions: list[dict[str, Any]] = []
 
         try:
+            # Monitor heartbeat + coarse runtime health snapshot
+            self.engine.record_monitor_heartbeat()
+            api_ok = True
+
+            db_ok = True
+            try:
+                _ = self.engine.get_resting_order_count()
+            except Exception:
+                db_ok = False
+
+            ws_ok = bool(self.ws.get_status().get("connected", False))
+            self.engine.set_runtime_health(db_healthy=db_ok, ws_healthy=ws_ok)
+
+            # Reconcile resting orders DB vs broker before per-order checks.
+            actions.extend(await self._reconcile_resting_orders())
+
+            # ── 1. Check and Manage Resting Maker Orders ──
+            resting_trades = self.engine.get_resting_trades()
+            if resting_trades:
+                self.engine.log_event("info", f"Checking {len(resting_trades)} resting orders", strategy="monitor")
+                now_dt = datetime.now(UTC)
+                try:
+                    from app.services.kalshi_api import get_kalshi_client
+                    client = get_kalshi_client()
+                    for rt in resting_trades:
+                        if not rt.get("order_id") or rt["order_id"].startswith("PAPER-"):
+                            continue
+                        
+                        # Fetch latest status
+                        order_data = await client.get_order(rt["order_id"])
+                        order_info = order_data.get("order", order_data)
+                        status = order_info.get("status", "pending")
+                        
+                        if status == "filled":
+                            fill_count = order_info.get("fill_count", rt["count"])
+                            raw_cost = fill_count * rt["price_cents"] / 100.0
+                            cost = -raw_cost if rt.get("action") == "sell" else raw_cost
+                            from app.services.trading_engine import _kalshi_maker_fee
+                            fee = _kalshi_maker_fee(fill_count, rt["price_cents"])
+                            self.engine.update_trade_status(rt["id"], "filled", fill_count, cost, fee)
+                            self.engine.log_event("live_trade", f"Resting order filled: {fill_count}x @ {rt['price_cents']}c", strategy=rt["strategy"])
+                            actions.append({"action": "filled_resting", "ticker": rt["ticker"]})
+                        elif status in ("canceled", "error"):
+                            self.engine.update_trade_status(rt["id"], status)
+                            self.engine.log_event("warning", f"Resting order {status}", strategy=rt["strategy"])
+                        elif status in ("resting", "pending"):
+                            # Check age. If > 5 minutes, cancel it.
+                            placed_dt = datetime.fromisoformat(rt["timestamp"].replace("Z", "+00:00"))
+                            age_mins = (now_dt - placed_dt).total_seconds() / 60.0
+                            if age_mins > 5.0:
+                                await client.cancel_order(rt["order_id"])
+                                self.engine.update_trade_status(rt["id"], "canceled")
+                                self.engine.log_event("info", f"Canceled resting order (age {age_mins:.1f}m > 5m)", strategy=rt["strategy"])
+                                self._record_resting_cancel(rt["ticker"])
+                                actions.append({"action": "cancel_resting", "ticker": rt["ticker"]})
+
+                                # Optional: dynamic repricing after cancel (buy orders only).
+                                # Re-submit as a fresh maker order at new bid+1 when enabled.
+                                if (
+                                    os.environ.get("ENABLE_DYNAMIC_REPRICING", "false").lower() == "true"
+                                    and rt.get("action") == "buy"
+                                ):
+                                    try:
+                                        data = await self.kalshi._get(f"/markets/{rt['ticker']}")
+                                        market = data.get("market", data)
+                                        yes_bid = market.get("yes_bid", 0) or 0
+                                        yes_ask = market.get("yes_ask", 0) or 0
+                                        no_bid = market.get("no_bid", 0) or 0
+                                        no_ask = market.get("no_ask", 0) or 0
+
+                                        if rt.get("side") == "yes":
+                                            new_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 and yes_ask > 0 else (yes_ask or yes_bid)
+                                        else:
+                                            new_price = min(no_bid + 1, no_ask) if no_bid > 0 and no_ask > 0 else (no_ask or no_bid)
+
+                                        if new_price and int(new_price) > 0:
+                                            repriced = await self.engine.execute_trade(
+                                                strategy=rt["strategy"],
+                                                ticker=rt["ticker"],
+                                                side=rt["side"],
+                                                count=rt["count"],
+                                                price_cents=int(new_price),
+                                                signal_source="monitor_reprice",
+                                                notes=f"Repriced after 5m timeout (prev_order={rt['order_id']})",
+                                            )
+                                            if repriced.get("status") in ("resting", "filled"):
+                                                actions.append({"action": "reprice_resting", "ticker": rt["ticker"], "price_cents": int(new_price)})
+                                    except Exception as repr_err:
+                                        logger.warning("Resting order repricing failed", ticker=rt.get("ticker"), error=str(repr_err))
+                except Exception as e:
+                    logger.warning("Resting order check failed", error=str(e))
+                    api_ok = False
+
+            # ── 2. Monitor Open Positions ──
             positions = self.engine.get_open_positions()
             if not positions:
                 return actions
+
+            # Build mapping from event ticker to specific market ticker
+            # Event tickers (e.g., KXLOWTLAX-26FEB22) need to map to 
+            # specific market tickers (e.g., KXLOWTLAX-26FEB22-B46.5)
+            event_to_market_ticker: dict[str, str] = {}
+            try:
+                kalshi_positions = await self.kalshi.get_positions()
+                for mp in kalshi_positions.get("market_positions", []):
+                    market_ticker = mp.get("ticker", "")
+                    if market_ticker:
+                        # Extract event ticker (remove bracket specifier)
+                        parts = market_ticker.rsplit("-", 1)
+                        if len(parts) == 2 and (parts[1].startswith("B") or parts[1].startswith("T")):
+                            event_ticker = parts[0]
+                            event_to_market_ticker[event_ticker] = market_ticker
+            except Exception:
+                pass  # Fall back to using event tickers directly
 
             total_exposure = self.engine.get_total_exposure()
             self.engine.log_event(
@@ -2819,6 +3150,8 @@ class KalshiAgent:
 
             for pos in positions:
                 ticker = pos["ticker"]
+                # Use specific market ticker for API calls (event tickers 404)
+                market_ticker = event_to_market_ticker.get(ticker, ticker)
                 try:
                     # Try WebSocket snapshot first (instant, no API call)
                     ws_snap = self.ws.get_snapshot(ticker) if self.ws.connected else None
@@ -2832,7 +3165,7 @@ class KalshiAgent:
                     else:
                         # Fall back to REST API
                         await asyncio.sleep(0.5)
-                        data = await self.kalshi._get(f"/markets/{ticker}")
+                        data = await self.kalshi._get(f"/markets/{market_ticker}")
                         market = data.get("market", data)
                         if not market:
                             continue
@@ -3044,8 +3377,12 @@ class KalshiAgent:
                 except Exception as e:
                     self.engine.log_event("warning", f"Monitor failed for {ticker}: {e}", strategy="monitor")
                     logger.warning("Position monitor failed for ticker", ticker=ticker, error=str(e))
+                    api_ok = False
+
+            self.engine.set_runtime_health(api_healthy=api_ok)
 
         except Exception as e:
+            self.engine.set_runtime_health(api_healthy=False)
             import traceback
             tb = traceback.format_exc()
             self.engine.log_event("error", f"Monitor cycle failed: {e}\n{tb}", strategy="monitor")
@@ -3154,12 +3491,33 @@ class KalshiAgent:
         Called by the API for the frontend display.
         """
         positions = self.engine.get_open_positions()
+        
+        # Build mapping from event ticker to specific market ticker
+        # Event tickers (e.g., KXLOWTLAX-26FEB22) need to map to 
+        # specific market tickers (e.g., KXLOWTLAX-26FEB22-B46.5)
+        event_to_market_ticker: dict[str, str] = {}
+        try:
+            kalshi_positions = await self.kalshi.get_positions()
+            for mp in kalshi_positions.get("market_positions", []):
+                market_ticker = mp.get("ticker", "")
+                if market_ticker:
+                    # Extract event ticker (remove bracket specifier)
+                    # e.g., KXLOWTLAX-26FEB22-B46.5 -> KXLOWTLAX-26FEB22
+                    parts = market_ticker.rsplit("-", 1)
+                    if len(parts) == 2 and (parts[1].startswith("B") or parts[1].startswith("T")):
+                        event_ticker = parts[0]
+                        event_to_market_ticker[event_ticker] = market_ticker
+        except Exception:
+            pass  # Fall back to using event tickers directly
 
         for pos in positions:
-            ticker = pos["ticker"]
+            event_ticker = pos["ticker"]
+            # Use specific market ticker if available, otherwise fall back to event ticker
+            market_ticker = event_to_market_ticker.get(event_ticker, event_ticker)
+            
             try:
                 await asyncio.sleep(0.15)
-                data = await self.kalshi._get(f"/markets/{ticker}")
+                data = await self.kalshi._get(f"/markets/{market_ticker}")
                 market = data.get("market", data)
 
                 yes_bid = market.get("yes_bid", 0) or 0
@@ -3204,7 +3562,7 @@ class KalshiAgent:
                     pos["status"] = "settled"
 
             except Exception as e:
-                logger.debug("Position live price failed", ticker=ticker, error=str(e))
+                logger.debug("Position live price failed", ticker=market_ticker, error=str(e))
 
         return positions
 

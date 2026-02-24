@@ -122,6 +122,44 @@ async def stop_agent():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/cancel-resting-orders")
+async def cancel_resting_orders():
+    """Emergency control: cancel all currently resting live orders and sync DB state."""
+    engine = get_trading_engine()
+    if engine.paper_mode:
+        return {"status": "skipped", "reason": "paper_mode", "canceled": 0}
+
+    canceled = 0
+    failed: list[str] = []
+
+    try:
+        from app.services.kalshi_api import get_kalshi_client
+
+        client = get_kalshi_client()
+        resting = engine.get_resting_trades()
+        for trade in resting:
+            order_id = trade.get("order_id", "")
+            if not order_id or order_id.startswith("PAPER-"):
+                continue
+            try:
+                await client.cancel_order(order_id)
+                engine.update_trade_status(trade["id"], "canceled")
+                canceled += 1
+            except Exception as e:
+                failed.append(f"{order_id}: {e}")
+
+        engine.log_event(
+            "control",
+            f"Manual cancel-resting-orders invoked: canceled={canceled}, failed={len(failed)}",
+            strategy="risk",
+            details="; ".join(failed[:10]),
+        )
+        return {"status": "ok", "canceled": canceled, "failed": len(failed), "errors": failed[:10]}
+    except Exception as e:
+        logger.error("Cancel resting orders failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Manual Triggers ────────────────────────────────────────────
 
 

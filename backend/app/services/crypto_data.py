@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import statistics
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -22,6 +22,8 @@ import httpx
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 # ── API endpoints ─────────────────────────────────────────────────
 # Coinbase Exchange public REST API (free, no key needed, globally accessible)

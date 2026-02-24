@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import math
 import statistics
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -24,6 +24,8 @@ import httpx
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 # ── Yahoo Finance endpoints (free, no auth) ─────────────────────────
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"

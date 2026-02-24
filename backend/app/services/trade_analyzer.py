@@ -18,7 +18,7 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,8 @@ from app.config import get_settings
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 DB_PATH = Path(__file__).parent.parent / "data" / "trading_engine.db"
 

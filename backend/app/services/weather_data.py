@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
@@ -15,6 +15,8 @@ import httpx
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 # Kalshi weather cities → NWS grid points, coordinates, and observation stations
 # nws_station: ICAO station ID used for real-time hourly observations

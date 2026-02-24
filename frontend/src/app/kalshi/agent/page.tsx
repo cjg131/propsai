@@ -247,6 +247,8 @@ export default function AgentPage() {
   const isRunning = status?.running ?? false;
   const isPaper = status?.paper_mode ?? true;
   const isKilled = status?.kill_switch ?? false;
+  const isReduceOnly = status?.reduce_only ?? false;
+  const isReduceOnly = status?.reduce_only ?? false;
 
   return (
     <div className="space-y-6">

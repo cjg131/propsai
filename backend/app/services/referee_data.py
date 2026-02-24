@@ -13,7 +13,7 @@ This is one of the most underutilized edges in NBA betting.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -21,6 +21,8 @@ import httpx
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 SDIO_BASE = "https://api.sportsdata.io/v3/nba"
 

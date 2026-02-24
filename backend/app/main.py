@@ -28,14 +28,16 @@ async def lifespan(app: FastAPI):
         )
         logger.info("Sentry initialized")
 
-    # Auto-start the Kalshi agent so all loops (monitor, weather, sports) run on boot
-    try:
-        from app.api.agent import get_kalshi_agent
-        agent = get_kalshi_agent()
-        await agent.start()
-        logger.info("Kalshi agent auto-started")
-    except Exception as e:
-        logger.error("Failed to auto-start agent", error=str(e))
+    # DISABLED: Do not auto-start agent on boot to prevent unwanted trading
+    # Agent must be manually started via API endpoint
+    # try:
+    #     from app.api.agent import get_kalshi_agent
+    #     agent = get_kalshi_agent()
+    #     await agent.start()
+    #     logger.info("Kalshi agent auto-started")
+    # except Exception as e:
+    #     logger.error("Failed to auto-start agent", error=str(e))
+    logger.info("Kalshi agent auto-start DISABLED - must be started manually")
 
     yield
 

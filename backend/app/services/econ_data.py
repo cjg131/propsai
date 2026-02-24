@@ -13,7 +13,7 @@ Data Sources (all free, no key needed):
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -21,6 +21,8 @@ import httpx
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+UTC = timezone.utc
 
 # ── FRED API (free with API key, but we use the public JSON endpoint) ──
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"

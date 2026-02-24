@@ -364,3 +364,14 @@ export function useRunNbaPropsCycle() {
     },
   });
 }
+
+export function useSetReduceOnly() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.post("/api/kalshi/agent/reduce-only", { enabled }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agent"] });
+    },
+  });
+}

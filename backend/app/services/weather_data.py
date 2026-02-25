@@ -643,24 +643,41 @@ class WeatherConsensus:
         high_temps: list[float] = []
         source_details: list[dict[str, Any]] = []
 
+        # Weight NWS 2x higher as it's the official US forecast
         for name, data in sources.items():
             temp = data.get(temp_field)
             if temp is not None:
-                high_temps.append(temp)
+                # Add NWS twice for 2x weight
+                if name == "nws":
+                    high_temps.append(temp)
+                    high_temps.append(temp)
+                else:
+                    high_temps.append(temp)
                 source_details.append({"source": name, temp_field: temp})
 
         if not high_temps:
             return {"error": f"No {temp_field} data from any source"}
 
         n = len(high_temps)
-        mean_temp = sum(high_temps) / n
+        # Use median instead of mean - more robust to outliers
+        high_temps_sorted = sorted(high_temps)
+        median_temp = high_temps_sorted[n // 2] if n % 2 == 1 else (high_temps_sorted[n // 2 - 1] + high_temps_sorted[n // 2]) / 2
+        
+        # Apply warm bias correction for HIGH temp markets
+        # Empirical data shows forecasts are systematically 2°F too cold
+        bias_correction = 2.0 if market_type == "high_temp" else 0.0
+        mean_temp = median_temp + bias_correction
         spread = max(high_temps) - min(high_temps) if n > 1 else 0
         confidence = max(0.0, min(1.0, 1.0 - (spread - 2) / 8))
         std_dev = self._estimate_std_dev(forecasts, is_bracket=(strike_type == "between"), market_type=market_type)
+        # Cap std_dev at 3°F to prevent over-uncertainty
+        std_dev = min(std_dev, 3.0)
 
         # Use ensemble predictions if available for empirical probability
         pred_key = "all_low_predictions" if is_low else "all_predictions"
-        ensemble_preds = sources.get("open_meteo", {}).get(pred_key, [])
+        ensemble_preds_raw = sources.get("open_meteo", {}).get(pred_key, [])
+        # Apply same warm bias correction to ensemble predictions
+        ensemble_preds = [p + bias_correction for p in ensemble_preds_raw] if ensemble_preds_raw else []
 
         # Calculate probability based on strike type
         our_prob_yes = 0.0

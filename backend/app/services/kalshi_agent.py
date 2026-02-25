@@ -787,11 +787,6 @@ class KalshiAgent:
         # Build consensus for this specific market's strike structure
         market_type = weather_info.get("market_type", "high_temp")
         
-        # CRITICAL FIX: Skip HIGH temp markets - they have 9.1% win rate and lost $24.96
-        # Only trade LOW temp markets which are more predictable
-        if market_type == "high_temp":
-            return None
-        
         consensus = self.weather.build_consensus(
             forecasts,
             strike_type=strike_type,

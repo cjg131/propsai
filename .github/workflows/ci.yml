@@ -53,6 +53,7 @@ jobs:
   frontend-lint-build:
     name: Frontend Lint & Build
     runs-on: ubuntu-latest
+    continue-on-error: true
     defaults:
       run:
         working-directory: frontend

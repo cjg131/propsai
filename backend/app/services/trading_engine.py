@@ -1009,7 +1009,7 @@ class TradingEngine:
                 COUNT(*) as num_fills,
                 paper_mode
             FROM trades
-            WHERE status = 'filled'
+            WHERE status IN ('filled', 'executed')
             GROUP BY ticker, side, paper_mode
             HAVING ABS(SUM(CASE WHEN action = 'buy' THEN count ELSE 0 END)
                  - SUM(CASE WHEN action = 'sell' THEN count ELSE 0 END)) > 0

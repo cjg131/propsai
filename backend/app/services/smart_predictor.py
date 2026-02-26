@@ -987,6 +987,7 @@ class SmartPredictor:
         # Meta-model stacking consistently underperforms due to multicollinearity
         # between highly correlated base model predictions.
         # Filter weights to only include models that produced predictions
+        weights = prop_data.get("weights", {})
         available_weights = {k: weights.get(k, 0) for k in base_preds}
         total_w = sum(available_weights.values())
         if total_w > 0:

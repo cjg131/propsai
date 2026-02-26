@@ -2165,50 +2165,23 @@ class KalshiAgent:
                 logger.debug(f"Finance thesis rejected: only {aligned}/5 signals aligned", ticker=ticker)
                 return None
 
-            if is_bracket:
-                # For brackets, p_up is the probability of THIS specific bracket
-                our_prob_yes = p_up
-                prob_details = f" bracket={p_up:.3f}"
-            else:
-                # Threshold market (e.g., closing above X)
-                if floor_strike is None:
-                    return None
+        # Calculate edge (common for both bracket and threshold markets)
+        kalshi_yes_implied = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
+        kalshi_no_implied = no_maker_price / 100.0 if no_maker_price > 0 else 0
 
-                # Base probability of closing above strike
-                from app.services.smart_predictor import _calculate_probability_above_strike
-                base_prob = _calculate_probability_above_strike(
-                    current_price, floor_strike, volatility=vix_level / 100.0 if vix_level else 0.15
-                )
+        yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
+        no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
 
-                # Adjust based on momentum/sentiment
-                signal_direction = 1.0 if p_up > 0.5 else -1.0
-                alignment_bonus = (p_up - 0.5) * confidence * 0.20
-                our_prob_yes = min(0.99, max(0.01, base_prob + alignment_bonus))
+        if yes_edge >= no_edge:
+            edge, side = yes_edge, "yes"
+            our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_maker_price
+        else:
+            edge, side = no_edge, "no"
+            our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_maker_price
 
-                aligned = 1 if (base_prob > 0.5 and p_up > 0.5) or (base_prob < 0.5 and p_up < 0.5) else 0
-                prob_details = f" base={base_prob:.3f} adj={alignment_bonus:+.3f} aligned={aligned} vix={vix_level}"
-
-            # Check if title implies the opposite ("closing below X")
-            if "below" in title_lower or "under" in title_lower:
-                our_prob_yes = 1.0 - our_prob_yes
-
-            # Calculate edge
-            kalshi_yes_implied = yes_maker_price / 100.0 if yes_maker_price > 0 else 0
-            kalshi_no_implied = no_maker_price / 100.0 if no_maker_price > 0 else 0
-
-            yes_edge = our_prob_yes - kalshi_yes_implied if kalshi_yes_implied > 0 else 0
-            no_edge = (1.0 - our_prob_yes) - kalshi_no_implied if kalshi_no_implied > 0 else 0
-
-            if yes_edge >= no_edge:
-                edge, side = yes_edge, "yes"
-                our_prob, kalshi_prob, price_cents = our_prob_yes, kalshi_yes_implied, yes_maker_price
-            else:
-                edge, side = no_edge, "no"
-                our_prob, kalshi_prob, price_cents = 1.0 - our_prob_yes, kalshi_no_implied, no_maker_price
-
-            fin_thresh = self.adaptive.get_thresholds("finance")
-            if edge < fin_thresh["min_edge"] or confidence < fin_thresh["min_confidence"]:
-                return None
+        fin_thresh = self.adaptive.get_thresholds("finance")
+        if edge < fin_thresh["min_edge"] or confidence < fin_thresh["min_confidence"]:
+            return None
 
         # Polymarket cross-reference: boost confidence if prices diverge
         poly_details = ""

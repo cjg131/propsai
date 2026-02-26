@@ -97,6 +97,7 @@ class TradingEngine:
 
         # Enable/disable specific strategies
         self.strategy_enabled = {
+            "arbitrage": True,
             "weather": True,
             "sports": True,
             "crypto": True,

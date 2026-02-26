@@ -2569,6 +2569,101 @@ class KalshiAgent:
         t = threading.Thread(target=_retrain_worker, daemon=True, name="nba-retrain")
         t.start()
 
+    async def run_arbitrage_cycle(self) -> list[dict[str, Any]]:
+        """
+        Scan for simple arbitrage opportunities where YES + NO prices != 100¢.
+        These are risk-free profits:
+        - If YES_ASK + NO_ASK < 100: Buy both sides, guaranteed profit
+        - If YES_BID + NO_BID > 100: Sell both sides, collect premium
+        """
+        self.engine.log_event("info", "Arbitrage cycle starting", strategy="arbitrage")
+        self.engine.start_cycle("arbitrage")
+        results: list[dict[str, Any]] = []
+
+        if not self.engine.strategy_enabled.get("arbitrage", True):
+            self.engine.log_event("info", "Arbitrage strategy disabled", strategy="arbitrage")
+            return results
+
+        try:
+            # Scan all open markets for arbitrage opportunities
+            markets_data = await self.kalshi._get("/markets", params={"limit": 200, "status": "open"})
+            markets = markets_data.get('markets', [])
+
+            arb_count = 0
+            for market in markets:
+                ticker = market.get('ticker', '')
+                yes_bid = market.get('yes_bid', 0) or 0
+                no_bid = market.get('no_bid', 0) or 0
+                yes_ask = market.get('yes_ask', 0) or 0
+                no_ask = market.get('no_ask', 0) or 0
+
+                # Skip if no prices
+                if not yes_bid or not no_bid or not yes_ask or not no_ask:
+                    continue
+
+                # Skip very low liquidity (< 10 volume)
+                if market.get('volume', 0) < 10:
+                    continue
+
+                # Type 1: Buy both sides for < 100¢ (guaranteed profit)
+                buy_both_cost = yes_ask + no_ask
+                if buy_both_cost < 99:  # Leave 1¢ buffer for fees
+                    profit_cents = 100 - buy_both_cost
+                    roi = (profit_cents / buy_both_cost) * 100
+
+                    # Only trade if ROI > 1% (worth the execution risk)
+                    if roi > 1.0:
+                        self.engine.log_event(
+                            "info",
+                            f"Arbitrage found: {ticker} - Buy both @ {buy_both_cost}¢, profit {profit_cents}¢ ({roi:.1f}% ROI)",
+                            strategy="arbitrage",
+                        )
+
+                        # Buy YES side
+                        results.append({
+                            "ticker": ticker,
+                            "side": "yes",
+                            "action": "buy",
+                            "price_cents": yes_ask,
+                            "count": 1,  # Start with 1 contract
+                            "strategy": "arbitrage",
+                            "edge": roi / 100,
+                            "confidence": 1.0,  # Risk-free = 100% confidence
+                            "signal_source": "arbitrage_buy_both",
+                            "notes": f"Arbitrage: Buy both @ {buy_both_cost}¢, profit {profit_cents}¢",
+                        })
+
+                        # Buy NO side
+                        results.append({
+                            "ticker": ticker,
+                            "side": "no",
+                            "action": "buy",
+                            "price_cents": no_ask,
+                            "count": 1,
+                            "strategy": "arbitrage",
+                            "edge": roi / 100,
+                            "confidence": 1.0,
+                            "signal_source": "arbitrage_buy_both",
+                            "notes": f"Arbitrage: Buy both @ {buy_both_cost}¢, profit {profit_cents}¢",
+                        })
+
+                        arb_count += 1
+
+            if arb_count > 0:
+                self.engine.log_event(
+                    "info",
+                    f"Found {arb_count} arbitrage opportunities",
+                    strategy="arbitrage",
+                )
+            else:
+                logger.debug("No arbitrage opportunities found")
+
+        except Exception as e:
+            self.engine.log_event("error", f"Arbitrage cycle error: {e}", strategy="arbitrage")
+            logger.error("Arbitrage cycle error", error=str(e))
+
+        return results
+
     async def run_nba_props_cycle(self) -> list[dict[str, Any]]:
         """
         Run one NBA player props strategy cycle:
@@ -3639,6 +3734,7 @@ class KalshiAgent:
             all_candidates: list[dict[str, Any]] = []
 
             for name, coro in [
+                ("arbitrage", self.run_arbitrage_cycle()),
                 ("weather", self.run_weather_cycle()),
                 ("crypto", self.run_crypto_cycle()),
                 ("sports", self.run_sports_cycle()),
@@ -3669,10 +3765,30 @@ class KalshiAgent:
 
         # Start recurring loops in sleep-first mode so they don't immediately
         # re-run what the boot cycle just executed.
+        self._arbitrage_task = asyncio.create_task(self._arbitrage_loop(sleep_first=True))
         self._weather_task = asyncio.create_task(self._weather_loop(sleep_first=True))
         self._monitor_task = asyncio.create_task(self._monitor_loop(sleep_first=True))
         self._crypto_task = asyncio.create_task(self._crypto_loop(sleep_first=True))
         self._main_task = asyncio.create_task(self._main_strategy_loop(sleep_first=True))
+
+    async def _arbitrage_loop(self, sleep_first: bool = False) -> None:
+        """Arbitrage strategy loop — runs every 30 seconds to catch fleeting opportunities."""
+        if sleep_first:
+            await asyncio.sleep(30)
+        while self._running:
+            try:
+                if not self.engine.kill_switch:
+                    candidates = await self.run_arbitrage_cycle()
+                    if candidates:
+                        # Execute immediately - arbitrage is time-sensitive
+                        await self.execute_ranked_signals(candidates)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.engine.log_event("error", f"Arbitrage loop error: {e}", strategy="arbitrage")
+                logger.error("Arbitrage loop error", error=str(e))
+
+            await asyncio.sleep(30)
 
     async def _weather_loop(self, sleep_first: bool = False) -> None:
         """Weather strategy loop — runs every 1 hour. Collects candidates and executes via global ranking."""

@@ -75,109 +75,82 @@ SINGLE_GAME_SERIES: dict[str, dict[str, str]] = {
     "KXELHGAME":        _sg("icehockey_nhl", "h2h"),  # ELH not on Odds API
     "KXIIHFGAME":       _sg("icehockey_nhl", "h2h"),  # IIHF not on Odds API
 
-    # ── Soccer (30+ leagues) ──────────────────────────────────────
-    # England
-    "KXEPLGAME":              _sg("soccer_epl", "h2h"),
-    "KXEPLSPREAD":            _sg("soccer_epl", "spreads"),
-    "KXEPLTOTAL":             _sg("soccer_epl", "totals"),
-    "KXEPLBTTS":              _sg("soccer_epl", "btts"),
-    "KXEFLCHAMPIONSHIPGAME":  _sg("soccer_efl_champ", "h2h"),
-    "KXEFLCUPGAME":           _sg("soccer_england_efl_cup", "h2h"),
-    "KXEFLCUPTOTAL":          _sg("soccer_england_efl_cup", "totals"),
-    "KXFACUPGAME":            _sg("soccer_fa_cup", "h2h"),
-    "KXFACUPSPREAD":          _sg("soccer_fa_cup", "spreads"),
-    "KXFACUPTOTAL":           _sg("soccer_fa_cup", "totals"),
-    "KXEWSLGAME":             _sg("soccer_epl", "h2h"),  # Women's Super League
-    # Spain
-    "KXLALIGAGAME":           _sg("soccer_spain_la_liga", "h2h"),
-    "KXLALIGASPREAD":         _sg("soccer_spain_la_liga", "spreads"),
-    "KXLALIGATOTAL":          _sg("soccer_spain_la_liga", "totals"),
-    "KXLALIGA2GAME":          _sg("soccer_spain_segunda_division", "h2h"),
-    "KXCOPADELREYGAME":       _sg("soccer_spain_copa_del_rey", "h2h"),
-    "KXCOPADELREYTOTAL":      _sg("soccer_spain_copa_del_rey", "totals"),
-    # Italy
-    "KXSERIEAGAME":           _sg("soccer_italy_serie_a", "h2h"),
-    "KXSERIEASPREAD":         _sg("soccer_italy_serie_a", "spreads"),
-    "KXSERIEATOTAL":          _sg("soccer_italy_serie_a", "totals"),
-    "KXSERIEBGAME":           _sg("soccer_italy_serie_b", "h2h"),
-    # Germany
-    "KXBUNDESLIGAGAME":       _sg("soccer_germany_bundesliga", "h2h"),
-    "KXBUNDESLIGASPREAD":     _sg("soccer_germany_bundesliga", "spreads"),
-    "KXBUNDESLIGATOTAL":      _sg("soccer_germany_bundesliga", "totals"),
-    "KXBUNDESLIGA2GAME":      _sg("soccer_germany_bundesliga2", "h2h"),
-    "KXDFBPOKALGAME":         _sg("soccer_germany_bundesliga", "h2h"),  # DFB Pokal
-    # France
-    "KXLIGUE1GAME":           _sg("soccer_france_ligue_one", "h2h"),
-    "KXLIGUE1SPREAD":         _sg("soccer_france_ligue_one", "spreads"),
-    "KXLIGUE1TOTAL":          _sg("soccer_france_ligue_one", "totals"),
-    "KXCOUPEDEFRANCEGAME":    _sg("soccer_france_ligue_one", "h2h"),
-    "KXCOUPEDEFRANCETOTAL":   _sg("soccer_france_ligue_one", "totals"),
-    # UEFA
-    "KXUCLGAME":              _sg("soccer_uefa_champs_league", "h2h"),
-    "KXUCLSPREAD":            _sg("soccer_uefa_champs_league", "spreads"),
-    "KXUCLTOTAL":             _sg("soccer_uefa_champs_league", "totals"),
-    "KXUCLBTTS":              _sg("soccer_uefa_champs_league", "btts"),
-    "KXUCLWGAME":             _sg("soccer_uefa_champs_league_women", "h2h"),
-    "KXUELGAME":              _sg("soccer_uefa_europa_league", "h2h"),
-    "KXUECLGAME":             _sg("soccer_uefa_europa_conference_league", "h2h"),
-    "KXUEFAGAME":             _sg("soccer_uefa_champs_league", "h2h"),
-    # Netherlands
-    "KXEREDIVISIEGAME":       _sg("soccer_netherlands_eredivisie", "h2h"),
-    # Portugal
-    "KXLIGAPORTUGALGAME":     _sg("soccer_portugal_primeira_liga", "h2h"),
-    "KXTACAPORTGAME":         _sg("soccer_portugal_primeira_liga", "h2h"),
-    "KXTACAPORTSPREAD":       _sg("soccer_portugal_primeira_liga", "spreads"),
-    "KXTACAPORTTOTAL":        _sg("soccer_portugal_primeira_liga", "totals"),
-    # Scotland
-    "KXSCOTTISHPREMGAME":     _sg("soccer_spl", "h2h"),
-    # Denmark
-    "KXDANISHSUPERLIGAGAME":  _sg("soccer_denmark_superliga", "h2h"),
-    "KXDENSUPERLIGAGAME":     _sg("soccer_denmark_superliga", "h2h"),
-    # Poland
-    "KXEKSTRAKLASAGAME":      _sg("soccer_poland_ekstraklasa", "h2h"),
-    # Greece
-    "KXSLGREECEGAME":         _sg("soccer_greece_super_league", "h2h"),
-    # Turkey
-    "KXSUPERLIGGAME":         _sg("soccer_turkey_super_league", "h2h"),
-    # Switzerland
-    "KXSWISSLEAGUEGAME":      _sg("soccer_switzerland_superleague", "h2h"),
-    # Austria
-    "KXAUSTRIABUNDESLIGAGAME": _sg("soccer_austria_bundesliga", "h2h"),
-    # Saudi Arabia
-    "KXSAUDIPLGAME":          _sg("soccer_saudi_arabia_pro_league", "h2h"),
-    "KXSAUDIPLSPREAD":        _sg("soccer_saudi_arabia_pro_league", "spreads"),
-    "KXSAUDIPLTOTAL":         _sg("soccer_saudi_arabia_pro_league", "totals"),
-    # Brazil
-    "KXBRASILEIROGAME":       _sg("soccer_brazil_campeonato", "h2h"),
-    "KXBRASILEIROTOTAL":      _sg("soccer_brazil_campeonato", "totals"),
-    # Argentina
-    "KXARGENTINAGAME":        _sg("soccer_argentina_primera_division", "h2h"),
-    # Mexico
-    "KXLIGAMXGAME":           _sg("soccer_mexico_ligamx", "h2h"),
-    "KXLIGAMXSPREAD":         _sg("soccer_mexico_ligamx", "spreads"),
-    "KXLIGAMXTOTAL":          _sg("soccer_mexico_ligamx", "totals"),
-    # MLS
-    "KXMLSGAME":              _sg("soccer_usa_mls", "h2h"),
-    "KXMLSSPREAD":            _sg("soccer_usa_mls", "spreads"),
-    "KXMLSTOTAL":             _sg("soccer_usa_mls", "totals"),
-    # Japan
-    "KXJLEAGUEGAME":          _sg("soccer_japan_j_league", "h2h"),
-    # Korea
-    "KXKLEAGUEGAME":          _sg("soccer_japan_j_league", "h2h"),  # K League not on Odds API
-    # Australia
-    "KXALEAGUEGAME":          _sg("soccer_australia_aleague", "h2h"),
-    "KXALEAGUETOTAL":         _sg("soccer_australia_aleague", "totals"),
-    # Croatia
-    "KXHNLGAME":              _sg("soccer_epl", "h2h"),  # HNL not on Odds API
-    # Sweden
-    "KXALLSVENSKANGAME":      _sg("soccer_sweden_allsvenskan", "h2h"),
-    # FIFA / International
-    "KXFIFAGAME":             _sg("soccer_fifa_world_cup", "h2h"),
-    "KXINTLFRIENDLYGAME":     _sg("soccer_fifa_world_cup", "h2h"),
-    "KXWCGAME":               _sg("soccer_fifa_world_cup", "h2h"),
-    # Generic soccer (catch-all)
-    "KXSOCCERSPREAD":         _sg("soccer_epl", "spreads"),
-    "KXSOCCERTOTAL":          _sg("soccer_epl", "totals"),
+    # ── Soccer (30+ leagues) — DISABLED (losing money) ────────────
+    # "KXEPLGAME":              _sg("soccer_epl", "h2h"),
+    # "KXEPLSPREAD":            _sg("soccer_epl", "spreads"),
+    # "KXEPLTOTAL":             _sg("soccer_epl", "totals"),
+    # "KXEPLBTTS":              _sg("soccer_epl", "btts"),
+    # "KXEFLCHAMPIONSHIPGAME":  _sg("soccer_efl_champ", "h2h"),
+    # "KXEFLCUPGAME":           _sg("soccer_england_efl_cup", "h2h"),
+    # "KXEFLCUPTOTAL":          _sg("soccer_england_efl_cup", "totals"),
+    # "KXFACUPGAME":            _sg("soccer_fa_cup", "h2h"),
+    # "KXFACUPSPREAD":          _sg("soccer_fa_cup", "spreads"),
+    # "KXFACUPTOTAL":           _sg("soccer_fa_cup", "totals"),
+    # "KXEWSLGAME":             _sg("soccer_epl", "h2h"),
+    # "KXLALIGAGAME":           _sg("soccer_spain_la_liga", "h2h"),
+    # "KXLALIGASPREAD":         _sg("soccer_spain_la_liga", "spreads"),
+    # "KXLALIGATOTAL":          _sg("soccer_spain_la_liga", "totals"),
+    # "KXLALIGA2GAME":          _sg("soccer_spain_segunda_division", "h2h"),
+    # "KXCOPADELREYGAME":       _sg("soccer_spain_copa_del_rey", "h2h"),
+    # "KXCOPADELREYTOTAL":      _sg("soccer_spain_copa_del_rey", "totals"),
+    # "KXSERIEAGAME":           _sg("soccer_italy_serie_a", "h2h"),
+    # "KXSERIEASPREAD":         _sg("soccer_italy_serie_a", "spreads"),
+    # "KXSERIEATOTAL":          _sg("soccer_italy_serie_a", "totals"),
+    # "KXSERIEBGAME":           _sg("soccer_italy_serie_b", "h2h"),
+    # "KXBUNDESLIGAGAME":       _sg("soccer_germany_bundesliga", "h2h"),
+    # "KXBUNDESLIGASPREAD":     _sg("soccer_germany_bundesliga", "spreads"),
+    # "KXBUNDESLIGATOTAL":      _sg("soccer_germany_bundesliga", "totals"),
+    # "KXBUNDESLIGA2GAME":      _sg("soccer_germany_bundesliga2", "h2h"),
+    # "KXDFBPOKALGAME":         _sg("soccer_germany_bundesliga", "h2h"),
+    # "KXLIGUE1GAME":           _sg("soccer_france_ligue_one", "h2h"),
+    # "KXLIGUE1SPREAD":         _sg("soccer_france_ligue_one", "spreads"),
+    # "KXLIGUE1TOTAL":          _sg("soccer_france_ligue_one", "totals"),
+    # "KXCOUPEDEFRANCEGAME":    _sg("soccer_france_ligue_one", "h2h"),
+    # "KXCOUPEDEFRANCETOTAL":   _sg("soccer_france_ligue_one", "totals"),
+    # "KXUCLGAME":              _sg("soccer_uefa_champs_league", "h2h"),
+    # "KXUCLSPREAD":            _sg("soccer_uefa_champs_league", "spreads"),
+    # "KXUCLTOTAL":             _sg("soccer_uefa_champs_league", "totals"),
+    # "KXUCLBTTS":              _sg("soccer_uefa_champs_league", "btts"),
+    # "KXUCLWGAME":             _sg("soccer_uefa_champs_league_women", "h2h"),
+    # "KXUELGAME":              _sg("soccer_uefa_europa_league", "h2h"),
+    # "KXUECLGAME":             _sg("soccer_uefa_europa_conference_league", "h2h"),
+    # "KXUEFAGAME":             _sg("soccer_uefa_champs_league", "h2h"),
+    # "KXEREDIVISIEGAME":       _sg("soccer_netherlands_eredivisie", "h2h"),
+    # "KXLIGAPORTUGALGAME":     _sg("soccer_portugal_primeira_liga", "h2h"),
+    # "KXTACAPORTGAME":         _sg("soccer_portugal_primeira_liga", "h2h"),
+    # "KXTACAPORTSPREAD":       _sg("soccer_portugal_primeira_liga", "spreads"),
+    # "KXTACAPORTTOTAL":        _sg("soccer_portugal_primeira_liga", "totals"),
+    # "KXSCOTTISHPREMGAME":     _sg("soccer_spl", "h2h"),
+    # "KXDANISHSUPERLIGAGAME":  _sg("soccer_denmark_superliga", "h2h"),
+    # "KXDENSUPERLIGAGAME":     _sg("soccer_denmark_superliga", "h2h"),
+    # "KXEKSTRAKLASAGAME":      _sg("soccer_poland_ekstraklasa", "h2h"),
+    # "KXSLGREECEGAME":         _sg("soccer_greece_super_league", "h2h"),
+    # "KXSUPERLIGGAME":         _sg("soccer_turkey_super_league", "h2h"),
+    # "KXSWISSLEAGUEGAME":      _sg("soccer_switzerland_superleague", "h2h"),
+    # "KXAUSTRIABUNDESLIGAGAME": _sg("soccer_austria_bundesliga", "h2h"),
+    # "KXSAUDIPLGAME":          _sg("soccer_saudi_arabia_pro_league", "h2h"),
+    # "KXSAUDIPLSPREAD":        _sg("soccer_saudi_arabia_pro_league", "spreads"),
+    # "KXSAUDIPLTOTAL":         _sg("soccer_saudi_arabia_pro_league", "totals"),
+    # "KXBRASILEIROGAME":       _sg("soccer_brazil_campeonato", "h2h"),
+    # "KXBRASILEIROTOTAL":      _sg("soccer_brazil_campeonato", "totals"),
+    # "KXARGENTINAGAME":        _sg("soccer_argentina_primera_division", "h2h"),
+    # "KXLIGAMXGAME":           _sg("soccer_mexico_ligamx", "h2h"),
+    # "KXLIGAMXSPREAD":         _sg("soccer_mexico_ligamx", "spreads"),
+    # "KXLIGAMXTOTAL":          _sg("soccer_mexico_ligamx", "totals"),
+    # "KXMLSGAME":              _sg("soccer_usa_mls", "h2h"),
+    # "KXMLSSPREAD":            _sg("soccer_usa_mls", "spreads"),
+    # "KXMLSTOTAL":             _sg("soccer_usa_mls", "totals"),
+    # "KXJLEAGUEGAME":          _sg("soccer_japan_j_league", "h2h"),
+    # "KXKLEAGUEGAME":          _sg("soccer_japan_j_league", "h2h"),
+    # "KXALEAGUEGAME":          _sg("soccer_australia_aleague", "h2h"),
+    # "KXALEAGUETOTAL":         _sg("soccer_australia_aleague", "totals"),
+    # "KXHNLGAME":              _sg("soccer_epl", "h2h"),
+    # "KXALLSVENSKANGAME":      _sg("soccer_sweden_allsvenskan", "h2h"),
+    # "KXFIFAGAME":             _sg("soccer_fifa_world_cup", "h2h"),
+    # "KXINTLFRIENDLYGAME":     _sg("soccer_fifa_world_cup", "h2h"),
+    # "KXWCGAME":               _sg("soccer_fifa_world_cup", "h2h"),
+    # "KXSOCCERSPREAD":         _sg("soccer_epl", "spreads"),
+    # "KXSOCCERTOTAL":          _sg("soccer_epl", "totals"),
 
     # ── Football (NFL) ────────────────────────────────────────────
     "KXNFLGAME":        _sg("americanfootball_nfl", "h2h"),

@@ -7,8 +7,12 @@ and generates directional probability estimates for BTC, ETH, SOL, XRP.
 Signals:
   1. Momentum — 5-min price trend continuation bias
   2. Volatility — realized vol vs Kalshi implied vol
-  3. Funding rate — perpetual futures directional bias
+  3. Funding rate — perpetual futures directional bias (+ contrarian extremes)
   4. Mean reversion — fade sharp 1-min moves
+  5. Volume analysis — detect whale accumulation and breakouts
+  6. Order book depth — bid/ask imbalance for directional bias
+  7. Long/Short ratio — contrarian fade when extreme
+  8. Fear & Greed Index — contrarian sentiment indicator
 """
 from __future__ import annotations
 
@@ -30,6 +34,11 @@ UTC = timezone.utc
 COINBASE_BASE = "https://api.exchange.coinbase.com"
 # OKX public API for funding rates (free, no key needed, globally accessible)
 OKX_PUBLIC_BASE = "https://www.okx.com/api/v5/public"
+# Binance US for order book and long/short ratio
+BINANCE_BASE = "https://api.binance.us/api/v3"
+BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+# Alternative.me for Fear & Greed Index
+FEAR_GREED_API = "https://api.alternative.me/fng/"
 
 # Coin → Coinbase product ID
 CRYPTO_SYMBOLS = {
@@ -37,6 +46,14 @@ CRYPTO_SYMBOLS = {
     "ETH": "ETH-USD",
     "SOL": "SOL-USD",
     "XRP": "XRP-USD",
+}
+
+# Coin → Binance symbol
+BINANCE_SYMBOLS = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "XRP": "XRPUSDT",
 }
 
 # Coinbase granularity in seconds for each interval
@@ -59,16 +76,24 @@ OKX_INSTRUMENTS = {
 SUPPORTED_COINS = set(CRYPTO_SYMBOLS.keys())
 
 # ── Signal weights (tuned for 15-min horizon) ───────────────────────
-# Funding rate now available via OKX public API
-WEIGHT_MOMENTUM_5M = 0.35
-WEIGHT_MOMENTUM_1M = 0.15
-WEIGHT_FUNDING = 0.20
-WEIGHT_MEAN_REVERSION = 0.15
-WEIGHT_VOLATILITY = 0.15
+# Rebalanced to include new Tier 1 signals
+WEIGHT_MOMENTUM_5M = 0.20
+WEIGHT_MOMENTUM_1M = 0.10
+WEIGHT_FUNDING = 0.10  # Reduced, now includes contrarian component
+WEIGHT_MEAN_REVERSION = 0.10
+WEIGHT_VOLUME = 0.15  # NEW: Volume analysis
+WEIGHT_ORDER_BOOK = 0.15  # NEW: Order book imbalance
+WEIGHT_LONG_SHORT = 0.10  # NEW: Contrarian long/short ratio
+WEIGHT_FEAR_GREED = 0.10  # NEW: Contrarian sentiment
 
 # Momentum thresholds
 STRONG_MOMENTUM_PCT = 0.003  # 0.3% move in 5 min = strong signal
 SHARP_MOVE_PCT = 0.005  # 0.5% in 1 min = mean reversion trigger
+
+# Contrarian thresholds
+EXTREME_FUNDING = 0.001  # 0.1% funding = extreme, trigger contrarian
+EXTREME_LONG_SHORT = 3.0  # 3:1 ratio = 75% on one side, fade it
+VOLUME_SPIKE_MULTIPLIER = 2.0  # 2x average volume = significant
 
 
 class CryptoDataService:
@@ -172,6 +197,88 @@ class CryptoDataService:
             logger.debug("Coinbase spot price failed", coin=coin, error=str(e))
         return None
 
+    async def get_order_book(self, coin: str) -> dict[str, Any] | None:
+        """Fetch order book from Binance US.
+        Returns bid/ask depth within 0.5% of current price.
+        """
+        symbol = BINANCE_SYMBOLS.get(coin)
+        if not symbol:
+            return None
+
+        client = await self._get_client()
+        try:
+            url = f"{BINANCE_BASE}/depth"
+            resp = await client.get(url, params={"symbol": symbol, "limit": 100})
+            resp.raise_for_status()
+            data = resp.json()
+            
+            bids = data.get("bids", [])
+            asks = data.get("asks", [])
+            
+            if not bids or not asks:
+                return None
+            
+            # Get mid price
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid_price = (best_bid + best_ask) / 2
+            
+            # Sum volume within 0.5% of mid price
+            threshold = mid_price * 0.005
+            bid_volume = sum(float(qty) for price, qty in bids if float(price) >= mid_price - threshold)
+            ask_volume = sum(float(qty) for price, qty in asks if float(price) <= mid_price + threshold)
+            
+            return {
+                "bid_volume": bid_volume,
+                "ask_volume": ask_volume,
+                "imbalance": (bid_volume - ask_volume) / (bid_volume + ask_volume) if (bid_volume + ask_volume) > 0 else 0,
+                "mid_price": mid_price,
+            }
+        except Exception as e:
+            logger.debug("Binance order book failed", coin=coin, error=str(e))
+        return None
+
+    async def get_long_short_ratio(self, coin: str) -> float | None:
+        """Fetch long/short ratio from Binance Futures.
+        Ratio > 1 = more longs, < 1 = more shorts.
+        """
+        symbol = BINANCE_SYMBOLS.get(coin)
+        if not symbol:
+            return None
+
+        client = await self._get_client()
+        try:
+            url = f"{BINANCE_FUTURES_BASE}/futures/data/globalLongShortAccountRatio"
+            resp = await client.get(url, params={"symbol": symbol, "period": "5m", "limit": 1})
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if data and len(data) > 0:
+                return float(data[0].get("longShortRatio", 1.0))
+        except Exception as e:
+            logger.debug("Binance long/short ratio failed", coin=coin, error=str(e))
+        return None
+
+    async def get_fear_greed_index(self) -> dict[str, Any] | None:
+        """Fetch Crypto Fear & Greed Index from Alternative.me.
+        Returns value 0-100 where 0=extreme fear, 100=extreme greed.
+        """
+        client = await self._get_client()
+        try:
+            resp = await client.get(FEAR_GREED_API, params={"limit": 1})
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if data.get("data") and len(data["data"]) > 0:
+                fg_data = data["data"][0]
+                return {
+                    "value": int(fg_data.get("value", 50)),
+                    "classification": fg_data.get("value_classification", "Neutral"),
+                }
+        except Exception as e:
+            logger.debug("Fear & Greed Index failed", error=str(e))
+        return None
+
     # ── Signal computation ───────────────────────────────────────────
 
     def _compute_momentum(self, candles: list[dict[str, float]], lookback: int) -> float:
@@ -212,17 +319,128 @@ class CryptoDataService:
         signal = -pct_move / SHARP_MOVE_PCT
         return max(-1.0, min(1.0, signal))
 
-    def _compute_funding_signal(self, funding_rate: float | None) -> float:
+    def _compute_funding_signal(self, funding_rate: float | None, contrarian: bool = True) -> float:
         """Convert funding rate to directional signal.
-        Positive funding → longs pay → slight bearish → negative signal.
+        
+        Args:
+            funding_rate: Current funding rate
+            contrarian: If True, fade extreme funding (contrarian). If False, follow it.
+        
+        Returns:
+            Signal in [-1, 1] where positive = bullish
         """
         if funding_rate is None:
             return 0.0
 
-        # Typical funding is ±0.01% to ±0.1%
-        # Normalize: 0.05% → ±1.0 signal (inverted: positive funding = bearish)
-        signal = -funding_rate / 0.0005
+        # Check for extreme funding (contrarian opportunity)
+        if contrarian and abs(funding_rate) > EXTREME_FUNDING:
+            # Extreme positive funding (>0.1%) = too many longs → fade (bet DOWN)
+            # Extreme negative funding (<-0.1%) = too many shorts → fade (bet UP)
+            signal = -funding_rate / 0.0005  # Inverted
+            return max(-1.0, min(1.0, signal * 1.5))  # Amplify contrarian signal
+        
+        # Normal funding: follow it directionally (but weaker)
+        signal = -funding_rate / 0.001  # Less sensitive for non-extreme
         return max(-1.0, min(1.0, signal))
+
+    def _compute_volume_signal(self, candles_5m: list[dict[str, float]]) -> float:
+        """Analyze volume for breakout confirmation.
+        
+        Returns:
+            Signal in [-1, 1] where positive = bullish volume pattern
+        """
+        if len(candles_5m) < 10:
+            return 0.0
+        
+        # Get recent volume and average volume
+        recent_volume = candles_5m[-1]["volume"]
+        avg_volume = statistics.mean(c["volume"] for c in candles_5m[-10:-1])
+        
+        if avg_volume == 0:
+            return 0.0
+        
+        volume_ratio = recent_volume / avg_volume
+        
+        # Volume spike with price direction
+        recent_price_change = (candles_5m[-1]["close"] - candles_5m[-2]["close"]) / candles_5m[-2]["close"]
+        
+        # High volume + up = bullish, high volume + down = bearish
+        if volume_ratio > VOLUME_SPIKE_MULTIPLIER:
+            signal = 0.7 if recent_price_change > 0 else -0.7
+        elif volume_ratio > 1.5:
+            signal = 0.4 if recent_price_change > 0 else -0.4
+        else:
+            signal = 0.0
+        
+        return max(-1.0, min(1.0, signal))
+
+    def _compute_order_book_signal(self, order_book: dict[str, Any] | None) -> float:
+        """Convert order book imbalance to directional signal.
+        
+        Returns:
+            Signal in [-1, 1] where positive = more bids (bullish)
+        """
+        if not order_book:
+            return 0.0
+        
+        imbalance = order_book.get("imbalance", 0)
+        # Imbalance is already normalized to [-1, 1]
+        return imbalance
+
+    def _compute_long_short_signal(self, long_short_ratio: float | None) -> float:
+        """Contrarian signal from long/short ratio.
+        When too many traders are long, fade them (bet short).
+        
+        Returns:
+            Signal in [-1, 1] where positive = bullish (contrarian)
+        """
+        if long_short_ratio is None:
+            return 0.0
+        
+        # Extreme long (>3.0 = 75% long) → fade (bet DOWN)
+        if long_short_ratio > EXTREME_LONG_SHORT:
+            signal = -0.8
+        # Extreme short (<0.33 = 75% short) → fade (bet UP)
+        elif long_short_ratio < (1.0 / EXTREME_LONG_SHORT):
+            signal = 0.8
+        # Moderate imbalance
+        elif long_short_ratio > 2.0:
+            signal = -0.4
+        elif long_short_ratio < 0.5:
+            signal = 0.4
+        else:
+            signal = 0.0
+        
+        return signal
+
+    def _compute_fear_greed_signal(self, fear_greed: dict[str, Any] | None) -> float:
+        """Contrarian signal from Fear & Greed Index.
+        Extreme fear = buy opportunity, extreme greed = sell opportunity.
+        
+        Returns:
+            Signal in [-1, 1] where positive = bullish (contrarian)
+        """
+        if not fear_greed:
+            return 0.0
+        
+        value = fear_greed.get("value", 50)
+        
+        # Extreme fear (<20) → buy (contrarian bullish)
+        if value < 20:
+            signal = 0.8
+        # Fear (20-40) → moderately bullish
+        elif value < 40:
+            signal = 0.4
+        # Greed (60-80) → moderately bearish
+        elif value > 80:
+            signal = -0.8
+        elif value > 60:
+            signal = -0.4
+        # Neutral (40-60)
+        else:
+            signal = 0.0
+        
+        return signal
 
     def _compute_volatility_signal(
         self, candles_5m: list[dict[str, float]], kalshi_price: int
@@ -291,23 +509,38 @@ class CryptoDataService:
 
         symbol = CRYPTO_SYMBOLS.get(coin, "")
 
-        # Fetch real 1-min and 5-min candles + funding rate from Coinbase/OKX
-        candles_1m, candles_5m, spot_price, funding_rate = await asyncio.gather(
+        # Fetch all data sources in parallel
+        (
+            candles_1m,
+            candles_5m,
+            spot_price,
+            funding_rate,
+            order_book,
+            long_short_ratio,
+            fear_greed,
+        ) = await asyncio.gather(
             self.get_klines(coin, "1m", 30),
             self.get_klines(coin, "5m", 30),
             self.get_spot_price(coin),
             self.get_funding_rate(symbol),
+            self.get_order_book(coin),
+            self.get_long_short_ratio(coin),
+            self.get_fear_greed_index(),
         )
 
         if not candles_1m or not candles_5m or spot_price is None:
             logger.warning("Insufficient crypto data", coin=coin)
             return None
 
-        # Compute individual signals
-        momentum_5m = self._compute_momentum(candles_5m, lookback=1)  # last 5-min candle
-        momentum_1m = self._compute_momentum(candles_1m, lookback=5)  # last 5 × 1-min candles
-        funding_signal = self._compute_funding_signal(funding_rate)
+        # Compute individual signals (now includes Tier 1 additions)
+        momentum_5m = self._compute_momentum(candles_5m, lookback=1)
+        momentum_1m = self._compute_momentum(candles_1m, lookback=5)
+        funding_signal = self._compute_funding_signal(funding_rate, contrarian=True)
         mean_reversion = self._compute_mean_reversion(candles_1m)
+        volume_signal = self._compute_volume_signal(candles_5m)
+        order_book_signal = self._compute_order_book_signal(order_book)
+        long_short_signal = self._compute_long_short_signal(long_short_ratio)
+        fear_greed_signal = self._compute_fear_greed_signal(fear_greed)
         vol_multiplier = self._compute_volatility_signal(candles_5m, kalshi_price)
 
         # Use dynamic weights from signal scorer if available, else hardcoded
@@ -320,6 +553,10 @@ class CryptoDataService:
         w_mom1 = dw.get("momentum_1m", WEIGHT_MOMENTUM_1M)
         w_fund = dw.get("funding_signal", WEIGHT_FUNDING)
         w_mr = dw.get("mean_reversion", WEIGHT_MEAN_REVERSION)
+        w_vol = dw.get("volume_signal", WEIGHT_VOLUME)
+        w_ob = dw.get("order_book_signal", WEIGHT_ORDER_BOOK)
+        w_ls = dw.get("long_short_signal", WEIGHT_LONG_SHORT)
+        w_fg = dw.get("fear_greed_signal", WEIGHT_FEAR_GREED)
 
         # Weighted composite signal: [-1, 1] where positive = bullish
         raw_signal = (
@@ -327,6 +564,10 @@ class CryptoDataService:
             + w_mom1 * momentum_1m
             + w_fund * funding_signal
             + w_mr * mean_reversion
+            + w_vol * volume_signal
+            + w_ob * order_book_signal
+            + w_ls * long_short_signal
+            + w_fg * fear_greed_signal
         )
 
         # Convert to probability: signal of 0 → 50%, signal of 1 → ~70%, -1 → ~30%
@@ -334,17 +575,21 @@ class CryptoDataService:
         p_up = 0.5 + 0.2 * raw_signal
 
         # Confidence: how aligned are the signals?
-        signals = [momentum_5m, momentum_1m, funding_signal, mean_reversion]
-        nonzero = [s for s in signals if abs(s) > 0.05]
-        if len(nonzero) >= 2:
+        all_signals = [
+            momentum_5m, momentum_1m, funding_signal, mean_reversion,
+            volume_signal, order_book_signal, long_short_signal, fear_greed_signal
+        ]
+        nonzero = [s for s in all_signals if abs(s) > 0.05]
+        
+        if len(nonzero) >= 3:
             # Check if signals agree on direction
             positive = sum(1 for s in nonzero if s > 0)
             negative = sum(1 for s in nonzero if s < 0)
             agreement = max(positive, negative) / len(nonzero)
             avg_magnitude = statistics.mean(abs(s) for s in nonzero)
             confidence = agreement * avg_magnitude * vol_multiplier
-        elif len(nonzero) == 1:
-            confidence = 0.15 * abs(nonzero[0]) * vol_multiplier
+        elif len(nonzero) >= 1:
+            confidence = 0.20 * statistics.mean(abs(s) for s in nonzero) * vol_multiplier
         else:
             confidence = 0.1  # Very low confidence when signals are weak
 
@@ -358,9 +603,16 @@ class CryptoDataService:
             "momentum_1m": round(momentum_1m, 4),
             "funding_signal": round(funding_signal, 4),
             "mean_reversion": round(mean_reversion, 4),
+            "volume_signal": round(volume_signal, 4),
+            "order_book_signal": round(order_book_signal, 4),
+            "long_short_signal": round(long_short_signal, 4),
+            "fear_greed_signal": round(fear_greed_signal, 4),
             "vol_multiplier": round(vol_multiplier, 4),
             "spot_price": spot_price,
             "funding_rate": funding_rate,
+            "long_short_ratio": long_short_ratio,
+            "fear_greed_value": fear_greed.get("value") if fear_greed else None,
+            "order_book_imbalance": order_book.get("imbalance") if order_book else None,
             "timestamp": datetime.now(UTC).isoformat(),
         }
 

@@ -31,7 +31,7 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
     "arbitrage": {"min_edge": 0.01, "min_confidence": 1.0},
     "weather": {"min_edge": 0.08, "min_confidence": 0.30},
     "sports": {"min_edge": 0.03, "min_confidence": 0.35},
-    "crypto": {"min_edge": 0.05, "min_confidence": 0.15},
+    "crypto": {"min_edge": 0.03, "min_confidence": 0.10},  # Lower thresholds for high-frequency trading
     "finance": {"min_edge": 0.05, "min_confidence": 0.25},
     "econ": {"min_edge": 0.05, "min_confidence": 0.25},
     "nba_props": {"min_edge": 0.08, "min_confidence": 0.45},
@@ -40,7 +40,7 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
 # Hard limits
 MIN_EDGE_FLOOR = 0.03
 MIN_EDGE_CEILING = 0.15
-MIN_CONF_FLOOR = 0.15
+MIN_CONF_FLOOR = 0.10  # Allow crypto's lower confidence threshold
 MIN_CONF_CEILING = 0.70
 
 ROLLING_WINDOW = 50  # Number of trades to look back

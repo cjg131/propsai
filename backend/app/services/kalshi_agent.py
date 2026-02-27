@@ -3402,6 +3402,13 @@ class KalshiAgent:
                             continue
 
                     # ── DECISION 4: ADD TO POSITION — edge has increased ──
+                    # HARD BLOCK: Never add to soccer positions (losing strategy)
+                    soccer_keywords = ["EPL", "LALIGA", "UCL", "SERIE", "BUNDESLIGA", "LIGUE1", 
+                                       "MLS", "LIGAMX", "BRASILEIRO", "FACUP", "EWSL", "SLGREECE",
+                                       "EREDIVISIE", "LIGAPORTUGAL", "SCOTTISHPREM", "SUPERLIG"]
+                    if any(kw in ticker.upper() for kw in soccer_keywords):
+                        continue
+                    
                     original_edge = pos.get("avg_entry_edge", 0) or 0
                     edge_increase = current_edge - original_edge
                     # Add if edge increased by >3% AND we still have positive edge >5%

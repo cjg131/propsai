@@ -20,27 +20,28 @@ UTC = timezone.utc
 
 # Kalshi weather cities → NWS grid points, coordinates, and observation stations
 # nws_station: ICAO station ID used for real-time hourly observations
+# offsets: Known temperature biases between generic city forecasts and the specific NWS settlement station
 CITY_CONFIGS = {
-    "NYC": {"lat": 40.7128, "lon": -74.0060, "nws_office": "OKX", "nws_grid": "33,37", "name": "New York", "tz": "America/New_York", "nws_station": "KNYC"},
-    "MIA": {"lat": 25.7617, "lon": -80.1918, "nws_office": "MFL", "nws_grid": "110,50", "name": "Miami", "tz": "America/New_York", "nws_station": "KMIA"},
-    "LAX": {"lat": 34.0522, "lon": -118.2437, "nws_office": "LOX", "nws_grid": "154,44", "name": "Los Angeles", "tz": "America/Los_Angeles", "nws_station": "KLAX"},
-    "CHI": {"lat": 41.8781, "lon": -87.6298, "nws_office": "LOT", "nws_grid": "76,73", "name": "Chicago", "tz": "America/Chicago", "nws_station": "KORD"},
-    "AUS": {"lat": 30.2672, "lon": -97.7431, "nws_office": "EWX", "nws_grid": "156,91", "name": "Austin", "tz": "America/Chicago", "nws_station": "KAUS"},
-    "DFW": {"lat": 32.7767, "lon": -96.7970, "nws_office": "FWD", "nws_grid": "80,103", "name": "Dallas", "tz": "America/Chicago", "nws_station": "KDFW"},
-    "PHL": {"lat": 39.9526, "lon": -75.1652, "nws_office": "PHI", "nws_grid": "49,75", "name": "Philadelphia", "tz": "America/New_York", "nws_station": "KPHL"},
-    "DEN": {"lat": 39.7392, "lon": -104.9903, "nws_office": "BOU", "nws_grid": "62,60", "name": "Denver", "tz": "America/Denver", "nws_station": "KDEN"},
-    "SEA": {"lat": 47.6062, "lon": -122.3321, "nws_office": "SEW", "nws_grid": "124,67", "name": "Seattle", "tz": "America/Los_Angeles", "nws_station": "KSEA"},
-    "SFO": {"lat": 37.7749, "lon": -122.4194, "nws_office": "MTR", "nws_grid": "85,105", "name": "San Francisco", "tz": "America/Los_Angeles", "nws_station": "KSFO"},
-    "DCA": {"lat": 38.9072, "lon": -77.0369, "nws_office": "LWX", "nws_grid": "97,71", "name": "Washington DC", "tz": "America/New_York", "nws_station": "KDCA"},
-    "SLC": {"lat": 40.7608, "lon": -111.8910, "nws_office": "SLC", "nws_grid": "97,175", "name": "Salt Lake City", "tz": "America/Denver", "nws_station": "KSLC"},
-    "ATL": {"lat": 33.7490, "lon": -84.3880, "nws_office": "FFC", "nws_grid": "50,86", "name": "Atlanta", "tz": "America/New_York", "nws_station": "KATL"},
-    "HOU": {"lat": 29.7604, "lon": -95.3698, "nws_office": "HGX", "nws_grid": "65,97", "name": "Houston", "tz": "America/Chicago", "nws_station": "KHOU"},
-    "BOS": {"lat": 42.3601, "lon": -71.0589, "nws_office": "BOX", "nws_grid": "71,90", "name": "Boston", "tz": "America/New_York", "nws_station": "KBOS"},
-    "LAS": {"lat": 36.1699, "lon": -115.1398, "nws_office": "VEF", "nws_grid": "126,97", "name": "Las Vegas", "tz": "America/Los_Angeles", "nws_station": "KLAS"},
-    "PHX": {"lat": 33.4484, "lon": -112.0740, "nws_office": "PSR", "nws_grid": "159,56", "name": "Phoenix", "tz": "America/Phoenix", "nws_station": "KPHX"},
-    "MSP": {"lat": 44.9778, "lon": -93.2650, "nws_office": "MPX", "nws_grid": "107,71", "name": "Minneapolis", "tz": "America/Chicago", "nws_station": "KMSP"},
-    "NOL": {"lat": 29.9511, "lon": -90.0715, "nws_office": "LIX", "nws_grid": "76,76", "name": "New Orleans", "tz": "America/Chicago", "nws_station": "KMSY"},
-    "DET": {"lat": 42.3314, "lon": -83.0458, "nws_office": "DTX", "nws_grid": "65,33", "name": "Detroit", "tz": "America/Detroit", "nws_station": "KDTW"},
+    "NYC": {"lat": 40.7128, "lon": -74.0060, "nws_office": "OKX", "nws_grid": "33,37", "name": "New York", "tz": "America/New_York", "nws_station": "KNYC", "high_offset": -1.0, "low_offset": -0.5, "upstream_city": "PHL"}, # Central Park runs cooler
+    "MIA": {"lat": 25.7617, "lon": -80.1918, "nws_office": "MFL", "nws_grid": "110,50", "name": "Miami", "tz": "America/New_York", "nws_station": "KMIA", "high_offset": 0.0, "low_offset": 0.0},
+    "LAX": {"lat": 34.0522, "lon": -118.2437, "nws_office": "LOX", "nws_grid": "154,44", "name": "Los Angeles", "tz": "America/Los_Angeles", "nws_station": "KLAX", "high_offset": 0.0, "low_offset": 0.0},
+    "CHI": {"lat": 41.8781, "lon": -87.6298, "nws_office": "LOT", "nws_grid": "76,73", "name": "Chicago", "tz": "America/Chicago", "nws_station": "KORD", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "MSP"},
+    "AUS": {"lat": 30.2672, "lon": -97.7431, "nws_office": "EWX", "nws_grid": "156,91", "name": "Austin", "tz": "America/Chicago", "nws_station": "KAUS", "high_offset": 0.0, "low_offset": 0.0},
+    "DFW": {"lat": 32.7767, "lon": -96.7970, "nws_office": "FWD", "nws_grid": "80,103", "name": "Dallas", "tz": "America/Chicago", "nws_station": "KDFW", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "AUS"},
+    "PHL": {"lat": 39.9526, "lon": -75.1652, "nws_office": "PHI", "nws_grid": "49,75", "name": "Philadelphia", "tz": "America/New_York", "nws_station": "KPHL", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "DCA"},
+    "DEN": {"lat": 39.7392, "lon": -104.9903, "nws_office": "BOU", "nws_grid": "62,60", "name": "Denver", "tz": "America/Denver", "nws_station": "KDEN", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "SLC"},
+    "SEA": {"lat": 47.6062, "lon": -122.3321, "nws_office": "SEW", "nws_grid": "124,67", "name": "Seattle", "tz": "America/Los_Angeles", "nws_station": "KSEA", "high_offset": 1.0, "low_offset": 0.5}, # Sea-Tac tarmac runs hotter
+    "SFO": {"lat": 37.7749, "lon": -122.4194, "nws_office": "MTR", "nws_grid": "85,105", "name": "San Francisco", "tz": "America/Los_Angeles", "nws_station": "KSFO", "high_offset": 0.0, "low_offset": 0.0},
+    "DCA": {"lat": 38.9072, "lon": -77.0369, "nws_office": "LWX", "nws_grid": "97,71", "name": "Washington DC", "tz": "America/New_York", "nws_station": "KDCA", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "ATL"},
+    "SLC": {"lat": 40.7608, "lon": -111.8910, "nws_office": "SLC", "nws_grid": "97,175", "name": "Salt Lake City", "tz": "America/Denver", "nws_station": "KSLC", "high_offset": 0.0, "low_offset": 0.0},
+    "ATL": {"lat": 33.7490, "lon": -84.3880, "nws_office": "FFC", "nws_grid": "50,86", "name": "Atlanta", "tz": "America/New_York", "nws_station": "KATL", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "HOU"},
+    "HOU": {"lat": 29.7604, "lon": -95.3698, "nws_office": "HGX", "nws_grid": "65,97", "name": "Houston", "tz": "America/Chicago", "nws_station": "KHOU", "high_offset": 0.0, "low_offset": 0.0},
+    "BOS": {"lat": 42.3601, "lon": -71.0589, "nws_office": "BOX", "nws_grid": "71,90", "name": "Boston", "tz": "America/New_York", "nws_station": "KBOS", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "NYC"},
+    "LAS": {"lat": 36.1699, "lon": -115.1398, "nws_office": "VEF", "nws_grid": "126,97", "name": "Las Vegas", "tz": "America/Los_Angeles", "nws_station": "KLAS", "high_offset": 0.0, "low_offset": 0.0},
+    "PHX": {"lat": 33.4484, "lon": -112.0740, "nws_office": "PSR", "nws_grid": "159,56", "name": "Phoenix", "tz": "America/Phoenix", "nws_station": "KPHX", "high_offset": 0.0, "low_offset": 0.0},
+    "MSP": {"lat": 44.9778, "lon": -93.2650, "nws_office": "MPX", "nws_grid": "107,71", "name": "Minneapolis", "tz": "America/Chicago", "nws_station": "KMSP", "high_offset": 0.0, "low_offset": 0.0},
+    "NOL": {"lat": 29.9511, "lon": -90.0715, "nws_office": "LIX", "nws_grid": "76,76", "name": "New Orleans", "tz": "America/Chicago", "nws_station": "KMSY", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "HOU"},
+    "DET": {"lat": 42.3314, "lon": -83.0458, "nws_office": "DTX", "nws_grid": "65,33", "name": "Detroit", "tz": "America/Detroit", "nws_station": "KDTW", "high_offset": 0.0, "low_offset": 0.0, "upstream_city": "CHI"},
 }
 
 
@@ -140,6 +141,115 @@ class NWSClient:
             logger.warning("NWS hourly forecast failed", city=city_key, error=str(e))
             return []
 
+    async def get_hourly_daily_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Extract daily high/low from NWS hourly forecast using Intra-Hour Curve Fitting (Cubic Spline Interpolation)."""
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        
+        hourly = await self.get_hourly_forecast(city_key)
+        if not hourly:
+            return None
+        
+        target_str = target_date.isoformat()
+        
+        # Fallback raw lists
+        temps_for_date: list[float] = []
+        for period in hourly:
+            time_str = period.get("time", "")
+            if time_str[:10] == target_str:
+                temp = period.get("temp_f")
+                if temp is not None:
+                    temps_for_date.append(temp)
+        
+        if not temps_for_date:
+            return None
+            
+        raw_max = max(temps_for_date)
+        raw_min = min(temps_for_date)
+        
+        spline_max = raw_max
+        spline_min = raw_min
+        
+        # Attempt to use Cubic Spline to find intra-hour peaks/valleys
+        try:
+            import numpy as np
+            from scipy.interpolate import CubicSpline
+            from datetime import datetime
+            
+            times = []
+            temps = []
+            
+            for period in hourly:
+                time_str = period.get("time", "")
+                temp = period.get("temp_f")
+                if time_str and temp is not None:
+                    # Parse ISO format. Python 3.11+ handles Z, 3.9 might need fromisoformat tweaks, 
+                    # but NWS usually returns standard formats with timezone offsets
+                    try:
+                        dt = datetime.fromisoformat(time_str)
+                        times.append(dt.timestamp())
+                        temps.append(temp)
+                    except Exception:
+                        pass
+                        
+            if len(times) >= 4:
+                # Sort pairs
+                sorted_pairs = sorted(zip(times, temps))
+                t_sorted = np.array([p[0] for p in sorted_pairs])
+                temp_sorted = np.array([p[1] for p in sorted_pairs])
+                
+                # We need unique x values for CubicSpline
+                _, unique_indices = np.unique(t_sorted, return_index=True)
+                t_unique = t_sorted[unique_indices]
+                temp_unique = temp_sorted[unique_indices]
+                
+                if len(t_unique) >= 4:
+                    cs = CubicSpline(t_unique, temp_unique)
+                    
+                    # We only care about interpolating points for the target date
+                    # Find min/max timestamps for the target date from our parsed times
+                    target_timestamps = []
+                    for period in hourly:
+                        time_str = period.get("time", "")
+                        if time_str[:10] == target_str:
+                            try:
+                                dt = datetime.fromisoformat(time_str)
+                                target_timestamps.append(dt.timestamp())
+                            except Exception:
+                                pass
+                                
+                    if target_timestamps:
+                        t_start = min(target_timestamps)
+                        t_end = max(target_timestamps)
+                        
+                        # Generate dense points (every 5 minutes)
+                        t_dense = np.linspace(t_start, t_end, num=int((t_end - t_start) / 300) + 1)
+                        temp_dense = cs(t_dense)
+                        
+                        calc_max = float(np.max(temp_dense))
+                        calc_min = float(np.min(temp_dense))
+                        
+                        # Apply sanity checks: spline shouldn't deviate wildly from raw hourly points
+                        # Usually peaks are within 1-2 degrees of hourly readings
+                        if calc_max > raw_max and calc_max <= raw_max + 2.5:
+                            spline_max = calc_max
+                        if calc_min < raw_min and calc_min >= raw_min - 2.5:
+                            spline_min = calc_min
+                            
+        except Exception as e:
+            # Catch import errors or parsing errors and just fall back to raw
+            pass
+        
+        return {
+            "source": "nws_hourly",
+            "city": city_key,
+            "high_temp_f": round(max(raw_max, spline_max), 2),
+            "low_temp_f": round(min(raw_min, spline_min), 2),
+            "date": target_str,
+            "hourly_count": len(temps_for_date),
+            "spline_applied": spline_max != raw_max or spline_min != raw_min
+        }
+
     async def get_current_observations(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
         """
         Fetch real-time hourly observations from NWS for a city.
@@ -219,6 +329,87 @@ class NWSClient:
 
         except Exception as e:
             logger.warning("NWS observations failed", city=city_key, station=station, error=str(e))
+            return None
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+
+class NOAAHRRRClient:
+    """NOAA HRRR (High-Resolution Rapid Refresh) model client.
+    
+    3km resolution, hourly updates. Uses NOMADS OpenDAP server for easier access.
+    HRRR is the highest resolution operational weather model for the US.
+    """
+
+    def __init__(self) -> None:
+        self._http = httpx.AsyncClient(timeout=20.0)
+        self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Get HRRR forecast for a city. Uses nearest grid point to city coordinates."""
+        config = CITY_CONFIGS.get(city_key)
+        if not config:
+            return None
+
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+
+        # Cache key
+        cache_key = f"{city_key}_{target_date.isoformat()}"
+        now = datetime.now(UTC).timestamp()
+        if cache_key in self._cache:
+            cached_time, cached_data = self._cache[cache_key]
+            if now - cached_time < 3600:  # 1 hour cache
+                return cached_data
+
+        try:
+            # HRRR data via NOMADS - simplified access
+            # We'll use the 2m temperature field from the latest HRRR run
+            lat, lon = config["lat"], config["lon"]
+            
+            # For now, use a simpler approach: fetch from NOAA's weather.gov API
+            # which includes HRRR data in their blend
+            # Full HRRR implementation would require GRIB2 parsing
+            
+            # Alternative: Use Iowa State's HRRR archive which provides JSON
+            url = "https://mesonet.agron.iastate.edu/json/hrrr.py"
+            params = {
+                "lat": lat,
+                "lon": lon,
+                "valid": target_date.isoformat(),
+            }
+            
+            resp = await self._http.get(url, params=params)
+            if resp.status_code != 200:
+                return None
+                
+            data = resp.json()
+            
+            # Extract temperature forecast
+            if not data or "data" not in data:
+                return None
+            
+            temps = [d.get("tmpc") for d in data.get("data", []) if d.get("tmpc") is not None]
+            if not temps:
+                return None
+            
+            # Convert Celsius to Fahrenheit
+            temps_f = [(t * 9/5) + 32 for t in temps]
+            
+            result = {
+                "source": "hrrr",
+                "city": city_key,
+                "high_temp_f": max(temps_f),
+                "low_temp_f": min(temps_f),
+                "date": target_date.isoformat(),
+            }
+            
+            self._cache[cache_key] = (now, result)
+            return result
+
+        except Exception as e:
+            logger.debug("HRRR forecast failed", city=city_key, error=str(e))
             return None
 
     async def close(self) -> None:
@@ -533,6 +724,175 @@ class VisualCrossingClient:
         await self._http.aclose()
 
 
+class WeatherbitClient:
+    """Weatherbit.io API client (free tier: 50 calls/day)."""
+
+    _cache: dict[str, dict] = {}
+    _cache_ts: dict[str, float] = {}
+    _CACHE_TTL: float = 3600.0  # 1 hour
+
+    def __init__(self, api_key: str = "") -> None:
+        self.api_key = api_key
+        self._http = httpx.AsyncClient(timeout=15.0)
+
+    async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Get Weatherbit forecast for a specific date."""
+        if not self.api_key:
+            return None
+
+        config = CITY_CONFIGS.get(city_key)
+        if not config:
+            return None
+
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        target_str = target_date.isoformat()
+
+        import time as _time
+        _now = _time.time()
+        cache_key = f"{city_key}_{target_str}"
+        if cache_key in WeatherbitClient._cache and (_now - WeatherbitClient._cache_ts.get(cache_key, 0)) < WeatherbitClient._CACHE_TTL:
+            return WeatherbitClient._cache[cache_key]
+
+        try:
+            resp = await self._http.get(
+                "https://api.weatherbit.io/v2.0/forecast/daily",
+                params={
+                    "lat": config["lat"],
+                    "lon": config["lon"],
+                    "key": self.api_key,
+                    "days": 7,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            forecasts = data.get("data", [])
+            if not forecasts:
+                return None
+
+            # Find forecast for target date
+            target_forecast = None
+            for fc in forecasts:
+                if fc.get("valid_date") == target_str:
+                    target_forecast = fc
+                    break
+            if not target_forecast:
+                target_forecast = forecasts[0]
+
+            # Convert Celsius to Fahrenheit
+            max_temp_c = target_forecast.get("max_temp")
+            min_temp_c = target_forecast.get("min_temp")
+            high_temp_f = round(max_temp_c * 9 / 5 + 32, 1) if max_temp_c is not None else None
+            low_temp_f = round(min_temp_c * 9 / 5 + 32, 1) if min_temp_c is not None else None
+
+            result = {
+                "source": "weatherbit",
+                "city": city_key,
+                "date": target_forecast.get("valid_date", ""),
+                "high_temp_f": high_temp_f,
+                "low_temp_f": low_temp_f,
+                "precip_inches": target_forecast.get("precip"),
+                "precip_prob": target_forecast.get("pop"),
+                "snow_inches": target_forecast.get("snow"),
+            }
+            WeatherbitClient._cache[cache_key] = result
+            WeatherbitClient._cache_ts[cache_key] = _now
+            return result
+
+        except Exception as e:
+            logger.warning("Weatherbit forecast failed", city=city_key, error=str(e))
+            return None
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+
+class OpenWeatherMapClient:
+    """OpenWeatherMap API client (free tier: 60 calls/min)."""
+
+    _cache: dict[str, dict] = {}
+    _cache_ts: dict[str, float] = {}
+    _CACHE_TTL: float = 3600.0  # 1 hour
+
+    def __init__(self, api_key: str = "") -> None:
+        self.api_key = api_key
+        self._http = httpx.AsyncClient(timeout=15.0)
+
+    async def get_forecast(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
+        """Get OpenWeatherMap forecast for a specific date."""
+        if not self.api_key:
+            return None
+
+        config = CITY_CONFIGS.get(city_key)
+        if not config:
+            return None
+
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        target_str = target_date.isoformat()
+
+        import time as _time
+        _now = _time.time()
+        cache_key = f"{city_key}_{target_str}"
+        if cache_key in OpenWeatherMapClient._cache and (_now - OpenWeatherMapClient._cache_ts.get(cache_key, 0)) < OpenWeatherMapClient._CACHE_TTL:
+            return OpenWeatherMapClient._cache[cache_key]
+
+        try:
+            resp = await self._http.get(
+                "https://api.openweathermap.org/data/2.5/forecast",
+                params={
+                    "lat": config["lat"],
+                    "lon": config["lon"],
+                    "appid": self.api_key,
+                    "units": "imperial",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            forecasts = data.get("list", [])
+            if not forecasts:
+                return None
+
+            # Group 3-hour forecasts by date and find min/max for target date
+            temps_for_date = []
+            for fc in forecasts:
+                fc_time = fc.get("dt_txt", "")
+                if fc_time[:10] == target_str:
+                    temp = fc.get("main", {}).get("temp")
+                    if temp is not None:
+                        temps_for_date.append(temp)
+
+            if not temps_for_date:
+                # Use first available forecast
+                temps_for_date = [fc.get("main", {}).get("temp") for fc in forecasts[:8] if fc.get("main", {}).get("temp")]
+
+            if not temps_for_date:
+                return None
+
+            high_temp_f = max(temps_for_date)
+            low_temp_f = min(temps_for_date)
+
+            result = {
+                "source": "openweathermap",
+                "city": city_key,
+                "date": target_str,
+                "high_temp_f": round(high_temp_f, 1),
+                "low_temp_f": round(low_temp_f, 1),
+            }
+            OpenWeatherMapClient._cache[cache_key] = result
+            OpenWeatherMapClient._cache_ts[cache_key] = _now
+            return result
+
+        except Exception as e:
+            logger.warning("OpenWeatherMap forecast failed", city=city_key, error=str(e))
+            return None
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+
 class WeatherConsensus:
     """
     Combines forecasts from multiple sources into a consensus probability distribution.
@@ -543,15 +903,92 @@ class WeatherConsensus:
         self,
         tomorrow_io_key: str = "",
         visual_crossing_key: str = "",
+        weatherbit_key: str = "",
+        openweathermap_key: str = "",
     ) -> None:
         self.nws = NWSClient()
+        self.hrrr = NOAAHRRRClient()
         self.open_meteo = OpenMeteoClient()
         self.tomorrow_io = TomorrowIOClient(api_key=tomorrow_io_key)
         self.visual_crossing = VisualCrossingClient(api_key=visual_crossing_key)
+        self.weatherbit = WeatherbitClient(api_key=weatherbit_key)
+        self.openweathermap = OpenWeatherMapClient(api_key=openweathermap_key)
+
+        # Circuit breaker: track consecutive failures per source
+        self._source_failures: dict[str, int] = {}
+        self._source_circuit_open_until: dict[str, float] = {}
+        self._circuit_breaker_threshold = 3   # failures before tripping
+        self._circuit_breaker_cooldown = 1800  # 30 minutes
 
     async def get_current_observations(self, city_key: str, target_date: date | None = None) -> dict[str, Any] | None:
         """Fetch real-time NWS observations for same-day arbitrage."""
         return await self.nws.get_current_observations(city_key, target_date)
+
+    def get_dynamic_weights(self, city: str = None) -> dict[str, float]:
+        """
+        Retrieve dynamic weights for weather APIs based on historical MAE.
+        Falls back to static weights if insufficient data.
+        """
+        base_weights = {
+            "nws": 2.0,
+            "nws_hourly": 2.0,
+            "hrrr": 2.0,
+            "open_meteo": 1.0,
+            "tomorrow_io": 1.0,
+            "visual_crossing": 1.0,
+            "weatherbit": 1.0,
+            "openweathermap": 1.0
+        }
+        
+        try:
+            import os
+            import sqlite3
+            db_path = os.path.join(os.path.dirname(__file__), "..", "data", "trading_engine.db")
+            if not os.path.exists(db_path):
+                return base_weights
+                
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            
+            # Get average error per source over the last 30 days
+            query = '''
+                SELECT source_name, AVG(ABS(error)) as mae, COUNT(*) as samples
+                FROM weather_api_performance
+                WHERE error IS NOT NULL AND actual_temp IS NOT NULL
+                  AND created_at >= date('now', '-30 days')
+            '''
+            if city:
+                query += f" AND city = '{city}'"
+            query += " GROUP BY source_name HAVING samples >= 5"
+            
+            c.execute(query)
+            results = c.fetchall()
+            conn.close()
+            
+            if not results:
+                return base_weights
+                
+            # Calculate new weights: inverse of MAE (lower error = higher weight)
+            dynamic_weights = {}
+            for row in results:
+                source_name, mae, samples = row
+                if mae < 0.1: mae = 0.1
+                # Scale so an MAE of 1.0 gives a weight of 2.0, MAE of 2.0 gives weight 1.0
+                weight = 2.0 / mae
+                # Cap weight between 0.5 and 3.0
+                weight = max(0.5, min(3.0, weight))
+                dynamic_weights[source_name] = round(weight, 2)
+                
+            # Merge with base weights for any missing sources
+            for src, bw in base_weights.items():
+                if src not in dynamic_weights:
+                    dynamic_weights[src] = bw
+                    
+            return dynamic_weights
+            
+        except Exception as e:
+            logger.error("Error fetching dynamic weights", error=str(e))
+            return base_weights
 
     async def get_all_forecasts(self, city_key: str, target_date: date | None = None) -> dict[str, Any]:
         """Fetch forecasts from all available sources for a city on a specific date.
@@ -563,22 +1000,160 @@ class WeatherConsensus:
         # NWS is free/unlimited — call first
         calls = [
             ("nws", self.nws.get_forecast(city_key, target_date)),
+            ("nws_hourly", self.nws.get_hourly_daily_forecast(city_key, target_date)),
+            ("hrrr", self.hrrr.get_forecast(city_key, target_date)),
             ("open_meteo", self.open_meteo.get_ensemble_forecast(city_key, target_date)),
             ("tomorrow_io", self.tomorrow_io.get_forecast(city_key, target_date)),
             ("visual_crossing", self.visual_crossing.get_forecast(city_key, target_date)),
+            ("weatherbit", self.weatherbit.get_forecast(city_key, target_date)),
+            ("openweathermap", self.openweathermap.get_forecast(city_key, target_date)),
         ]
 
+        import time as _time
+        now_ts = _time.time()
+
         for name, coro in calls:
+            # Circuit breaker: skip sources that have failed repeatedly
+            open_until = self._source_circuit_open_until.get(name, 0)
+            if now_ts < open_until:
+                logger.debug("Circuit breaker open, skipping source", source=name, city=city_key)
+                coro.close()  # prevent "coroutine was never awaited" warning
+                continue
+
             try:
                 result = await coro
                 if result is not None:
                     forecasts["sources"][name] = result
+                    self._source_failures[name] = 0  # reset on success
+                else:
+                    self._source_failures[name] = self._source_failures.get(name, 0) + 1
             except Exception as e:
                 logger.warning("Forecast source failed", source=name, city=city_key, error=str(e))
+                fails = self._source_failures.get(name, 0) + 1
+                self._source_failures[name] = fails
+                if fails >= self._circuit_breaker_threshold:
+                    self._source_circuit_open_until[name] = now_ts + self._circuit_breaker_cooldown
+                    logger.warning("Circuit breaker tripped", source=name, failures=fails,
+                                   cooldown_sec=self._circuit_breaker_cooldown)
             # Delay between API calls to respect Tomorrow.io free tier (~25 req/hr)
             await asyncio.sleep(2)
 
         return forecasts
+
+    async def get_all_city_forecasts(self, target_date: date | None = None) -> dict[str, dict[str, Any]]:
+        """
+        Fetch forecasts for ALL cities and calculate confidence scores.
+        
+        Returns:
+            {
+                "NYC": {
+                    "high": {"mean": 45, "range": (43, 47), "confidence": 0.82, "sources": 4, "weighted_mean": 45.2},
+                    "low": {"mean": 32, "range": (30, 34), "confidence": 0.78, "sources": 4, "weighted_mean": 31.8}
+                },
+                ...
+            }
+        """
+        if target_date is None:
+            target_date = datetime.now(UTC).date()
+        
+        all_city_forecasts = {}
+        
+        # Fetch forecasts for all cities
+        for city_key in CITY_CONFIGS.keys():
+            try:
+                forecasts = await self.get_all_forecasts(city_key, target_date)
+                sources = forecasts.get("sources", {})
+                
+                if not sources:
+                    continue
+                
+                # Get dynamic weights based on historical accuracy
+                SOURCE_WEIGHTS = self.get_dynamic_weights(city_key)
+
+                high_temps = []
+                high_weights = []
+                low_temps = []
+                low_weights = []
+
+                for source_name, s in sources.items():
+                    w = SOURCE_WEIGHTS.get(source_name, 1.0)
+                    h = s.get("high_temp_f")
+                    l = s.get("low_temp_f")
+                    if h is not None:
+                        high_temps.append(h)
+                        high_weights.append(w)
+                    if l is not None:
+                        low_temps.append(l)
+                        low_weights.append(w)
+                
+                city_forecast = {}
+                
+                if high_temps:
+                    high_temps_sorted = sorted(high_temps)
+                    n = len(high_temps_sorted)
+                    median_high = high_temps_sorted[n // 2] if n % 2 == 1 else (high_temps_sorted[n // 2 - 1] + high_temps_sorted[n // 2]) / 2
+                    
+                    # Calculate weighted mean (raw — no bias correction here;
+                    # bias is applied only in build_consensus to avoid double-counting)
+                    weighted_mean_high = sum(h * w for h, w in zip(high_temps, high_weights)) / sum(high_weights)
+                    mean_high = median_high
+                    
+                    # Calculate confidence based on source agreement
+                    spread = max(high_temps) - min(high_temps)
+                    if spread <= 2:
+                        confidence = 0.90  # Very high confidence
+                    elif spread <= 4:
+                        confidence = 0.80  # High confidence
+                    elif spread <= 6:
+                        confidence = 0.70  # Medium confidence
+                    else:
+                        confidence = 0.50  # Low confidence
+                        
+                    city_forecast["high"] = {
+                        "mean": round(mean_high, 2),
+                        "weighted_mean": round(weighted_mean_high, 2),
+                        "median_raw": round(median_high, 2),
+                        "range": (min(high_temps), max(high_temps)),
+                        "confidence": confidence,
+                        "sources": len(high_temps)
+                    }
+                    
+                if low_temps:
+                    low_temps_sorted = sorted(low_temps)
+                    n = len(low_temps_sorted)
+                    median_low = low_temps_sorted[n // 2] if n % 2 == 1 else (low_temps_sorted[n // 2 - 1] + low_temps_sorted[n // 2]) / 2
+                    
+                    # Raw weighted mean — no bias correction here (applied in build_consensus)
+                    weighted_mean_low = sum(l * w for l, w in zip(low_temps, low_weights)) / sum(low_weights)
+                    mean_low = median_low
+                    
+                    # Calculate confidence based on source agreement
+                    spread = max(low_temps) - min(low_temps)
+                    if spread <= 2:
+                        confidence = 0.90
+                    elif spread <= 4:
+                        confidence = 0.80
+                    elif spread <= 6:
+                        confidence = 0.70
+                    else:
+                        confidence = 0.50
+                        
+                    city_forecast["low"] = {
+                        "mean": round(mean_low, 2),
+                        "weighted_mean": round(weighted_mean_low, 2),
+                        "median_raw": round(median_low, 2),
+                        "range": (min(low_temps), max(low_temps)),
+                        "confidence": confidence,
+                        "sources": len(low_temps)
+                    }
+                    
+                if city_forecast:
+                    all_city_forecasts[city_key] = city_forecast
+                    
+            except Exception as e:
+                logger.warning("Failed to calculate consensus forecast", city=city_key, error=str(e))
+                
+        return all_city_forecasts
 
     def _estimate_std_dev(self, forecasts: dict[str, Any], is_bracket: bool = False, market_type: str = "high_temp") -> float:
         """Estimate temperature standard deviation from available data.
@@ -624,6 +1199,7 @@ class WeatherConsensus:
         floor_strike: float | None = None,
         cap_strike: float | None = None,
         market_type: str = "high_temp",
+        all_city_forecasts: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """
         Build a consensus probability for a Kalshi weather market.
@@ -641,43 +1217,109 @@ class WeatherConsensus:
         temp_field = "low_temp_f" if is_low else "high_temp_f"
 
         high_temps: list[float] = []
+        temp_weights: list[float] = []
         source_details: list[dict[str, Any]] = []
 
-        # Weight NWS 2x higher as it's the official US forecast
+        # Use dynamic weights from historical API accuracy (or base weights if no data)
+        city_key = forecasts.get("city", "")
+        dyn_weights = self.get_dynamic_weights(city_key)
+
+        # Time-horizon scaling: NWS/HRRR excel at short-range, ensemble at multi-day
+        target_date_str = forecasts.get("target_date", "")
+        days_ahead = 1  # default
+        try:
+            if target_date_str:
+                from datetime import date as date_cls
+                target_dt = date_cls.fromisoformat(target_date_str)
+                days_ahead = max(0, (target_dt - datetime.now(UTC).date()).days)
+        except (ValueError, TypeError):
+            pass
+
+        short_range_sources = {"nws", "nws_hourly", "hrrr"}
+        ensemble_sources = {"open_meteo"}
+
         for name, data in sources.items():
             temp = data.get(temp_field)
             if temp is not None:
-                # Add NWS twice for 2x weight
-                if name == "nws":
-                    high_temps.append(temp)
-                    high_temps.append(temp)
-                else:
-                    high_temps.append(temp)
-                source_details.append({"source": name, temp_field: temp})
+                w = dyn_weights.get(name, 1.0)
+                # Apply time-horizon multiplier
+                if name in short_range_sources:
+                    if days_ahead == 0:
+                        w *= 1.5  # Same-day: short-range models are most accurate
+                    elif days_ahead >= 3:
+                        w *= 0.7  # 3+ days: short-range models lose edge
+                elif name in ensemble_sources:
+                    if days_ahead >= 3:
+                        w *= 1.3  # Multi-day: ensemble spread captures uncertainty better
+                    elif days_ahead == 0:
+                        w *= 0.8  # Same-day: ensemble lags behind rapid-update models
+                high_temps.append(temp)
+                temp_weights.append(w)
+                source_details.append({"source": name, temp_field: temp, "weight": round(w, 2)})
 
         if not high_temps:
             return {"error": f"No {temp_field} data from any source"}
 
         n = len(high_temps)
-        # Use median instead of mean - more robust to outliers
-        high_temps_sorted = sorted(high_temps)
-        median_temp = high_temps_sorted[n // 2] if n % 2 == 1 else (high_temps_sorted[n // 2 - 1] + high_temps_sorted[n // 2]) / 2
+
+        # Weighted median: sort by temp, walk cumulative weight to find the midpoint
+        paired = sorted(zip(high_temps, temp_weights), key=lambda x: x[0])
+        total_weight = sum(temp_weights)
+        cumulative = 0.0
+        median_temp = paired[-1][0]
+        for temp_val, w in paired:
+            cumulative += w
+            if cumulative >= total_weight / 2.0:
+                median_temp = temp_val
+                break
         
-        # Apply warm bias correction for HIGH temp markets
-        # Empirical data shows forecasts are systematically 2°F too cold
-        bias_correction = 2.0 if market_type == "high_temp" else 0.0
-        mean_temp = median_temp + bias_correction
+        # Retrieve city configuration to apply station-specific microclimate offsets
+        city_code = forecasts.get("city", "")
+        city_config = CITY_CONFIGS.get(city_code, {})
+        
+        # Apply warm bias correction for HIGH temp markets (+2°F empirical bias)
+        # Apply cold bias correction for LOW temp markets (-2°F empirical bias)
+        # Forecast models have warm bias for lows — they under-predict how cold
+        # it gets overnight. Use -2°F to push consensus colder (more conservative).
+        bias_correction = 2.0 if market_type == "high_temp" else -2.0
+        
+        # Apply station offset
+        station_offset = city_config.get("high_offset", 0.0) if market_type == "high_temp" else city_config.get("low_offset", 0.0)
+        
+        mean_temp = median_temp + bias_correction + station_offset
+        
+        # ── Spatial Correlation Arbitrage ──
+        # If upstream city forecasts are higher/lower than expected, apply a fraction of that momentum.
+        spatial_offset = 0.0
+        try:
+            upstream_city = city_config.get("upstream_city")
+            if upstream_city and all_city_forecasts:
+                upstream_data = all_city_forecasts.get(upstream_city)
+                if upstream_data:
+                    temp_key = "high" if market_type == "high_temp" else "low"
+                    up_forecast = upstream_data.get(temp_key, {})
+                    if up_forecast:
+                        # Simple momentum heuristic: if upstream's weighted mean is significantly different 
+                        # from its raw median, it indicates the high-res short-term models (NWS/HRRR) 
+                        # are diverging from the broad consensus. We apply 50% of that divergence here.
+                        up_divergence = up_forecast.get("weighted_mean", 0) - up_forecast.get("median_raw", 0)
+                        if abs(up_divergence) >= 0.5:
+                            spatial_offset = up_divergence * 0.5
+                            mean_temp += spatial_offset
+                            logger.info("Applied spatial correlation", city=city_code, upstream=upstream_city, offset=round(spatial_offset, 2))
+        except Exception as e:
+            logger.warning("Failed to apply spatial correlation", city=city_code, error=str(e))
         spread = max(high_temps) - min(high_temps) if n > 1 else 0
         confidence = max(0.0, min(1.0, 1.0 - (spread - 2) / 8))
         std_dev = self._estimate_std_dev(forecasts, is_bracket=(strike_type == "between"), market_type=market_type)
-        # Cap std_dev at 3°F to prevent over-uncertainty
-        std_dev = min(std_dev, 3.0)
 
         # Use ensemble predictions if available for empirical probability
         pred_key = "all_low_predictions" if is_low else "all_predictions"
         ensemble_preds_raw = sources.get("open_meteo", {}).get(pred_key, [])
-        # Apply same warm bias correction to ensemble predictions
-        ensemble_preds = [p + bias_correction for p in ensemble_preds_raw] if ensemble_preds_raw else []
+        # Apply all corrections to ensemble predictions (bias + station + spatial)
+        # so ensemble-derived probabilities are consistent with the Gaussian fallback
+        total_correction = bias_correction + station_offset + spatial_offset
+        ensemble_preds = [p + total_correction for p in ensemble_preds_raw] if ensemble_preds_raw else []
 
         # Calculate probability based on strike type
         our_prob_yes = 0.0
@@ -799,10 +1441,57 @@ class WeatherConsensus:
 
         return signal
 
+    def record_forecast_accuracy(
+        self,
+        city: str,
+        target_date: str,
+        market_type: str,
+        actual_temp: float,
+        source_forecasts: list[dict[str, Any]],
+    ) -> int:
+        """Record per-source forecast accuracy into weather_api_performance.
+
+        Called after a weather market settles to feed back into dynamic API weighting.
+        Returns number of records inserted.
+        """
+        import os
+        import sqlite3
+
+        db_path = os.path.join(os.path.dirname(__file__), "..", "data", "trading_engine.db")
+        if not os.path.exists(db_path):
+            return 0
+
+        now = datetime.now(UTC).isoformat()
+        inserted = 0
+        try:
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            for sf in source_forecasts:
+                source_name = sf.get("source", "")
+                temp_field = "low_temp_f" if market_type == "low_temp" else "high_temp_f"
+                forecast_temp = sf.get(temp_field)
+                if source_name and forecast_temp is not None:
+                    error = forecast_temp - actual_temp
+                    c.execute(
+                        """INSERT INTO weather_api_performance
+                        (city, source_name, market_type, forecast_temp, actual_temp, error, target_date, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (city, source_name, market_type, forecast_temp, actual_temp, error, target_date, now),
+                    )
+                    inserted += 1
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("Failed to record forecast accuracy", city=city, error=str(e))
+        return inserted
+
     async def close(self) -> None:
         await asyncio.gather(
             self.nws.close(),
+            self.hrrr.close(),
             self.open_meteo.close(),
             self.tomorrow_io.close(),
             self.visual_crossing.close(),
+            self.weatherbit.close(),
+            self.openweathermap.close(),
         )

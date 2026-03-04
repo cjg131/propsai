@@ -52,11 +52,13 @@ class TradingEngine:
         paper_mode: bool = True,
         daily_loss_limit: float | None = None,
         max_bet_size: float | None = None,
-        max_bet_pct: float = 0.04,  # 4% of bankroll per bet
+        max_bet_pct: float = 0.03,  # HARD CAP: 3% of bankroll per single bet
         max_position_per_ticker: float | None = None,
-        max_total_exposure_pct: float = 1.00,  # Allow full bankroll deployment
-        max_strategy_exposure_pct: float = 0.40,  # Soft cap: 40% of bankroll per strategy
-        max_strategy_cycle_pct: float = 0.25,  # Max 25% of bankroll deployed per strategy per cycle
+        max_total_exposure_pct: float = 0.60,  # Max 60% of bankroll deployed at once
+        max_strategy_exposure_pct: float = 0.35,  # Max 35% of bankroll per strategy
+        max_strategy_cycle_pct: float = 0.15,  # Max 15% of bankroll deployed per strategy per cycle
+        max_single_trade_dollars: float = 50.0,  # Absolute hard dollar cap per trade
+        min_bankroll_to_trade: float = 50.0,  # Refuse all trades if bankroll below this
     ):
         self.bankroll = bankroll
         self.paper_mode = paper_mode
@@ -64,10 +66,12 @@ class TradingEngine:
         self.max_total_exposure_pct = max_total_exposure_pct
         self.max_strategy_exposure_pct = max_strategy_exposure_pct
         self.max_strategy_cycle_pct = max_strategy_cycle_pct
+        self.max_single_trade_dollars = max_single_trade_dollars
+        self.min_bankroll_to_trade = min_bankroll_to_trade
         # Scale risk limits from bankroll (override with explicit values if provided)
         self.daily_loss_limit = daily_loss_limit if daily_loss_limit is not None else float('inf')
-        self.max_bet_size = max_bet_size if max_bet_size is not None else bankroll * 0.04
-        self.max_position_per_ticker = max_position_per_ticker if max_position_per_ticker is not None else bankroll * 0.10
+        self.max_bet_size = max_bet_size if max_bet_size is not None else bankroll * 0.03
+        self.max_position_per_ticker = max_position_per_ticker if max_position_per_ticker is not None else bankroll * 0.08
         self.kill_switch = False
         # Track per-strategy deployment within current cycle
         self._cycle_deployed: dict[str, float] = {}
@@ -96,14 +100,15 @@ class TradingEngine:
         self._cooldown_pnl_threshold: float = 0.0
 
         # Enable/disable specific strategies
+        # WEATHER ONLY MODE - all other strategies disabled
         self.strategy_enabled = {
-            "arbitrage": True,
+            "arbitrage": False,
             "weather": True,
-            "sports": True,
-            "crypto": True,
-            "nba_props": True,
-            "finance": True,
-            "econ": True,
+            "sports": False,
+            "crypto": False,
+            "nba_props": False,
+            "finance": False,
+            "econ": False,
         }
 
         self._init_db()
@@ -156,6 +161,13 @@ class TradingEngine:
         except Exception:
             pass  # Column already exists
 
+        # Migration: add closing_price_cents for CLV tracking
+        try:
+            c.execute("ALTER TABLE trades ADD COLUMN closing_price_cents INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
         c.execute("""
             CREATE TABLE IF NOT EXISTS daily_pnl (
                 date TEXT NOT NULL,
@@ -200,6 +212,25 @@ class TradingEngine:
                 message TEXT NOT NULL,
                 details TEXT DEFAULT ''
             )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS weather_api_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                forecast_temp REAL,
+                actual_temp REAL,
+                error REAL,
+                target_date TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_weather_api_perf_source
+            ON weather_api_performance(source_name, created_at)
         """)
 
         conn.commit()
@@ -344,9 +375,14 @@ class TradingEngine:
         if not strategy:
             return remaining_global
 
-        # Per-strategy total exposure cap (soft)
+        # Per-strategy total exposure cap — use dynamic allocation if available
         strategy_exposure = self.get_total_exposure(strategy=strategy)
-        max_strategy = effective * self.max_strategy_exposure_pct
+        try:
+            dyn_alloc = self.get_dynamic_strategy_allocations()
+            alloc_pct = dyn_alloc.get(strategy, self.max_strategy_exposure_pct)
+        except Exception:
+            alloc_pct = self.max_strategy_exposure_pct
+        max_strategy = effective * alloc_pct
         remaining_strategy = max(0, max_strategy - strategy_exposure)
 
         # Per-strategy cycle cap (prevents one cycle from deploying too much)
@@ -485,14 +521,14 @@ class TradingEngine:
         
         if today != self._last_cooldown_date:
             self._last_cooldown_date = today
-            # Set initial drawdown threshold to -5% of bankroll for the day
-            self._cooldown_pnl_threshold = -(effective * 0.05)
+            # Set initial drawdown threshold to -3% of bankroll for the day
+            self._cooldown_pnl_threshold = -(effective * 0.03)
             
         today_pnl = self.get_today_pnl()
         if today_pnl <= self._cooldown_pnl_threshold:
             self._cooldown_until = now_ts + (2 * 3600)  # 2 hours
-            # Lower the threshold by another 5% so it can trigger again if things get worse later
-            self._cooldown_pnl_threshold -= (effective * 0.05)
+            # Lower the threshold by another 3% so it can trigger again if things get worse later
+            self._cooldown_pnl_threshold -= (effective * 0.03)
             self.log_event("warning", f"CIRCUIT BREAKER TRIGGERED: Daily P&L hit ${today_pnl:.2f}. Pausing new trades for 2 hours.", strategy="risk")
             return False, f"Circuit breaker triggered at ${today_pnl:.2f}"
         # ───────────────────────────────────────
@@ -503,6 +539,14 @@ class TradingEngine:
         effective = self.get_effective_bankroll()
         if effective <= 0:
             return False, f"Effective bankroll is ${effective:.2f} — no capital available"
+
+        # HARD GUARD: refuse all trades if bankroll too low
+        if effective < self.min_bankroll_to_trade:
+            return False, f"Bankroll ${effective:.2f} below minimum ${self.min_bankroll_to_trade:.2f} — all trading halted"
+
+        # ABSOLUTE DOLLAR CAP: never risk more than max_single_trade_dollars on one trade
+        if cost > self.max_single_trade_dollars:
+            return False, f"Trade ${cost:.2f} exceeds absolute cap of ${self.max_single_trade_dollars:.2f}"
 
         # Check percentage of effective bankroll per bet
         if cost > effective * self.max_bet_pct:
@@ -517,7 +561,7 @@ class TradingEngine:
             return False, f"Total exposure ${total_exposure + cost:.2f} would exceed {self.max_total_exposure_pct*100:.0f}% of effective bankroll (${max_deployable:.2f})"
 
         # Check per-ticker position limit (scaled to effective bankroll)
-        max_per_ticker = effective * 0.10
+        max_per_ticker = effective * 0.08
         if ticker:
             ticker_exposure = self.get_ticker_exposure(ticker)
             if ticker_exposure + cost > max_per_ticker:
@@ -542,37 +586,89 @@ class TradingEngine:
         strategy: str,
         edge: float,
         price_cents: int,
-        confidence: float = 1.0,
+        confidence: float = 0.5,
         ticker: str = "",
+        signal_source: str = "",
     ) -> int:
+        """Calculate position size using Kelly criterion with risk limits.
+        
+        CRITICAL: signal_source determines sizing tier.
+        - "weather_observed_arbitrage": confirmed NOAA data → full Kelly caps
+        - "weather_consensus" (forecast): speculative → 1/4 Kelly caps
+        - Other strategies: normal caps
         """
-        Calculate position size using quarter-Kelly criterion,
-        constrained by remaining capital and per-ticker limits.
-        Returns number of contracts.
-        """
-        if edge <= 0 or price_cents <= 0 or price_cents >= 100:
+        if edge <= 0 or price_cents <= 0:
             return 0
 
-        p = price_cents / 100.0
-        kelly_fraction = edge / (1 - p)
-        quarter_kelly = kelly_fraction * 0.25 * confidence
+        bankroll = self.get_effective_bankroll()
+        if bankroll <= 0:
+            return 0
+
+        # Half-Kelly: f = 0.5 * edge / (1 - implied_prob)
+        # This scales position size with edge magnitude rather than using fixed fractions.
+        implied_prob = price_cents / 100.0
+        if implied_prob >= 0.99:
+            implied_prob = 0.99  # prevent division by zero
+        half_kelly = 0.5 * edge / (1.0 - implied_prob)
+
+        # Safety caps by strategy, signal source, and confidence tier
+        is_observed_arb = signal_source == "weather_observed_arbitrage"
+        
+        if strategy == "weather":
+            if is_observed_arb:
+                # OBSERVED ARBITRAGE: confirmed NOAA data — higher caps justified
+                if confidence >= 0.85:
+                    max_kelly = 0.08
+                elif confidence >= 0.75:
+                    max_kelly = 0.06
+                else:
+                    max_kelly = 0.04
+            else:
+                # FORECAST: speculative — drastically lower caps (1/4 of observed)
+                if confidence >= 0.85:
+                    max_kelly = 0.02
+                elif confidence >= 0.75:
+                    max_kelly = 0.015
+                else:
+                    max_kelly = 0.01
+        else:
+            if confidence >= 0.85:
+                max_kelly = 0.10
+            elif confidence >= 0.75:
+                max_kelly = 0.08
+            else:
+                max_kelly = 0.05
+
+        kelly_fraction = min(half_kelly, max_kelly)
+        kelly_size = bankroll * kelly_fraction
 
         remaining = self.get_remaining_capital(strategy=strategy)
         effective = self.get_effective_bankroll()
 
-        # Cap by remaining capital, Kelly, and effective bankroll percentage
+        # Determine dollar cap: observed arbitrage gets full cap, forecast gets 1/4
+        if strategy == "weather" and not is_observed_arb:
+            trade_dollar_cap = min(self.max_single_trade_dollars, 15.0)  # forecast: hard $15 cap
+        else:
+            trade_dollar_cap = self.max_single_trade_dollars  # observed arb / other: $50 cap
+
+        # Cap by remaining capital, Kelly, effective bankroll percentage, AND absolute dollar cap
         max_dollars = min(
             remaining,
-            effective * quarter_kelly,
+            kelly_size,
             effective * self.max_bet_pct,
+            trade_dollar_cap,
         )
 
         # Also cap by per-ticker limit (scaled to effective bankroll)
         if ticker:
             ticker_exposure = self.get_ticker_exposure(ticker)
-            max_per_ticker = effective * 0.10
+            max_per_ticker = effective * 0.08
             ticker_remaining = max(0, max_per_ticker - ticker_exposure)
             max_dollars = min(max_dollars, ticker_remaining)
+
+        # Low-bankroll guard: refuse if below minimum
+        if effective < self.min_bankroll_to_trade:
+            return 0
 
         if max_dollars <= 0:
             return 0
@@ -611,7 +707,7 @@ class TradingEngine:
             if resting_total >= self.max_total_resting_orders:
                 reason = f"Resting-order cap reached ({resting_total}/{self.max_total_resting_orders})"
                 self.log_event("blocked", reason, strategy=strategy)
-                return {"status": "blocked", "reason": reason}
+                return ""
 
             strategy_resting = self.get_resting_order_count(strategy=strategy)
             if strategy_resting >= self.max_resting_orders_per_strategy:
@@ -620,7 +716,7 @@ class TradingEngine:
                     f"({strategy_resting}/{self.max_resting_orders_per_strategy})"
                 )
                 self.log_event("blocked", reason, strategy=strategy)
-                return {"status": "blocked", "reason": reason}
+                return ""
 
         conn = sqlite3.connect(str(DB_PATH))
         c = conn.cursor()
@@ -656,6 +752,21 @@ class TradingEngine:
             details=details,
         )
         return signal_id
+
+    def get_signal_details(self, ticker: str, strategy: str = "") -> str:
+        """Look up the most recent signal details for a given ticker."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        query = "SELECT details FROM signals WHERE ticker = ?"
+        params: list[Any] = [ticker]
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY timestamp DESC LIMIT 1"
+        c.execute(query, params)
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else ""
 
     async def execute_trade(
         self,
@@ -929,6 +1040,71 @@ class TradingEngine:
 
         return {"trade_id": trade_id, "result": result, "pnl": pnl}
 
+    def record_closing_price(self, trade_id: str, closing_price_cents: int) -> None:
+        """Record the market closing price for a trade (for CLV computation)."""
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        c.execute("UPDATE trades SET closing_price_cents = ? WHERE id = ?", (closing_price_cents, trade_id))
+        conn.commit()
+        conn.close()
+
+    def get_clv_stats(self, strategy: str = "", limit: int = 100) -> dict[str, Any]:
+        """Compute CLV statistics across settled trades.
+        CLV = (closing_price - entry_price) for YES bets, inverted for NO.
+        Positive CLV means we consistently bought before the market moved our way.
+        """
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        query = """
+            SELECT side, price_cents, closing_price_cents, strategy, pnl
+            FROM trades
+            WHERE status = 'settled' AND action = 'buy' AND closing_price_cents > 0
+        """
+        params: list[Any] = []
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY settled_at DESC LIMIT ?"
+        params.append(limit)
+        c.execute(query, params)
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            return {"total_trades": 0, "avg_clv_cents": 0, "positive_clv_pct": 0, "by_strategy": {}}
+
+        clv_values: list[float] = []
+        by_strategy: dict[str, list[float]] = {}
+        for r in rows:
+            entry = r["price_cents"]
+            close = r["closing_price_cents"]
+            if r["side"] == "yes":
+                clv = close - entry  # Positive = market moved toward YES after we bought YES
+            else:
+                clv = entry - close  # Positive = market moved toward NO after we bought NO (price dropped)
+            clv_values.append(clv)
+            strat = r["strategy"]
+            by_strategy.setdefault(strat, []).append(clv)
+
+        avg_clv = sum(clv_values) / len(clv_values) if clv_values else 0
+        positive_count = sum(1 for v in clv_values if v > 0)
+
+        strat_stats = {}
+        for strat, vals in by_strategy.items():
+            strat_stats[strat] = {
+                "count": len(vals),
+                "avg_clv_cents": round(sum(vals) / len(vals), 1) if vals else 0,
+                "positive_clv_pct": round(sum(1 for v in vals if v > 0) / len(vals) * 100, 1) if vals else 0,
+            }
+
+        return {
+            "total_trades": len(clv_values),
+            "avg_clv_cents": round(avg_clv, 1),
+            "positive_clv_pct": round(positive_count / len(clv_values) * 100, 1) if clv_values else 0,
+            "by_strategy": strat_stats,
+        }
+
     def get_unsettled_trades(self) -> list[dict[str, Any]]:
         """Get all unsettled (filled) trades grouped by ticker for settlement checking."""
         conn = sqlite3.connect(str(DB_PATH))
@@ -1108,9 +1284,12 @@ class TradingEngine:
                         count=count, type="limit", yes_price=price_cents,
                     )
                 else:
+                    # Kalshi API quirk: when selling NO, we must specify the YES price
+                    # e.g., if we want to sell NO for 1c, we set yes_price = 99
+                    yes_price_equivalent = 100 - price_cents
                     result = await client.place_order(
                         ticker=ticker, side="no", action="sell",
-                        count=count, type="limit", no_price=price_cents,
+                        count=count, type="limit", yes_price=yes_price_equivalent,
                     )
                 order_id = result.get("order", {}).get("order_id", "")
                 status = result.get("order", {}).get("status", "pending")
@@ -1463,6 +1642,89 @@ class TradingEngine:
             "today_pnl": self.get_today_pnl(),
             "today_trades": self.get_today_trade_count(),
         }
+
+    def get_dynamic_strategy_allocations(self) -> dict[str, float]:
+        """Compute dynamic capital allocation per strategy based on 7-day rolling Sharpe-like ratio.
+        Higher risk-adjusted return strategies get more capital. Minimum 10% floor per enabled strategy.
+        Returns: {strategy: allocation_pct} where values sum to ~1.0.
+        """
+        import math as _math
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+
+        # Get 7-day rolling P&L by strategy
+        c.execute("""
+            SELECT strategy,
+                   COUNT(*) as cnt,
+                   COALESCE(SUM(pnl), 0) as total_pnl,
+                   COALESCE(AVG(pnl), 0) as avg_pnl
+            FROM trades
+            WHERE status = 'settled'
+              AND settled_at >= datetime('now', '-7 days')
+              AND action = 'buy'
+            GROUP BY strategy
+        """)
+        rows = c.fetchall()
+
+        # Also get variance for Sharpe-like calculation
+        strat_data: dict[str, dict] = {}
+        for r in rows:
+            strat = r["strategy"]
+            strat_data[strat] = {
+                "count": r["cnt"],
+                "total_pnl": r["total_pnl"],
+                "avg_pnl": r["avg_pnl"],
+            }
+
+        # Compute per-trade pnl std dev for each strategy
+        for strat in strat_data:
+            c.execute("""
+                SELECT pnl FROM trades
+                WHERE status = 'settled' AND action = 'buy' AND strategy = ?
+                  AND settled_at >= datetime('now', '-7 days')
+            """, (strat,))
+            pnls = [r["pnl"] for r in c.fetchall()]
+            if len(pnls) > 1:
+                mean = sum(pnls) / len(pnls)
+                variance = sum((p - mean) ** 2 for p in pnls) / (len(pnls) - 1)
+                std = _math.sqrt(variance) if variance > 0 else 0.01
+            else:
+                std = 0.01
+            strat_data[strat]["std"] = std
+            # Sharpe-like: avg_pnl / std (higher = better risk-adjusted return)
+            strat_data[strat]["sharpe"] = strat_data[strat]["avg_pnl"] / std if std > 0 else 0
+
+        conn.close()
+
+        # Get enabled strategies
+        enabled = [s for s, on in self.strategy_enabled.items() if on]
+        if not enabled:
+            return {}
+
+        # Assign allocations based on Sharpe ratio
+        min_floor = 0.10  # 10% minimum per strategy
+        remaining = 1.0 - (min_floor * len(enabled))
+        if remaining < 0:
+            # Too many strategies — equal allocation
+            return {s: 1.0 / len(enabled) for s in enabled}
+
+        # Score each enabled strategy
+        scores: dict[str, float] = {}
+        for s in enabled:
+            data = strat_data.get(s, {})
+            sharpe = data.get("sharpe", 0)
+            # Boost positive Sharpe, dampen negative
+            scores[s] = max(sharpe, 0) + 0.1  # 0.1 baseline so new strategies get some allocation
+
+        total_score = sum(scores.values())
+        allocations: dict[str, float] = {}
+        for s in enabled:
+            bonus = (scores[s] / total_score * remaining) if total_score > 0 else (remaining / len(enabled))
+            # HARD CAP: no single strategy can exceed max_strategy_exposure_pct regardless of dynamic allocation
+            allocations[s] = round(min(min_floor + bonus, self.max_strategy_exposure_pct), 3)
+
+        return allocations
 
     def get_status(self) -> dict[str, Any]:
         """Get current agent status."""

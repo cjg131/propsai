@@ -6,6 +6,7 @@ Runs on a schedule: weather 4x/day, sports 5min, crypto 2min, finance 10min, eco
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ from app.services.signal_scorer import get_signal_scorer
 from app.services.smart_predictor import SmartPredictor, get_smart_predictor
 from app.services.trade_analyzer import get_trade_analyzer
 from app.services.trading_engine import get_trading_engine
+from app.services.discord_webhook import send_discord_notification
+from app.services.event_bus import get_event_bus
 from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
 
 logger = get_logger(__name__)
@@ -53,6 +56,8 @@ class KalshiAgent:
         self.weather = WeatherConsensus(
             tomorrow_io_key=getattr(settings, "tomorrow_io_api_key", ""),
             visual_crossing_key=getattr(settings, "visual_crossing_api_key", ""),
+            weatherbit_key=getattr(settings, "weatherbit_api_key", ""),
+            openweathermap_key=getattr(settings, "openweathermap_api_key", ""),
         )
 
         # Cross-market sports scanner
@@ -109,6 +114,9 @@ class KalshiAgent:
         self._main_task: asyncio.Task | None = None
         self._crypto_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._health_task: asyncio.Task | None = None
+        self._last_api_check_ok: bool = True
+        self._consecutive_api_failures: int = 0
 
         # Resting-order cancel alerts (to detect persistent non-fills/chasing)
         self._cancel_alert_window_mins = int(os.environ.get("CANCEL_ALERT_WINDOW_MINS", "30"))
@@ -480,10 +488,62 @@ class KalshiAgent:
                 f"Position dedup: skipped {pre_filter - len(candidates)} candidates already held",
             )
 
+        # ── Bracket Correlation Guard ──
+        # For bracket markets (weather/crypto/finance), prevent contradictory positions
+        # on the same event. E.g., don't buy YES on ">80°F" and YES on "<75°F" for the same city/date.
+        # Build a map of event_prefix → existing position direction
+        open_event_directions: dict[str, str] = {}
+        for p in open_positions:
+            pticker = p.get("ticker", "")
+            pside = p.get("side", "")
+            # Extract event prefix: everything before the bracket specifier (-T45, -B36.5, etc.)
+            bracket_m = re.match(r'(.+)-[TB]\d', pticker)
+            if bracket_m:
+                event_prefix = bracket_m.group(1)
+                # Direction: YES on ">" means bullish, NO on ">" means bearish
+                if "-T" in pticker:  # "T" = threshold/greater
+                    direction = "bullish" if pside == "yes" else "bearish"
+                else:  # "B" = below/between
+                    direction = "bearish" if pside == "yes" else "bullish"
+                open_event_directions[event_prefix] = direction
+
+        bracket_filtered = []
+        bracket_blocked = 0
+        for c in candidates:
+            cticker = c.get("ticker", "")
+            cside = c.get("side", "")
+            bracket_m = re.match(r'(.+)-[TB]\d', cticker)
+            if bracket_m:
+                event_prefix = bracket_m.group(1)
+                existing_dir = open_event_directions.get(event_prefix)
+                if existing_dir:
+                    if "-T" in cticker:
+                        new_dir = "bullish" if cside == "yes" else "bearish"
+                    else:
+                        new_dir = "bearish" if cside == "yes" else "bullish"
+                    if new_dir != existing_dir:
+                        bracket_blocked += 1
+                        continue  # Skip contradictory bracket
+            bracket_filtered.append(c)
+        if bracket_blocked > 0:
+            self.engine.log_event(
+                "info",
+                f"Bracket guard: blocked {bracket_blocked} contradictory bracket candidates",
+            )
+        candidates = bracket_filtered
+
         total_exposure = self.engine.get_total_exposure()
         effective_bankroll = self.engine.get_effective_bankroll()
         available_capital = max(0, effective_bankroll - total_exposure)
-        cycle_budget = available_capital * 0.85  # deploy 85% of what's free this cycle (15% reserve)
+        cycle_budget = available_capital * 0.60  # deploy 60% of what's free (40% reserve)
+
+        # HARD GUARD: refuse to trade if bankroll is critically low
+        if effective_bankroll < self.engine.min_bankroll_to_trade:
+            self.engine.log_event(
+                "warning",
+                f"Bankroll ${effective_bankroll:.2f} below minimum ${self.engine.min_bankroll_to_trade:.2f} — skipping all trades",
+            )
+            return []
 
         self.engine.log_event(
             "info",
@@ -491,6 +551,12 @@ class KalshiAgent:
             f"exposure=${total_exposure:.2f}, available=${available_capital:.2f}, "
             f"cycle budget=${cycle_budget:.2f}",
         )
+
+        # ── Per-city/event concentration limit ──
+        # Track how many trades we execute per event group this cycle
+        # Prevents dumping multiple bets on the same city/date
+        MAX_TRADES_PER_EVENT = 2
+        event_trade_count: dict[str, int] = {}
 
         traded: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -506,18 +572,45 @@ class KalshiAgent:
             if not ticker or price_cents <= 0:
                 continue
 
+            # ── Per-event concentration guard ──
+            # Group weather tickers by city+date (e.g. KXHIGHNYC-25MAR03)
+            # Group other tickers by base event (everything before last hyphen segment)
+            event_key = ticker.rsplit("-", 1)[0] if "-" in ticker else ticker
+            if event_trade_count.get(event_key, 0) >= MAX_TRADES_PER_EVENT:
+                self.engine.log_event(
+                    "info",
+                    f"Event concentration limit: skipping {ticker} (already {MAX_TRADES_PER_EVENT} trades on {event_key})",
+                )
+                continue
+
             # Position sizing (respects per-strategy and per-ticker caps)
+            # CRITICAL: signal_source differentiates forecast (small) vs observed arb (full)
+            sig_source = candidate.get("signal_source", "")
             count = self.engine.calculate_position_size(
                 strategy=strategy,
                 edge=edge,
                 price_cents=price_cents,
                 confidence=confidence,
                 ticker=ticker,
+                signal_source=sig_source,
             )
             if count <= 0:
                 continue
 
             cost_estimate = count * price_cents / 100.0
+
+            # PRE-EXECUTION SANITY CHECK: reject if cost > 3% of bankroll
+            if cost_estimate > effective_bankroll * 0.03:
+                self.engine.log_event(
+                    "warning",
+                    f"Sanity check: {ticker} cost ${cost_estimate:.2f} exceeds 3% of bankroll ${effective_bankroll:.2f} — reducing",
+                )
+                max_cost = effective_bankroll * 0.03
+                count = int(max_cost / (price_cents / 100.0))
+                if count <= 0:
+                    continue
+                cost_estimate = count * price_cents / 100.0
+
             if cost_estimate > cycle_budget:
                 # Reduce count to fit budget
                 count = int(cycle_budget / (price_cents / 100.0))
@@ -551,6 +644,35 @@ class KalshiAgent:
                 cycle_budget -= actual_cost
                 candidate["trade"] = trade
                 traded.append(candidate)
+                # Track event concentration
+                event_trade_count[event_key] = event_trade_count.get(event_key, 0) + 1
+
+                # Discord alert + SSE event for trade execution
+                try:
+                    side = candidate.get("side", "yes").upper()
+                    asyncio.create_task(send_discord_notification(
+                        title=f"🔔 Trade: {side} {count}x {ticker} @ {price_cents}c",
+                        message=(
+                            f"**Strategy:** {strategy}\n"
+                            f"**Edge:** {edge:.1%} | **Confidence:** {confidence:.1%}\n"
+                            f"**Cost:** ${actual_cost:.2f}\n"
+                            f"**Title:** {candidate.get('title', '')[:80]}\n"
+                            f"{thesis[:120] if thesis else ''}"
+                        ),
+                        color=0x2ecc71,  # green
+                    ))
+                except Exception:
+                    pass
+                try:
+                    get_event_bus().publish("trade", {
+                        "ticker": ticker, "side": candidate.get("side", "yes"),
+                        "count": count, "price_cents": price_cents,
+                        "strategy": strategy, "edge": round(edge, 4),
+                        "confidence": round(confidence, 4), "cost": actual_cost,
+                        "title": candidate.get("title", "")[:80],
+                    })
+                except Exception:
+                    pass
 
         self.engine.log_event(
             "info",
@@ -612,24 +734,22 @@ class KalshiAgent:
                     target_date_str = today_str
                 by_city_date.setdefault((city_code, target_date_str), []).append(m)
 
-            # Pre-fetch NWS real-time observations for all cities with same-day markets.
-            # These are ACTUAL recorded temps, not forecasts — the core of same-day arbitrage.
-            obs_by_city: dict[str, dict[str, Any]] = {}
-            same_day_cities = {city for city, dt in by_city_date if dt == today_str}
-            for city_key in same_day_cities:
+            # Pre-fetch forecasts for all city/date combos
+            forecasts_by_city_date: dict[tuple[str, str], dict[str, Any]] = {}
+            for city_key, target_date_str in by_city_date.keys():
                 try:
-                    obs = await self.weather.get_current_observations(city_key)
-                    if obs:
-                        obs_by_city[city_key] = obs
+                    target_dt = _datetime.fromisoformat(target_date_str).date()
+                    # Hit the 8-API consensus model
+                    fcasts = await self.weather.get_all_forecasts(city_key, target_dt)
+                    if fcasts and "sources" in fcasts and fcasts["sources"]:
+                        forecasts_by_city_date[(city_key, target_date_str)] = fcasts
                         self.engine.log_event(
                             "info",
-                            f"{city_key} observations: high={obs['observed_high_f']}°F "
-                            f"low={obs['observed_low_f']}°F current={obs['current_temp_f']}°F "
-                            f"({obs['obs_count']} readings)",
+                            f"Fetched {len(fcasts['sources'])} forecast sources for {city_key} on {target_date_str}",
                             strategy="weather",
                         )
                 except Exception as e:
-                    logger.debug("Observation fetch failed", city=city_key, error=str(e))
+                    logger.debug("Forecast fetch failed", city=city_key, date=target_date_str, error=str(e))
 
             for i, ((city_key, target_date_str), city_markets) in enumerate(by_city_date.items()):
                 if city_key not in CITY_CONFIGS:
@@ -642,57 +762,43 @@ class KalshiAgent:
 
                 is_same_day = (target_date_str == today_str)
                 obs = obs_by_city.get(city_key) if is_same_day else None
+                forecasts = forecasts_by_city_date.get((city_key, target_date_str))
 
-                # ── Same-day markets: observations-first logic ───────────
-                # If we have real observed data, evaluate markets directly from
-                # actuals — no forecast needed. Skip forecast fetch entirely.
+                # ── Path A: Near-certainty observation path (Same Day) ──
+                # If we have real observed data, evaluate markets from actuals first
                 if is_same_day and obs:
                     for market in city_markets:
+                        # Will return None if the outcome is not yet deterministic
                         candidate = await self._evaluate_weather_market_observed(market, obs)
                         if candidate:
                             results.append(candidate)
-                    continue
-
-                # ── Same-day markets without observations: skip entirely ──
-                # Never use probabilistic forecast logic for today's markets.
-                # A 30% forecast probability still loses 70% of the time.
-                if is_same_day and not obs:
+                            continue  # If we got an observed signal, skip forecast evaluation
+                        
+                        # If observation didn't yield a near-certain trade, fall back to forecast
+                        if forecasts:
+                            # Build all_city_forecasts for spatial correlation
+                            all_city_fcasts = {k[0]: v for k, v in forecasts_by_city_date.items() if k[1] == target_date_str}
+                            candidate_forecast = await self._evaluate_weather_market(market, forecasts, all_city_forecasts=all_city_fcasts)
+                            if candidate_forecast:
+                                results.append(candidate_forecast)
+                
+                # ── Path B: Forecast consensus path (Future or Same Day early) ──
+                elif forecasts:
+                    # Build all_city_forecasts for spatial correlation
+                    all_city_fcasts = {k[0]: v for k, v in forecasts_by_city_date.items() if k[1] == target_date_str}
+                    for market in city_markets:
+                        candidate = await self._evaluate_weather_market(market, forecasts, all_city_forecasts=all_city_fcasts)
+                        if candidate:
+                            results.append(candidate)
+                
+                # ── Path C: No data ──
+                else:
                     self.engine.log_event(
                         "info",
-                        f"{city_key}: same-day market but no observations available — skipping {len(city_markets)} markets",
+                        f"{city_key}: no observations or forecasts available for {target_date_str} — skipping",
                         strategy="weather",
                     )
                     continue
-
-                # ── Future-day markets: use multi-source forecast consensus ─
-                # Rate-limit: pause between city/date combos to avoid 429s
-                if i > 0:
-                    await asyncio.sleep(2.0)
-
-                target_date = _date.fromisoformat(target_date_str)
-
-                forecasts = await self.weather.get_all_forecasts(city_key, target_date=target_date)
-                source_count = len(forecasts.get("sources", {}))
-
-                if source_count < 2:
-                    self.engine.log_event(
-                        "warning",
-                        f"Only {source_count} sources for {city_key} {target_date_str}, skipping",
-                        strategy="weather",
-                    )
-                    continue
-
-                self.engine.log_event(
-                    "info",
-                    f"{city_key}: {len(city_markets)} markets, {source_count} forecast sources (future-day)",
-                    strategy="weather",
-                )
-
-                # Evaluate each market (collect candidates, don't trade yet)
-                for market in city_markets:
-                    candidate = await self._evaluate_weather_market(market, forecasts)
-                    if candidate:
-                        results.append(candidate)
 
         except Exception as e:
             self.engine.log_event("error", f"Weather cycle failed: {e}", strategy="weather")
@@ -715,6 +821,7 @@ class KalshiAgent:
         self,
         market: dict[str, Any],
         forecasts: dict[str, Any],
+        all_city_forecasts: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Evaluate a single weather market against consensus forecast."""
         yes_ask = market.get("yes_ask", 0)
@@ -768,17 +875,56 @@ class KalshiAgent:
         if min(yes_maker_price, no_maker_price) < 10:
             return None
 
-        # Safety filter: skip markets closing within 2 hours
+        # Time-aware trading rules
         close_time = market.get("close_time", "")
-        if close_time:
+        city_code = market.get("weather", {}).get("city_code", "")
+        if close_time and city_code:
             try:
-                close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-                now = datetime.now(UTC)
+                from datetime import datetime as _dt
+                import pytz
+                
+                close_dt = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
+                now = _dt.now(UTC)
                 hours_until_close = (close_dt - now).total_seconds() / 3600
+                
+                # Skip markets closing within 2 hours
                 if hours_until_close < 2:
                     return None
-            except (ValueError, TypeError):
-                pass
+                
+                # Get city timezone for local time
+                city_config = CITY_CONFIGS.get(city_code, {})
+                tz_name = city_config.get("timezone", "America/New_York")
+                city_tz = pytz.timezone(tz_name)
+                local_time = now.astimezone(city_tz)
+                local_hour = local_time.hour
+                
+                # Early day (<12pm local): Skip expensive contracts (>90¢)
+                # Money is better spent elsewhere when outcome is uncertain
+                if local_hour < 12:
+                    if yes_maker_price > 90 or no_maker_price > 90:
+                        return None
+                
+                # Late day (>3pm local): Only take locked outcomes
+                # If temp already hit/locked, take 95¢+ bets (guaranteed 5% return)
+                # Otherwise skip - too late for probabilistic bets
+                elif local_hour >= 15:
+                    # This will be handled by observed data path
+                    # For forecast-based evaluation, skip late-day unless very cheap
+                    if min(yes_maker_price, no_maker_price) > 50:
+                        return None
+
+                # LOW TEMP GUARD: During daytime (10 AM - 6 PM), the overnight
+                # minimum hasn't happened yet. Forecast-based low temp bets are
+                # unreliable — tonight could drop much further than forecasted.
+                # Skip low temp forecast bets entirely during the day.
+                market_type_check = weather_info.get("market_type", "high_temp")
+                if market_type_check == "low_temp" and 10 <= local_hour <= 18:
+                    return None  # Let observed-data path handle same-day low temp
+                        
+            except (ValueError, TypeError, Exception):
+                # If time parsing fails, apply conservative 2hr close filter
+                if hours_until_close < 2:
+                    return None
 
         # Safety filter: skip very low volume markets (< 50 contracts traded)
         if market.get("volume", 0) < 50:
@@ -793,6 +939,7 @@ class KalshiAgent:
             floor_strike=floor_strike,
             cap_strike=cap_strike,
             market_type=market_type,
+            all_city_forecasts=all_city_forecasts,
         )
         if "error" in consensus:
             return None
@@ -811,6 +958,45 @@ class KalshiAgent:
         if not signal:
             return None
 
+        # ── Order Book Imbalance / Smart Money Flow ──
+        # Fetch the orderbook to check if "smart money" is against us.
+        # If we are buying YES, we want to see if there's massive resistance (huge asks) 
+        # or if the flow is with us (huge bids pushing price up).
+        try:
+            ob = await self.kalshi.get_orderbook(market["ticker"])
+            if ob and "orderbook" in ob:
+                book = ob["orderbook"]
+                side_key = "yes" if signal["side"] == "yes" else "no"
+                
+                # Sum resting liquidity within 5 cents of the current price
+                bids = book.get(side_key, {}).get("bids", [])
+                asks = book.get(side_key, {}).get("asks", [])
+                
+                maker_price = yes_maker_price if signal["side"] == "yes" else no_maker_price
+                
+                bid_vol = sum(b[1] for b in bids if maker_price - b[0] <= 5)
+                ask_vol = sum(a[1] for a in asks if a[0] - maker_price <= 5)
+                
+                # If there is huge resistance (asks > 3x bids) and we are buying,
+                # we might be stepping in front of a freight train. 
+                # Require a higher edge.
+                if ask_vol > bid_vol * 3 and ask_vol > 500:
+                    self.engine.log_event("info", f"High resistance for {market['ticker']} {signal['side'].upper()}: {ask_vol} asks vs {bid_vol} bids", strategy="weather")
+                    # Reduce confidence to potentially skip
+                    signal["confidence"] -= 0.2
+                    if signal["edge"] < wx_thresh["min_edge"] + 0.05:
+                        return None # Need +5% extra edge to fight the flow
+                        
+                # Conversely, if flow is heavily with us, we can boost confidence
+                elif bid_vol > ask_vol * 3 and bid_vol > 500:
+                    signal["confidence"] = min(1.0, signal["confidence"] + 0.1)
+        except Exception as e:
+            # Ignore orderbook errors, proceed with original signal
+            pass
+
+        if signal["confidence"] < wx_thresh["min_confidence"]:
+            return None
+
         # Record signal (with enriched city title)
         label = consensus.get("label", "")
         enriched_title = self._enrich_weather_title(market["ticker"], market["title"])
@@ -823,10 +1009,16 @@ class KalshiAgent:
             market_title=enriched_title,
             confidence=signal["confidence"],
             signal_source="weather_consensus",
-            details=f"consensus={consensus.get('mean_low_f') if market_type == 'low_temp' else consensus.get('mean_high_f')}°F {label} sources={signal['source_count']}",
+            details=json.dumps({
+                "consensus_temp": consensus.get('mean_low_f') if market_type == 'low_temp' else consensus.get('mean_high_f'),
+                "label": label,
+                "source_count": signal['source_count'],
+                "market_type": market_type,
+                "source_forecasts": consensus.get("sources", []),
+            }),
         )
 
-        # Calculate position size
+        # Calculate position size — FORECAST gets reduced sizing vs observed arbitrage
         price_cents = yes_maker_price if signal["side"] == "yes" else no_maker_price
         count = self.engine.calculate_position_size(
             strategy="weather",
@@ -834,6 +1026,7 @@ class KalshiAgent:
             price_cents=price_cents,
             confidence=signal["confidence"],
             ticker=market["ticker"],
+            signal_source="weather_consensus",
         )
 
         if count <= 0:
@@ -847,6 +1040,7 @@ class KalshiAgent:
             "count": count,
             "price_cents": price_cents,
             "signal_id": signal_id,
+            "signal_source": "weather_consensus",
         }
 
     async def _evaluate_weather_market_observed(
@@ -960,12 +1154,12 @@ class KalshiAgent:
                     # Already exceeded — YES is near-certain
                     our_prob_yes = 0.97
                     certainty_label = f"obs_high={observed_high}°F > threshold={floor_strike}°F ✓CONFIRMED"
-                elif local_hour >= HIGH_LIKELY_SET_HOUR and observed_high < floor_strike - 1.0:
+                elif local_hour >= HIGH_LIKELY_SET_HOUR and observed_high < floor_strike - 3.0:
                     # Day is done, high never reached threshold — NO is near-certain
                     our_prob_yes = 0.03
                     certainty_label = f"obs_high={observed_high}°F < threshold={floor_strike}°F day_done ✓CONFIRMED"
-                elif local_hour >= HIGH_POSSIBLY_SET_HOUR and observed_high < floor_strike - 3.0:
-                    # Afternoon, high is 3°F below threshold — very unlikely to reach it
+                elif local_hour >= HIGH_POSSIBLY_SET_HOUR and observed_high < floor_strike - 6.0:
+                    # Afternoon, high is 6°F below threshold — very unlikely to reach it
                     our_prob_yes = 0.08
                     certainty_label = f"obs_high={observed_high}°F << threshold={floor_strike}°F afternoon"
 
@@ -975,30 +1169,72 @@ class KalshiAgent:
                     # Already exceeded cap — NO is near-certain (YES = false)
                     our_prob_yes = 0.03
                     certainty_label = f"obs_high={observed_high}°F >= cap={cap_strike}°F ✓CONFIRMED NO"
-                elif local_hour >= HIGH_LIKELY_SET_HOUR and observed_high < cap_strike - 1.0:
+                elif local_hour >= HIGH_LIKELY_SET_HOUR and observed_high < cap_strike - 3.0:
                     # Day done, high stayed below cap — YES is near-certain
                     our_prob_yes = 0.97
                     certainty_label = f"obs_high={observed_high}°F < cap={cap_strike}°F day_done ✓CONFIRMED YES"
-                elif local_hour >= HIGH_POSSIBLY_SET_HOUR and observed_high < cap_strike - 4.0:
+                elif local_hour >= HIGH_POSSIBLY_SET_HOUR and observed_high < cap_strike - 6.0:
                     # Afternoon, high is well below cap — likely YES
                     our_prob_yes = 0.90
                     certainty_label = f"obs_high={observed_high}°F << cap={cap_strike}°F afternoon"
 
         elif market_type in ("low_temp",) and observed_low is not None:
+            # CRITICAL: Low temperature = overnight minimum (typically 3-6 AM).
+            # During the daytime (10 AM+), temps are RISING, so the current observed_low
+            # is just the minimum SO FAR. But the low hasn't been finalized — tonight
+            # the temp could drop much further. We can NEVER confirm "low > X" during
+            # the daytime because the overnight drop hasn't happened yet.
+            #
+            # What we CAN confirm during the day:
+            # - "low < X" is YES if observed_low already dropped below X (it happened)
+            # - "low > X" is NO if observed_low already dropped below X (it already went lower)
+            #
+            # What we can ONLY confirm after overnight:
+            # - "low > X" is YES (the low never went below X) — only after ~8 AM next day
+            # - "low < X" is NO (the low stayed above X all night) — only after ~8 AM next day
+
+            LOW_CONFIRMED_HOUR = 8  # After 8 AM, overnight low is set
+            LOW_MARGIN = 8.0  # Need 8°F buffer for daytime low temp estimates
+
             if strike_type == "greater" and floor_strike is not None:
-                if observed_low > floor_strike:
-                    our_prob_yes = 0.97
-                    certainty_label = f"obs_low={observed_low}°F > threshold={floor_strike}°F ✓CONFIRMED"
-                elif local_hour >= 10 and observed_low < floor_strike - 2.0:
-                    our_prob_yes = 0.05
-                    certainty_label = f"obs_low={observed_low}°F < threshold={floor_strike}°F morning_done"
-            elif strike_type == "less" and cap_strike is not None:
-                if observed_low >= cap_strike:
+                # "Will the low be > X°F?"
+                if observed_low < floor_strike:
+                    # Low already dropped below threshold — NO is confirmed
                     our_prob_yes = 0.03
-                    certainty_label = f"obs_low={observed_low}°F >= cap={cap_strike}°F ✓CONFIRMED NO"
-                elif local_hour >= 10 and observed_low < cap_strike - 2.0:
-                    our_prob_yes = 0.95
-                    certainty_label = f"obs_low={observed_low}°F < cap={cap_strike}°F morning_done"
+                    certainty_label = f"obs_low={observed_low}°F < threshold={floor_strike}°F ✓CONFIRMED NO (already breached)"
+                elif local_hour >= LOW_CONFIRMED_HOUR and local_hour <= 10:
+                    # Early morning: overnight low is likely set (warmup has begun)
+                    if observed_low > floor_strike + LOW_MARGIN:
+                        our_prob_yes = 0.90
+                        certainty_label = f"obs_low={observed_low}°F > threshold={floor_strike}°F + {LOW_MARGIN}°F margin, post-overnight"
+                    elif observed_low > floor_strike + 3.0:
+                        our_prob_yes = 0.75
+                        certainty_label = f"obs_low={observed_low}°F > threshold={floor_strike}°F + 3°F margin, post-overnight"
+                # During daytime (after 10 AM): DO NOT confirm YES — tonight could still drop
+
+            elif strike_type == "less" and cap_strike is not None:
+                # "Will the low be < X°F?"
+                if observed_low < cap_strike:
+                    # Low already dropped below cap — YES is confirmed
+                    our_prob_yes = 0.93
+                    certainty_label = f"obs_low={observed_low}°F < cap={cap_strike}°F ✓CONFIRMED YES (already breached)"
+                elif local_hour >= LOW_CONFIRMED_HOUR and local_hour <= 10:
+                    # Early morning: overnight low is set, and it stayed above cap
+                    if observed_low >= cap_strike + LOW_MARGIN:
+                        our_prob_yes = 0.05
+                        certainty_label = f"obs_low={observed_low}°F >= cap={cap_strike}°F + {LOW_MARGIN}°F margin, post-overnight ✓CONFIRMED NO"
+                # During daytime: DO NOT confirm NO — tonight could still drop below cap
+
+            elif strike_type == "between" and floor_strike is not None and cap_strike is not None:
+                # "Will low be between X and Y°F?"
+                if observed_low < floor_strike:
+                    # Already dropped below the floor — NO (below range)
+                    our_prob_yes = 0.03
+                    certainty_label = f"obs_low={observed_low}°F < floor={floor_strike}°F ✓BELOW RANGE"
+                elif observed_low > cap_strike + LOW_MARGIN and local_hour >= LOW_CONFIRMED_HOUR and local_hour <= 10:
+                    # Post-overnight, low stayed well above cap — NO (above range)
+                    our_prob_yes = 0.05
+                    certainty_label = f"obs_low={observed_low}°F > cap={cap_strike}°F + margin, post-overnight ✓ABOVE RANGE"
 
         if our_prob_yes is None:
             # Outcome not yet deterministic — skip, don't guess
@@ -1062,6 +1298,7 @@ class KalshiAgent:
             price_cents=price_cents,
             confidence=confidence,
             ticker=ticker,
+            signal_source="weather_observed_arbitrage",
         )
 
         if count <= 0:
@@ -2385,15 +2622,6 @@ class KalshiAgent:
         else:
             return None
 
-        # Calculate edge
-        # Safety filter: Max Spread Limit = 5¢
-        yes_bid = market.get("yes_bid", 0)
-        no_bid = market.get("no_bid", 0)
-        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
-            return None
-        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
-            return None
-
         # Calculate Maker Prices (Pennying the bid)
         yes_maker_price = min(yes_bid + 1, yes_ask) if yes_bid > 0 else yes_ask
         no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
@@ -3353,52 +3581,105 @@ class KalshiAgent:
                                         "current_edge": current_edge, "pnl": unrealized_pnl})
                         continue
 
-                    # ── DECISION 2: AUTO-EXIT — captured most of the upside, free capital ──
-                    # Exit when mark >= 90c AND we've captured >80% of max profit.
-                    # This lets us buy at 90c+ when edge exists, but exits positions
-                    # that have already run up (e.g., bought at 50c, now at 95c).
-                    max_profit_2 = pos.get("max_profit", 0) or 0
-                    if mark_price >= 90 and max_profit_2 > 0 and unrealized_pnl > 0:
-                        profit_captured = unrealized_pnl / max_profit_2
-                        if profit_captured > 0.80:
-                            await self.engine.exit_trade(
-                                strategy=pos["strategy"],
-                                ticker=ticker,
-                                side=pos["side"],
-                                count=pos["contracts"],
-                                price_cents=mark_price,
-                                reason=f"auto_exit_near_max mark={mark_price}c entry={pos['avg_entry_cents']}c captured={profit_captured:.0%}",
-                            )
-                            self.engine.log_event(
-                                "paper_trade",
-                                f"AUTO-EXIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — {profit_captured:.0%} of max captured, P&L: ${unrealized_pnl:+.2f}",
-                                strategy="monitor",
-                            )
-                            actions.append({"action": "exit", "reason": "near_max_value", "ticker": ticker,
-                                            "mark_price": mark_price, "pnl": unrealized_pnl})
-                            continue
+                    # ── DECISION 1b: WEATHER OBS EARLY EXIT ──
+                    # For same-day weather positions, if NWS observations strongly contradict
+                    # our position late in the day, exit before settlement locks in the loss.
+                    if pos.get("strategy") == "weather" and mark_price > 0:
+                        try:
+                            wx_ticker = ticker
+                            wx_m = re.match(r'KX(HIGH|LOW)T?([A-Z]{2,4})-', wx_ticker)
+                            if wx_m:
+                                wx_type = wx_m.group(1)
+                                wx_city = wx_m.group(2)
+                                obs = await self.weather.nws.get_current_observations(wx_city)
+                                if obs and obs.get("obs_count", 0) >= 6:
+                                    # Parse strike from ticker (e.g., -T45 or -B36.5)
+                                    strike_match = re.search(r'-[TB](\d+\.?\d*)', wx_ticker)
+                                    if strike_match:
+                                        strike = float(strike_match.group(1))
+                                        obs_key = "observed_high_f" if wx_type == "HIGH" else "observed_low_f"
+                                        obs_temp = obs.get(obs_key)
+                                        if obs_temp is not None:
+                                            # If we bet YES on >strike but observed is well below
+                                            # or we bet NO on >strike but observed is well above
+                                            gap = obs_temp - strike
+                                            should_exit = False
+                                            if pos["side"] == "yes" and gap < -3.0:
+                                                should_exit = True
+                                            elif pos["side"] == "no" and gap > 3.0:
+                                                should_exit = True
+                                            if should_exit:
+                                                await self.engine.exit_trade(
+                                                    strategy=pos["strategy"],
+                                                    ticker=ticker,
+                                                    side=pos["side"],
+                                                    count=pos["contracts"],
+                                                    price_cents=mark_price,
+                                                    reason=f"weather_obs_exit obs={obs_temp}°F strike={strike}°F gap={gap:+.1f}",
+                                                )
+                                                self.engine.log_event(
+                                                    "paper_trade",
+                                                    f"WEATHER OBS EXIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — obs={obs_temp}°F vs strike={strike}°F",
+                                                    strategy="monitor",
+                                                )
+                                                actions.append({"action": "exit", "reason": "weather_obs_contradiction",
+                                                                "ticker": ticker, "pnl": unrealized_pnl})
+                                                continue
+                        except Exception as wx_err:
+                            logger.debug("Weather obs check failed", ticker=ticker, error=str(wx_err))
 
-                    # ── DECISION 3: TAKE PROFIT — up significantly ──
+                    # ── DECISION 2 & 3: OPPORTUNITY COST & DYNAMIC TAKE-PROFIT ──
+                    # Instead of an automatic take-profit when hitting 90c or 50% max profit,
+                    # we do an A/B opportunity cost analysis. If the market is moving in our favor,
+                    # we should only sell if the capital is better deployed elsewhere.
                     max_profit = pos.get("max_profit", 0) or 0
-                    if max_profit > 0 and unrealized_pnl > 0:
+                    
+                    if max_profit > 0 and unrealized_pnl > 0 and mark_price > 0:
                         profit_pct = unrealized_pnl / max_profit
-                        # Take profit if we've captured >50% of max profit
-                        if profit_pct > 0.50 and mark_price > 0:
+                        
+                        # Calculate Expected Value (EV) of holding the current contract for the final remaining cents
+                        # Use current market-implied probability (mark_price) instead of stale entry-time prob
+                        prob_of_winning = mark_price / 100.0
+                        remaining_upside_cents = 100 - mark_price
+                        ev_of_holding = (prob_of_winning * remaining_upside_cents) - ((1 - prob_of_winning) * mark_price)
+                        
+                        # If the EV of holding the remaining position is negative or very low, AND we have 
+                        # captured a significant chunk of profit, it makes sense to exit.
+                        # Also check if we are constrained on capital.
+                        try:
+                            available_capital = self.engine.get_effective_bankroll()
+                        except Exception:
+                            available_capital = 100.0 # fallback
+                            
+                        should_take_profit = False
+                        reason = ""
+                        
+                        if mark_price >= 95:
+                            should_take_profit = True
+                            reason = "locked_in_guaranteed_profit"
+                        elif ev_of_holding < 0 and profit_pct > 0.50:
+                            should_take_profit = True
+                            reason = "ev_holding_negative"
+                        elif available_capital < 50.0 and profit_pct > 0.80:
+                            should_take_profit = True
+                            reason = "rotate_capital_opportunity_cost"
+                            
+                        if should_take_profit:
                             await self.engine.exit_trade(
                                 strategy=pos["strategy"],
                                 ticker=ticker,
                                 side=pos["side"],
                                 count=pos["contracts"],
                                 price_cents=mark_price,
-                                reason=f"take_profit pnl=${unrealized_pnl:+.2f} ({profit_pct:.0%} of max)",
+                                reason=f"dynamic_take_profit ({reason}) pnl=${unrealized_pnl:+.2f}",
                             )
                             self.engine.log_event(
                                 "paper_trade",
-                                f"TAKE PROFIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — P&L: ${unrealized_pnl:+.2f} ({profit_pct:.0%} of max ${max_profit:.2f})",
+                                f"DYNAMIC TAKE-PROFIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — {reason}, P&L: ${unrealized_pnl:+.2f}",
                                 strategy="monitor",
                             )
-                            actions.append({"action": "take_profit", "ticker": ticker,
-                                            "pnl": unrealized_pnl, "profit_pct": profit_pct})
+                            actions.append({"action": "dynamic_take_profit", "ticker": ticker,
+                                            "reason": reason, "pnl": unrealized_pnl})
                             continue
 
                     # ── DECISION 4: ADD TO POSITION — edge has increased ──
@@ -3421,6 +3702,7 @@ class KalshiAgent:
                                 price_cents=add_price,
                                 confidence=0.8,  # Slightly conservative on adds
                                 ticker=ticker,
+                                signal_source="weather_consensus" if pos["strategy"] == "weather" else "",
                             )
                             if add_count > 0:
                                 trade = await self.engine.execute_trade(
@@ -3508,7 +3790,24 @@ class KalshiAgent:
                 if not result:
                     continue
 
+                # Record closing price for CLV before settlement
+                last_price = market.get("last_price", 0) or 0
+                yes_bid = market.get("yes_bid", 0) or 0
+                yes_ask = market.get("yes_ask", 0) or 0
+                closing_yes = last_price or yes_bid or yes_ask
+
                 for trade in trades:
+                    # CLV: record the market's closing price for this trade
+                    try:
+                        if trade.get("side") == "yes":
+                            closing_price = closing_yes
+                        else:
+                            closing_price = 100 - closing_yes if closing_yes > 0 else 0
+                        if closing_price > 0:
+                            self.engine.record_closing_price(trade["id"], int(closing_price))
+                    except Exception:
+                        pass
+
                     settle_result = self.engine.settle_trade(trade["id"], result)
                     if "error" not in settle_result:
                         settled_count += 1
@@ -3520,6 +3819,33 @@ class KalshiAgent:
                             asyncio.create_task(self.trade_analyzer.analyze_trade(trade_for_review, market_result=result))
                         except Exception:
                             pass
+                        # Discord alert + SSE event for settlement
+                        won = pnl > 0
+                        try:
+                            asyncio.create_task(send_discord_notification(
+                                title=f"{'✅ WIN' if won else '❌ LOSS'}: {trade.get('ticker', '')}",
+                                message=(
+                                    f"**Strategy:** {trade.get('strategy', '')}\n"
+                                    f"**Side:** {trade.get('side', '').upper()} | **Result:** {result.upper()}\n"
+                                    f"**P&L:** ${pnl:+.2f}\n"
+                                    f"**Title:** {market.get('title', '')[:80]}"
+                                ),
+                                color=0x2ecc71 if won else 0xe74c3c,
+                            ))
+                        except Exception:
+                            pass
+                        try:
+                            get_event_bus().publish("settlement", {
+                                "ticker": trade.get("ticker", ""),
+                                "strategy": trade.get("strategy", ""),
+                                "side": trade.get("side", ""),
+                                "result": result, "won": won,
+                                "pnl": round(pnl, 2),
+                                "title": market.get("title", "")[:80],
+                            })
+                        except Exception:
+                            pass
+
                         # Record signal component outcomes for quality scoring
                         try:
                             self.signal_scorer.record_signal_outcome(
@@ -3529,6 +3855,13 @@ class KalshiAgent:
                             )
                         except Exception:
                             pass
+
+                        # Weather API accuracy feedback — populate dynamic weights
+                        if trade.get("strategy") == "weather":
+                            try:
+                                self._record_weather_api_accuracy(trade, market)
+                            except Exception:
+                                pass
 
             except Exception as e:
                 logger.warning("Settlement check failed for ticker", ticker=ticker, error=str(e))
@@ -3554,6 +3887,77 @@ class KalshiAgent:
                 logger.debug("Adaptive threshold update failed", error=str(e))
 
         return settled_count
+
+    def _record_weather_api_accuracy(self, trade: dict[str, Any], market: dict[str, Any]) -> None:
+        """After a weather trade settles, record per-source forecast accuracy."""
+        ticker = trade.get("ticker", "")
+        # Parse city code and market type from ticker (e.g., KXHIGHTNYC-26FEB19-T45)
+        m = re.match(r'KX(HIGH|LOW)T?([A-Z]{2,4})-', ticker)
+        if not m:
+            return
+        temp_type = m.group(1)  # HIGH or LOW
+        city_code = m.group(2)
+        market_type = "low_temp" if temp_type == "LOW" else "high_temp"
+
+        # Try to get the actual temperature from Kalshi's settlement data
+        # Kalshi weather markets have a "floor_strike" for the settled bracket
+        # For greater/less markets, we can infer actual from result + strike
+        # Best effort: use the market's strike value as a reference point
+        # The floor_strike of the winning YES bracket ~ actual temp
+        floor_strike = market.get("floor_strike")
+        cap_strike = market.get("cap_strike")
+        actual_temp = None
+        if floor_strike is not None and cap_strike is not None:
+            actual_temp = (floor_strike + cap_strike) / 2.0
+        elif floor_strike is not None:
+            actual_temp = floor_strike
+        elif cap_strike is not None:
+            actual_temp = cap_strike
+
+        if actual_temp is None:
+            return
+
+        # Look up original per-source forecasts from signal details
+        details_str = self.engine.get_signal_details(ticker, strategy="weather")
+        if not details_str:
+            return
+        try:
+            details = json.loads(details_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        source_forecasts = details.get("source_forecasts", [])
+        if not source_forecasts:
+            return
+
+        # Extract target date from ticker (e.g., KXHIGHTNYC-26FEB19 → 2026-02-19)
+        date_match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})', ticker)
+        target_date = ""
+        if date_match:
+            try:
+                day = date_match.group(1)
+                mon = date_match.group(2)
+                yr = date_match.group(3)
+                from datetime import datetime as dt
+                parsed = dt.strptime(f"{day}{mon}{yr}", "%d%b%y")
+                target_date = parsed.strftime("%Y-%m-%d")
+            except ValueError:
+                target_date = ""
+
+        self.weather.record_forecast_accuracy(
+            city=city_code,
+            target_date=target_date,
+            market_type=market_type,
+            actual_temp=actual_temp,
+            source_forecasts=source_forecasts,
+        )
+        logger.info(
+            "Recorded weather API accuracy",
+            city=city_code,
+            market_type=market_type,
+            actual_temp=actual_temp,
+            sources=len(source_forecasts),
+        )
 
     async def get_positions_with_market_data(self) -> list[dict[str, Any]]:
         """
@@ -3692,7 +4096,7 @@ class KalshiAgent:
         self._running = False
         self.engine.log_event("info", "Agent stopping")
 
-        for task in [self._weather_task, self._main_task, self._crypto_task, self._monitor_task]:
+        for task in [self._weather_task, self._main_task, self._crypto_task, self._monitor_task, self._health_task]:
             if task:
                 task.cancel()
 
@@ -3751,6 +4155,132 @@ class KalshiAgent:
         self._crypto_task = asyncio.create_task(self._crypto_loop(sleep_first=True))
         self._main_task = asyncio.create_task(self._main_strategy_loop(sleep_first=True))
 
+        # Start health watchdog
+        self._health_task = asyncio.create_task(self._health_watchdog())
+
+        # Notify Discord that agent has started
+        try:
+            asyncio.create_task(send_discord_notification(
+                title="🟢 Agent Started",
+                message=f"Paper mode: {self.engine.paper_mode}\nBankroll: ${self.engine.bankroll:.2f}",
+                color=0x2ecc71,
+            ))
+        except Exception:
+            pass
+
+    async def _health_watchdog(self) -> None:
+        """Health monitoring loop — runs every 5 minutes.
+        - Checks if strategy loops are alive, restarts crashed ones
+        - Pings Kalshi API to verify connectivity
+        - Alerts Discord on connectivity loss or task recovery
+        - Updates engine health snapshot
+        """
+        await asyncio.sleep(3 * 60)  # initial delay — let loops stabilize
+        while self._running:
+            try:
+                recovered = []
+
+                # ── Task Health: restart crashed loops ──
+                task_map = {
+                    "weather": (self._weather_task, self._weather_loop),
+                    "crypto": (self._crypto_task, self._crypto_loop),
+                    "main": (self._main_task, self._main_strategy_loop),
+                    "monitor": (self._monitor_task, self._monitor_loop),
+                    "arbitrage": (getattr(self, "_arbitrage_task", None), self._arbitrage_loop),
+                }
+                for name, (task, loop_fn) in task_map.items():
+                    if task is not None and task.done():
+                        exc = task.exception() if not task.cancelled() else None
+                        self.engine.log_event(
+                            "warning",
+                            f"Health watchdog: {name} loop died"
+                            + (f" ({exc})" if exc else " (cancelled)"),
+                            strategy="health",
+                        )
+                        # Restart the loop
+                        new_task = asyncio.create_task(loop_fn(sleep_first=False))
+                        if name == "weather":
+                            self._weather_task = new_task
+                        elif name == "crypto":
+                            self._crypto_task = new_task
+                        elif name == "main":
+                            self._main_task = new_task
+                        elif name == "monitor":
+                            self._monitor_task = new_task
+                        elif name == "arbitrage":
+                            self._arbitrage_task = new_task
+                        recovered.append(name)
+
+                if recovered:
+                    msg = f"Auto-recovered loops: {', '.join(recovered)}"
+                    self.engine.log_event("warning", msg, strategy="health")
+                    try:
+                        asyncio.create_task(send_discord_notification(
+                            title="🔄 Agent Auto-Recovery",
+                            message=msg,
+                            color=0xf39c12,
+                        ))
+                    except Exception:
+                        pass
+
+                # ── API Health Ping ──
+                api_ok = False
+                try:
+                    resp = await self.kalshi._get("/exchange/status")
+                    if resp:
+                        api_ok = True
+                except Exception:
+                    pass
+
+                if not api_ok:
+                    self._consecutive_api_failures += 1
+                    self.engine.log_event(
+                        "warning",
+                        f"Kalshi API unreachable (consecutive failures: {self._consecutive_api_failures})",
+                        strategy="health",
+                    )
+                    if self._last_api_check_ok:
+                        # Just went down — alert
+                        try:
+                            asyncio.create_task(send_discord_notification(
+                                title="⚠️ Kalshi API Unreachable",
+                                message=f"The Kalshi API is not responding. Trading paused until connectivity restored.",
+                                color=0xe74c3c,
+                            ))
+                        except Exception:
+                            pass
+                    self._last_api_check_ok = False
+                else:
+                    if not self._last_api_check_ok:
+                        # Just recovered — notify
+                        self.engine.log_event("info", "Kalshi API connectivity restored", strategy="health")
+                        try:
+                            asyncio.create_task(send_discord_notification(
+                                title="✅ Kalshi API Restored",
+                                message=f"Connectivity restored after {self._consecutive_api_failures} failed checks.",
+                                color=0x2ecc71,
+                            ))
+                        except Exception:
+                            pass
+                    self._consecutive_api_failures = 0
+                    self._last_api_check_ok = True
+
+                # ── Update engine health snapshot ──
+                self.engine._runtime_api_healthy = api_ok
+                try:
+                    ws_status = self.ws.get_status()
+                    self.engine._runtime_ws_healthy = ws_status.get("connected", False)
+                except Exception:
+                    self.engine._runtime_ws_healthy = False
+                self.engine._last_monitor_heartbeat = datetime.now(UTC).isoformat()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Health watchdog error", error=str(e))
+
+            await asyncio.sleep(5 * 60)  # check every 5 minutes
+
     async def _arbitrage_loop(self, sleep_first: bool = False) -> None:
         """Arbitrage strategy loop — runs every 30 seconds to catch fleeting opportunities."""
         if sleep_first:
@@ -3770,8 +4300,43 @@ class KalshiAgent:
 
             await asyncio.sleep(30)
 
+    def _get_weather_loop_interval(self) -> int:
+        """Adaptive weather loop interval based on nearest same-day market settlement.
+        - Same-day markets exist with <3 hours to close → 15 min
+        - Same-day markets exist with 3-6 hours → 30 min
+        - Next-day markets only → 60 min
+        - 2+ day markets only → 120 min
+        """
+        try:
+            from zoneinfo import ZoneInfo
+            now_utc = datetime.now(UTC)
+            # Check open weather positions for nearest settlement
+            positions = self.engine.get_open_positions()
+            weather_positions = [p for p in positions if p.get("strategy") == "weather"]
+            if weather_positions:
+                # If we have open weather positions, run fast
+                return 15 * 60  # 15 min — monitor positions closely
+
+            # Check if there are same-day weather markets
+            today_str = now_utc.strftime("%Y-%m-%d")
+            # Approximate: if it's past noon ET, same-day markets close soon
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            if now_et.hour >= 18:
+                return 15 * 60   # evening — same-day markets closing soon
+            elif now_et.hour >= 12:
+                return 30 * 60   # afternoon — moderate urgency
+            elif now_et.hour >= 6:
+                return 60 * 60   # morning — standard
+            else:
+                return 120 * 60  # overnight — slow
+        except Exception:
+            return 60 * 60  # fallback to 1 hour
+
     async def _weather_loop(self, sleep_first: bool = False) -> None:
-        """Weather strategy loop — runs every 1 hour. Collects candidates and executes via global ranking."""
+        """Weather strategy loop — adaptive frequency based on market urgency."""
+        if sleep_first:
+            interval = self._get_weather_loop_interval()
+            await asyncio.sleep(interval)
         while self._running:
             try:
                 if not self.engine.kill_switch:
@@ -3780,13 +4345,65 @@ class KalshiAgent:
                     tradeable = [c for c in candidates if c.get("action") != "skip"]
                     if tradeable:
                         await self.execute_ranked_signals(tradeable)
+
+                    # Intraday obs re-eval: for open weather positions on same-day markets,
+                    # fetch fresh NWS observations and consider adding if obs strongly confirm
+                    await self._weather_intraday_reeval()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self.engine.log_event("error", f"Weather loop error: {e}", strategy="weather")
                 logger.error("Weather loop error", error=str(e))
 
-            await asyncio.sleep(60 * 60)
+            interval = self._get_weather_loop_interval()
+            self.engine.log_event("info", f"Weather loop sleeping {interval // 60}m (adaptive)", strategy="weather")
+            await asyncio.sleep(interval)
+
+    async def _weather_intraday_reeval(self) -> None:
+        """For open weather positions, fetch NWS obs and boost/add if observations confirm our position."""
+        positions = self.engine.get_open_positions()
+        weather_positions = [p for p in positions if p.get("strategy") == "weather"]
+        if not weather_positions:
+            return
+
+        for pos in weather_positions:
+            try:
+                ticker = pos["ticker"]
+                wx_m = re.match(r'KX(HIGH|LOW)T?([A-Z]{2,4})-', ticker)
+                if not wx_m:
+                    continue
+                wx_type = wx_m.group(1)
+                wx_city = wx_m.group(2)
+
+                obs = await self.weather.get_current_observations(wx_city)
+                if not obs or obs.get("obs_count", 0) < 4:
+                    continue
+
+                strike_match = re.search(r'-[TB](\d+\.?\d*)', ticker)
+                if not strike_match:
+                    continue
+                strike = float(strike_match.group(1))
+                obs_key = "observed_high_f" if wx_type == "HIGH" else "observed_low_f"
+                obs_temp = obs.get(obs_key)
+                if obs_temp is None:
+                    continue
+
+                gap = obs_temp - strike
+                # If observations strongly CONFIRM our position, log it (monitor exit handles contradictions)
+                confirms = False
+                if pos["side"] == "yes" and gap > 2.0:
+                    confirms = True
+                elif pos["side"] == "no" and gap < -2.0:
+                    confirms = True
+
+                if confirms:
+                    self.engine.log_event(
+                        "info",
+                        f"Weather obs confirms {pos['side'].upper()} {ticker}: obs={obs_temp}°F vs strike={strike}°F (gap={gap:+.1f}°F, {obs.get('obs_count', 0)} readings)",
+                        strategy="weather",
+                    )
+            except Exception as e:
+                logger.debug("Weather intraday reeval failed", ticker=pos.get("ticker"), error=str(e))
 
     async def _crypto_loop(self, sleep_first: bool = False) -> None:
         """Crypto strategy loop — runs every 2 minutes (15-min markets need fast reaction).
@@ -3875,8 +4492,23 @@ class KalshiAgent:
         if sleep_first:
             await asyncio.sleep(2 * 60)
         last_summary_date = ""
+        _kill_switch_notified = False
         while self._running:
             try:
+                # Discord alert if kill switch just activated
+                if self.engine.kill_switch and not _kill_switch_notified:
+                    _kill_switch_notified = True
+                    try:
+                        asyncio.create_task(send_discord_notification(
+                            title="🚨 KILL SWITCH ACTIVATED",
+                            message="The trading agent kill switch has been triggered. All trading is paused.",
+                            color=0xe74c3c,
+                        ))
+                    except Exception:
+                        pass
+                elif not self.engine.kill_switch:
+                    _kill_switch_notified = False
+
                 if not self.engine.kill_switch:
                     # Reconnect WebSocket if it dropped
                     try:
@@ -3928,17 +4560,51 @@ class KalshiAgent:
             total_deployed = sum(v[1] for v in trades_by_strat.values())
             strat_summary = ", ".join(f"{k}={v[0]}/${v[1]:.0f}" for k, v in trades_by_strat.items())
 
-            self.engine.log_event(
-                "daily_summary",
+            summary_msg = (
                 f"Daily summary {yesterday}: {total_trades} trades, ${total_deployed:.2f} deployed, "
-                f"settled P&L=${settled_pnl:+.2f} | {strat_summary}",
-                strategy="monitor",
+                f"settled P&L=${settled_pnl:+.2f} | {strat_summary}"
             )
+            self.engine.log_event("daily_summary", summary_msg, strategy="monitor")
+
+            # Send daily summary to Discord
+            try:
+                import asyncio as _aio
+                _aio.create_task(send_discord_notification(
+                    title=f"📊 Daily Summary — {yesterday}",
+                    message=(
+                        f"**Trades:** {total_trades} | **Deployed:** ${total_deployed:.2f}\n"
+                        f"**Settled P&L:** ${settled_pnl:+.2f}\n"
+                        f"**By Strategy:** {strat_summary}\n"
+                        f"**Bankroll:** ${self.engine.bankroll:.2f}"
+                    ),
+                    color=0x3498db,
+                ))
+            except Exception:
+                pass
         except Exception as e:
             logger.debug("Daily summary failed", error=str(e))
 
     def get_status(self) -> dict[str, Any]:
         """Get agent status."""
+        # Loop health check
+        loop_health = {}
+        for name, task in [
+            ("weather", self._weather_task),
+            ("crypto", self._crypto_task),
+            ("main", self._main_task),
+            ("monitor", self._monitor_task),
+            ("health", self._health_task),
+            ("arbitrage", getattr(self, "_arbitrage_task", None)),
+        ]:
+            if task is None:
+                loop_health[name] = "not_started"
+            elif task.done():
+                loop_health[name] = "crashed"
+            elif task.cancelled():
+                loop_health[name] = "cancelled"
+            else:
+                loop_health[name] = "running"
+
         return {
             "running": self._running,
             "paper_mode": self.engine.paper_mode,
@@ -3946,6 +4612,13 @@ class KalshiAgent:
             **self.engine.get_status(),
             "odds_api_credits_remaining": self.sports.remaining_credits,
             "websocket": self.ws.get_status(),
+            "health": {
+                "api_healthy": self._last_api_check_ok,
+                "consecutive_api_failures": self._consecutive_api_failures,
+                "ws_healthy": self.engine._runtime_ws_healthy,
+                "last_heartbeat": self.engine._last_monitor_heartbeat,
+                "loops": loop_health,
+            },
         }
 
 

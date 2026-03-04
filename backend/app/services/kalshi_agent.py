@@ -118,6 +118,11 @@ class KalshiAgent:
         self._last_api_check_ok: bool = True
         self._consecutive_api_failures: int = 0
 
+        # Cross-cycle exit tracker: prevents monitor from re-exiting a ticker
+        # that was already exited in a previous cycle (belt-and-suspenders for
+        # the _from_fallback guard). Maps ticker → timestamp of exit attempt.
+        self._exited_tickers: dict[str, float] = {}
+
         # Resting-order cancel alerts (to detect persistent non-fills/chasing)
         self._cancel_alert_window_mins = int(os.environ.get("CANCEL_ALERT_WINDOW_MINS", "30"))
         self._cancel_alert_threshold = int(os.environ.get("CANCEL_ALERT_THRESHOLD", "6"))
@@ -3450,26 +3455,65 @@ class KalshiAgent:
                     api_ok = False
 
             # ── 2. Monitor Open Positions ──
-            positions = self.engine.get_open_positions()
+            # ALWAYS use Kalshi API as source of truth for side/contracts.
+            # The local DB can be wrong (boot cycle places YES buys on tickers
+            # we already hold NO, container rebuilds lose data, etc.).
+            # DB records are only used for metadata (avg_our_prob, strategy).
+            positions: list[dict[str, Any]] = []
+            db_positions = self.engine.get_open_positions()
+            db_by_ticker: dict[str, dict] = {p["ticker"]: p for p in db_positions}
+
+            try:
+                kalshi_pos = await self.kalshi.get_positions()
+                for mp in kalshi_pos.get("market_positions", []):
+                    pos_qty = mp.get("position", 0)
+                    if pos_qty == 0:
+                        continue
+                    ticker = mp.get("ticker", "")
+                    side = "yes" if pos_qty > 0 else "no"
+                    qty = abs(pos_qty)
+                    exposure_cents = mp.get("market_exposure", 0)
+                    avg_entry = round(exposure_cents / qty) if qty > 0 else 50
+
+                    # Merge with DB metadata if available
+                    db_rec = db_by_ticker.get(ticker, {})
+                    if db_rec and db_rec.get("side") != side:
+                        logger.warning(
+                            "DB/Kalshi side mismatch — using Kalshi truth",
+                            ticker=ticker, db_side=db_rec.get("side"),
+                            kalshi_side=side, kalshi_qty=qty,
+                        )
+
+                    positions.append({
+                        "ticker": ticker,
+                        "side": side,  # Kalshi truth
+                        "contracts": qty,  # Kalshi truth
+                        "total_cost": exposure_cents / 100.0,
+                        "total_fees": db_rec.get("total_fees", 0) or 0,
+                        "avg_entry_cents": avg_entry,
+                        "avg_our_prob": db_rec.get("avg_our_prob", 0.5),
+                        "strategy": db_rec.get("strategy") or (
+                            "weather" if "HIGH" in ticker or "LOW" in ticker else "unknown"
+                        ),
+                    })
+                if positions:
+                    logger.info("Monitor positions from Kalshi API", count=len(positions))
+            except Exception as e:
+                logger.warning("Kalshi API positions failed, falling back to DB", error=str(e))
+                positions = db_positions  # Last resort — use DB as-is
+
             if not positions:
                 return actions
 
             # Build mapping from event ticker to specific market ticker
-            # Event tickers (e.g., KXLOWTLAX-26FEB22) need to map to 
-            # specific market tickers (e.g., KXLOWTLAX-26FEB22-B46.5)
+            # (reuses positions already loaded from Kalshi API above)
             event_to_market_ticker: dict[str, str] = {}
-            try:
-                kalshi_positions = await self.kalshi.get_positions()
-                for mp in kalshi_positions.get("market_positions", []):
-                    market_ticker = mp.get("ticker", "")
-                    if market_ticker:
-                        # Extract event ticker (remove bracket specifier)
-                        parts = market_ticker.rsplit("-", 1)
-                        if len(parts) == 2 and (parts[1].startswith("B") or parts[1].startswith("T")):
-                            event_ticker = parts[0]
-                            event_to_market_ticker[event_ticker] = market_ticker
-            except Exception:
-                pass  # Fall back to using event tickers directly
+            for p in positions:
+                market_ticker = p["ticker"]
+                parts = market_ticker.rsplit("-", 1)
+                if len(parts) == 2 and (parts[1].startswith("B") or parts[1].startswith("T")):
+                    event_ticker = parts[0]
+                    event_to_market_ticker[event_ticker] = market_ticker
 
             total_exposure = self.engine.get_total_exposure()
             self.engine.log_event(
@@ -3496,31 +3540,33 @@ class KalshiAgent:
                 if ticker in exited_this_cycle:
                     continue
 
+                # Cross-cycle guard: skip if exited in a previous cycle within 30 min
+                import time as _time  # noqa: already at module level if available
+                _exit_ts = self._exited_tickers.get(ticker, 0)
+                if _exit_ts and (_time.time() - _exit_ts) < 1800:
+                    logger.info(
+                        "Skipping ticker (exited in recent cycle)",
+                        ticker=ticker, mins_ago=round((_time.time() - _exit_ts) / 60, 1),
+                    )
+                    continue
+
                 # Use specific market ticker for API calls (event tickers 404)
                 market_ticker = event_to_market_ticker.get(ticker, ticker)
                 try:
-                    # Try WebSocket snapshot first (instant, no API call)
-                    ws_snap = self.ws.get_snapshot(ticker) if self.ws.connected else None
-                    if ws_snap and not ws_snap.is_stale:
-                        yes_bid = ws_snap.yes_bid
-                        yes_ask = ws_snap.yes_ask
-                        no_bid = ws_snap.no_bid
-                        no_ask = ws_snap.no_ask
-                        last_price = ws_snap.last_price
-                        mkt_status = ""  # WS doesn't provide status, check via REST if needed
-                    else:
-                        # Fall back to REST API
-                        await asyncio.sleep(0.5)
-                        data = await self.kalshi._get(f"/markets/{market_ticker}")
-                        market = data.get("market", data)
-                        if not market:
-                            continue
-                        yes_bid = market.get("yes_bid", 0) or 0
-                        yes_ask = market.get("yes_ask", 0) or 0
-                        no_bid = market.get("no_bid", 0) or 0
-                        no_ask = market.get("no_ask", 0) or 0
-                        last_price = market.get("last_price", 0) or 0
-                        mkt_status = market.get("status", "")
+                    # Always use REST API for monitor — WS snapshots can be
+                    # stale/empty right after subscribe, causing wrong marks.
+                    await asyncio.sleep(0.3)
+                    data = await self.kalshi._get(f"/markets/{market_ticker}")
+                    market = data.get("market", data)
+                    if not market:
+                        logger.warning("Empty market data from REST", ticker=market_ticker)
+                        continue
+                    yes_bid = market.get("yes_bid", 0) or 0
+                    yes_ask = market.get("yes_ask", 0) or 0
+                    no_bid = market.get("no_bid", 0) or 0
+                    no_ask = market.get("no_ask", 0) or 0
+                    last_price = market.get("last_price", 0) or 0
+                    mkt_status = market.get("status", "")
 
                     # Mark-to-market: use same-side bid if spread is tight.
                     # Wide spread = bid is garbage lowball, use last_price or ask.
@@ -3541,6 +3587,13 @@ class KalshiAgent:
 
                     mark_value = pos["contracts"] * mark_price / 100.0
                     unrealized_pnl = round(mark_value - pos["total_cost"] - pos["total_fees"], 2)
+
+                    logger.info(
+                        "Position MTM",
+                        ticker=ticker, side=pos["side"], qty=pos["contracts"],
+                        mark=mark_price, cost=pos["total_cost"],
+                        pnl=unrealized_pnl, avg_entry=pos["avg_entry_cents"],
+                    )
 
                     # Current edge vs our original probability
                     current_edge = 0.0
@@ -3574,6 +3627,7 @@ class KalshiAgent:
                             actions.append({"action": "exit", "reason": "stop_loss", "ticker": ticker,
                                             "pnl": unrealized_pnl})
                             exited_this_cycle.add(ticker)
+                            self._exited_tickers[ticker] = _time.time()
                             continue
 
                     # ── DECISION 0b: DEAD CONTRACT — mark price near zero ──
@@ -3595,6 +3649,7 @@ class KalshiAgent:
                         actions.append({"action": "exit", "reason": "dead_contract", "ticker": ticker,
                                         "pnl": unrealized_pnl})
                         exited_this_cycle.add(ticker)
+                        self._exited_tickers[ticker] = _time.time()
                         continue
                         
                     # ── DECISION 0c: DYNAMIC TAKE PROFIT (95c rule) ──
@@ -3618,6 +3673,7 @@ class KalshiAgent:
                         actions.append({"action": "take_profit", "ticker": ticker,
                                         "pnl": unrealized_pnl, "profit_pct": 1.0})
                         exited_this_cycle.add(ticker)
+                        self._exited_tickers[ticker] = _time.time()
                         continue
 
                     # ── DECISION 1: EXIT — edge has flipped significantly ──
@@ -3638,6 +3694,7 @@ class KalshiAgent:
                         actions.append({"action": "exit", "reason": "edge_flipped", "ticker": ticker,
                                         "current_edge": current_edge, "pnl": unrealized_pnl})
                         exited_this_cycle.add(ticker)
+                        self._exited_tickers[ticker] = _time.time()
                         continue
 
                     # ── DECISION 1b: WEATHER OBS EARLY EXIT — DISABLED ──
@@ -3699,6 +3756,7 @@ class KalshiAgent:
                             actions.append({"action": "dynamic_take_profit", "ticker": ticker,
                                             "reason": reason, "pnl": unrealized_pnl})
                             exited_this_cycle.add(ticker)
+                            self._exited_tickers[ticker] = _time.time()
                             continue
 
                     # ── DECISION 4: ADD TO POSITION — DISABLED for weather ──
@@ -4082,25 +4140,46 @@ class KalshiAgent:
         self.engine.log_event("info", "Agent starting")
         logger.info("Kalshi agent starting", paper_mode=self.engine.paper_mode)
 
-        # Live mode: sync bankroll to actual Kalshi balance (source of truth)
+        # Live mode: sync bankroll to actual Kalshi portfolio value (source of truth)
+        # Kalshi "balance" = uninvested cash only. True bankroll = cash + position exposure.
         if not self.engine.paper_mode:
             balance_verified = False
             for attempt in range(3):
                 try:
                     balance_data = await self.kalshi.get_balance()
                     balance_cents = balance_data.get("balance", 0)
-                    balance_dollars = balance_cents / 100.0
+                    cash_dollars = balance_cents / 100.0
+
+                    # Sum up exposure from all open positions
+                    position_exposure = 0.0
+                    try:
+                        kalshi_pos = await self.kalshi.get_positions()
+                        for mp in kalshi_pos.get("market_positions", []):
+                            if mp.get("position", 0) != 0:
+                                position_exposure += float(mp.get("market_exposure_dollars", 0) or 0)
+                    except Exception:
+                        pass
+
+                    total_portfolio = cash_dollars + position_exposure
                     self.engine.log_event(
                         "info",
-                        f"Kalshi balance: ${balance_dollars:.2f} (env BANKROLL=${self.engine.bankroll:.2f})",
+                        f"Kalshi portfolio: ${total_portfolio:.2f} "
+                        f"(cash=${cash_dollars:.2f} + positions=${position_exposure:.2f}) "
+                        f"env BANKROLL=${self.engine.bankroll:.2f}",
                     )
-                    # Always sync to real balance — it's the source of truth
-                    if abs(balance_dollars - self.engine.bankroll) > 1.0:
+                    logger.info(
+                        "Kalshi portfolio synced",
+                        cash=cash_dollars,
+                        positions=position_exposure,
+                        total=total_portfolio,
+                        env_bankroll=self.engine.bankroll,
+                    )
+                    if abs(total_portfolio - self.engine.bankroll) > 1.0:
                         self.engine.log_event(
                             "warning",
-                            f"Syncing bankroll: ${self.engine.bankroll:.2f} → ${balance_dollars:.2f} (actual Kalshi balance)",
+                            f"Syncing bankroll: ${self.engine.bankroll:.2f} → ${total_portfolio:.2f} (actual portfolio value)",
                         )
-                    self.engine.bankroll = balance_dollars
+                    self.engine.bankroll = total_portfolio
                     balance_verified = True
                     break
                 except Exception as e:
@@ -4124,6 +4203,10 @@ class KalshiAgent:
                 self.engine.log_event("warning", "Kalshi WebSocket failed to connect, using REST fallback")
         except Exception as e:
             self.engine.log_event("warning", f"Kalshi WebSocket error: {e}, using REST fallback")
+
+        # Start monitor loop IMMEDIATELY — position management (sell 99c winners,
+        # stop-loss, etc.) should never wait for the boot cycle to finish evaluating signals.
+        self._monitor_task = asyncio.create_task(self._monitor_loop(sleep_first=False))
 
         # Boot cycle: run ALL strategies once immediately, rank globally, deploy best signals.
         # After this completes the independent loops take over on their normal schedules.
@@ -4187,9 +4270,9 @@ class KalshiAgent:
 
         # Start recurring loops in sleep-first mode so they don't immediately
         # re-run what the boot cycle just executed.
+        # NOTE: monitor loop is already started before boot cycle (see start())
         self._arbitrage_task = asyncio.create_task(self._arbitrage_loop(sleep_first=True))
         self._weather_task = asyncio.create_task(self._weather_loop(sleep_first=True))
-        self._monitor_task = asyncio.create_task(self._monitor_loop(sleep_first=True))
         self._crypto_task = asyncio.create_task(self._crypto_loop(sleep_first=True))
         self._main_task = asyncio.create_task(self._main_strategy_loop(sleep_first=True))
 

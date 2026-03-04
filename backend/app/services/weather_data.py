@@ -1277,11 +1277,11 @@ class WeatherConsensus:
         city_code = forecasts.get("city", "")
         city_config = CITY_CONFIGS.get(city_code, {})
         
-        # Apply warm bias correction for HIGH temp markets (+2°F empirical bias)
-        # Apply cold bias correction for LOW temp markets (-2°F empirical bias)
-        # Forecast models have warm bias for lows — they under-predict how cold
-        # it gets overnight. Use -2°F to push consensus colder (more conservative).
-        bias_correction = 2.0 if market_type == "high_temp" else -2.0
+        # Bias correction: forecast models tend to over-predict temps.
+        # HIGH temp: warm bias → subtract 2°F to be conservative (prevents false YES on "above X")
+        # LOW temp: warm bias on lows → subtract 2°F to push consensus colder
+        #           (models under-predict how cold it gets overnight)
+        bias_correction = -2.0
         
         # Apply station offset
         station_offset = city_config.get("high_offset", 0.0) if market_type == "high_temp" else city_config.get("low_offset", 0.0)

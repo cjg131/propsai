@@ -4082,25 +4082,38 @@ class KalshiAgent:
         self.engine.log_event("info", "Agent starting")
         logger.info("Kalshi agent starting", paper_mode=self.engine.paper_mode)
 
-        # Live mode: verify Kalshi account balance matches BANKROLL
+        # Live mode: sync bankroll to actual Kalshi balance (source of truth)
         if not self.engine.paper_mode:
-            try:
-                balance_data = await self.kalshi._get("/portfolio/balance")
-                balance_cents = balance_data.get("balance", 0)
-                balance_dollars = balance_cents / 100.0
-                self.engine.log_event(
-                    "info",
-                    f"Kalshi balance: ${balance_dollars:.2f} (BANKROLL=${self.engine.bankroll:.2f})",
-                )
-                if balance_dollars < self.engine.bankroll * 0.5:
+            balance_verified = False
+            for attempt in range(3):
+                try:
+                    balance_data = await self.kalshi.get_balance()
+                    balance_cents = balance_data.get("balance", 0)
+                    balance_dollars = balance_cents / 100.0
                     self.engine.log_event(
-                        "warning",
-                        f"Kalshi balance ${balance_dollars:.2f} is less than 50% of BANKROLL ${self.engine.bankroll:.2f}. "
-                        f"Adjusting bankroll to match actual balance.",
+                        "info",
+                        f"Kalshi balance: ${balance_dollars:.2f} (env BANKROLL=${self.engine.bankroll:.2f})",
                     )
+                    # Always sync to real balance — it's the source of truth
+                    if abs(balance_dollars - self.engine.bankroll) > 1.0:
+                        self.engine.log_event(
+                            "warning",
+                            f"Syncing bankroll: ${self.engine.bankroll:.2f} → ${balance_dollars:.2f} (actual Kalshi balance)",
+                        )
                     self.engine.bankroll = balance_dollars
-            except Exception as e:
-                self.engine.log_event("warning", f"Could not verify Kalshi balance: {e}")
+                    balance_verified = True
+                    break
+                except Exception as e:
+                    self.engine.log_event("warning", f"Balance check attempt {attempt+1}/3 failed: {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+            if not balance_verified:
+                self.engine.log_event(
+                    "error",
+                    "CRITICAL: Could not verify Kalshi balance after 3 attempts. "
+                    "Activating kill switch to prevent trading with wrong bankroll.",
+                )
+                self.engine.kill_switch = True
 
         # Start WebSocket connection for real-time price updates
         try:

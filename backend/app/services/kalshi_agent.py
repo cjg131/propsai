@@ -552,6 +552,29 @@ class KalshiAgent:
             f"cycle budget=${cycle_budget:.2f}",
         )
 
+        # ── Skip tickers we already hold ──
+        # Check BOTH internal DB and Kalshi API (DB may be empty after rebuild)
+        existing_tickers: set[str] = set()
+        try:
+            for pos in self.engine.get_open_positions():
+                existing_tickers.add(pos["ticker"])
+        except Exception:
+            pass
+        try:
+            kalshi_positions = await self.kalshi.get_positions()
+            for mp in kalshi_positions.get("market_positions", []):
+                mt = mp.get("ticker", "")
+                # position > 0 = long YES, position < 0 = long NO, 0 = closed
+                if mp.get("position", 0) != 0:
+                    existing_tickers.add(mt)
+        except Exception:
+            pass
+        if existing_tickers:
+            self.engine.log_event(
+                "info",
+                f"Existing positions ({len(existing_tickers)} tickers) — will skip duplicates",
+            )
+
         # ── Per-city/event concentration limit ──
         # Track how many trades we execute per event group this cycle
         # Prevents dumping multiple bets on the same city/date
@@ -572,6 +595,10 @@ class KalshiAgent:
             if not ticker or price_cents <= 0:
                 continue
 
+            # ── Skip if we already hold this ticker ──
+            if ticker in existing_tickers:
+                continue
+
             # ── Per-event concentration guard ──
             # Group weather tickers by city+date (e.g. KXHIGHNYC-25MAR03)
             # Group other tickers by base event (everything before last hyphen segment)
@@ -581,6 +608,15 @@ class KalshiAgent:
                     "info",
                     f"Event concentration limit: skipping {ticker} (already {MAX_TRADES_PER_EVENT} trades on {event_key})",
                 )
+                continue
+
+            # ── Block longshot bets ──
+            # If our model says probability of winning is <40%, don't trade it
+            # even if we think the market is mispriced. Longshots lose too often.
+            our_prob = candidate.get("our_prob", 0)
+            side = candidate.get("side", "")
+            win_prob = our_prob if side == "yes" else (1.0 - our_prob)
+            if win_prob < 0.40:
                 continue
 
             # Position sizing (respects per-strategy and per-ticker caps)
@@ -3450,8 +3486,16 @@ class KalshiAgent:
                 except Exception:
                     pass
 
+            # Track tickers we've already tried to exit to prevent repeated sells
+            exited_this_cycle: set[str] = set()
+
             for pos in positions:
                 ticker = pos["ticker"]
+
+                # Skip if we already tried to exit this ticker this cycle
+                if ticker in exited_this_cycle:
+                    continue
+
                 # Use specific market ticker for API calls (event tickers 404)
                 market_ticker = event_to_market_ticker.get(ticker, ticker)
                 try:
@@ -3529,6 +3573,7 @@ class KalshiAgent:
                             )
                             actions.append({"action": "exit", "reason": "stop_loss", "ticker": ticker,
                                             "pnl": unrealized_pnl})
+                            exited_this_cycle.add(ticker)
                             continue
 
                     # ── DECISION 0b: DEAD CONTRACT — mark price near zero ──
@@ -3549,6 +3594,7 @@ class KalshiAgent:
                         )
                         actions.append({"action": "exit", "reason": "dead_contract", "ticker": ticker,
                                         "pnl": unrealized_pnl})
+                        exited_this_cycle.add(ticker)
                         continue
                         
                     # ── DECISION 0c: DYNAMIC TAKE PROFIT (95c rule) ──
@@ -3571,6 +3617,7 @@ class KalshiAgent:
                         )
                         actions.append({"action": "take_profit", "ticker": ticker,
                                         "pnl": unrealized_pnl, "profit_pct": 1.0})
+                        exited_this_cycle.add(ticker)
                         continue
 
                     # ── DECISION 1: EXIT — edge has flipped significantly ──
@@ -3590,54 +3637,14 @@ class KalshiAgent:
                         )
                         actions.append({"action": "exit", "reason": "edge_flipped", "ticker": ticker,
                                         "current_edge": current_edge, "pnl": unrealized_pnl})
+                        exited_this_cycle.add(ticker)
                         continue
 
-                    # ── DECISION 1b: WEATHER OBS EARLY EXIT ──
-                    # For same-day weather positions, if NWS observations strongly contradict
-                    # our position late in the day, exit before settlement locks in the loss.
-                    if pos.get("strategy") == "weather" and mark_price > 0:
-                        try:
-                            wx_ticker = ticker
-                            wx_m = re.match(r'KX(HIGH|LOW)T?([A-Z]{2,4})-', wx_ticker)
-                            if wx_m:
-                                wx_type = wx_m.group(1)
-                                wx_city = wx_m.group(2)
-                                obs = await self.weather.nws.get_current_observations(wx_city)
-                                if obs and obs.get("obs_count", 0) >= 6:
-                                    # Parse strike from ticker (e.g., -T45 or -B36.5)
-                                    strike_match = re.search(r'-[TB](\d+\.?\d*)', wx_ticker)
-                                    if strike_match:
-                                        strike = float(strike_match.group(1))
-                                        obs_key = "observed_high_f" if wx_type == "HIGH" else "observed_low_f"
-                                        obs_temp = obs.get(obs_key)
-                                        if obs_temp is not None:
-                                            # If we bet YES on >strike but observed is well below
-                                            # or we bet NO on >strike but observed is well above
-                                            gap = obs_temp - strike
-                                            should_exit = False
-                                            if pos["side"] == "yes" and gap < -3.0:
-                                                should_exit = True
-                                            elif pos["side"] == "no" and gap > 3.0:
-                                                should_exit = True
-                                            if should_exit:
-                                                await self.engine.exit_trade(
-                                                    strategy=pos["strategy"],
-                                                    ticker=ticker,
-                                                    side=pos["side"],
-                                                    count=pos["contracts"],
-                                                    price_cents=mark_price,
-                                                    reason=f"weather_obs_exit obs={obs_temp}°F strike={strike}°F gap={gap:+.1f}",
-                                                )
-                                                self.engine.log_event(
-                                                    "paper_trade",
-                                                    f"WEATHER OBS EXIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — obs={obs_temp}°F vs strike={strike}°F",
-                                                    strategy="monitor",
-                                                )
-                                                actions.append({"action": "exit", "reason": "weather_obs_contradiction",
-                                                                "ticker": ticker, "pnl": unrealized_pnl})
-                                                continue
-                        except Exception as wx_err:
-                            logger.debug("Weather obs check failed", ticker=ticker, error=str(wx_err))
+                    # ── DECISION 1b: WEATHER OBS EARLY EXIT — DISABLED ──
+                    # Previously this fired every 2-min cycle and kept selling NO,
+                    # which on Kalshi creates new YES exposure. This caused the SFO
+                    # 30-contract blowup. Weather positions should be held to settlement
+                    # (they settle within 24h) or exited via stop-loss/edge-flip above.
 
                     # ── DECISION 2 & 3: OPPORTUNITY COST & DYNAMIC TAKE-PROFIT ──
                     # Instead of an automatic take-profit when hitting 90c or 50% max profit,
@@ -3691,9 +3698,16 @@ class KalshiAgent:
                             )
                             actions.append({"action": "dynamic_take_profit", "ticker": ticker,
                                             "reason": reason, "pnl": unrealized_pnl})
+                            exited_this_cycle.add(ticker)
                             continue
 
-                    # ── DECISION 4: ADD TO POSITION — edge has increased ──
+                    # ── DECISION 4: ADD TO POSITION — DISABLED for weather ──
+                    # Weather markets settle in 24h. No need to DCA into them.
+                    # The monitor_add was the main cause of position accumulation
+                    # (e.g., Denver Low got 34 contracts from repeated monitor_add).
+                    if pos.get("strategy") == "weather":
+                        continue
+
                     # HARD BLOCK: Never add to soccer positions (losing strategy)
                     soccer_keywords = ["EPL", "LALIGA", "UCL", "SERIE", "BUNDESLIGA", "LIGUE1", 
                                        "MLS", "LIGAMX", "BRASILEIRO", "FACUP", "EWSL", "SLGREECE",

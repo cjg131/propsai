@@ -734,6 +734,17 @@ class KalshiAgent:
                     target_date_str = today_str
                 by_city_date.setdefault((city_code, target_date_str), []).append(m)
 
+            # Pre-fetch NWS observations for same-day cities (for observed arbitrage)
+            obs_by_city: dict[str, dict[str, Any]] = {}
+            same_day_cities = {ck for ck, ds in by_city_date.keys() if ds == today_str}
+            for city_key in same_day_cities:
+                try:
+                    obs = await self.weather.get_current_observations(city_key)
+                    if obs:
+                        obs_by_city[city_key] = obs
+                except Exception as e:
+                    logger.debug("NWS observation fetch failed", city=city_key, error=str(e))
+
             # Pre-fetch forecasts for all city/date combos
             forecasts_by_city_date: dict[tuple[str, str], dict[str, Any]] = {}
             for city_key, target_date_str in by_city_date.keys():

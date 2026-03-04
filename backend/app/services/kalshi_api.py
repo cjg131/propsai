@@ -176,6 +176,13 @@ class KalshiClient:
                     logger.warning(f"Kalshi API rate limited (429), backing off for {retry_after}s")
                     await asyncio.sleep(retry_after)
                     continue
+                if resp.status_code >= 400:
+                    logger.error(
+                        f"Kalshi POST {path} failed",
+                        status=resp.status_code,
+                        body=resp.text[:500],
+                        payload=str(json_data)[:300],
+                    )
                 resp.raise_for_status()
                 return resp.json()
             resp.raise_for_status()

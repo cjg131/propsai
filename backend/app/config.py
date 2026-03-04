@@ -54,6 +54,16 @@ class Settings(BaseSettings):
         default="", description="Visual Crossing API key for weather data ($35/month)"
     )
 
+    # Weatherbit
+    weatherbit_api_key: str = Field(
+        default="", description="Weatherbit.io API key for weather forecasts (free tier: 50 calls/day)"
+    )
+
+    # OpenWeatherMap
+    openweathermap_api_key: str = Field(
+        default="", description="OpenWeatherMap API key for weather forecasts (free tier: 60 calls/min)"
+    )
+
     # FRED (Federal Reserve Economic Data)
     fred_api_key: str = Field(
         default="", description="FRED API key for economic data (free at fred.stlouisfed.org)"

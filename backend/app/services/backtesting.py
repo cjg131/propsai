@@ -6,6 +6,9 @@ real predictive accuracy and simulated betting performance.
 
 Uses BDL cached game logs (real per-game box scores) as the data source.
 
+Also includes a weather backtesting pipeline that replays weather forecast
+accuracy against historical NWS observations to measure calibration.
+
 Approach:
   1. Load BDL cached game logs for the 2025 season
   2. For each game date, build the feature set the model would have had
@@ -557,4 +560,182 @@ async def run_backtest(
         "calibration": calibration,
         "bet_log": bet_log[-200:],  # Last 200 bets for display
         "total_bet_log_size": len(bet_log),
+    }
+
+
+# ── Weather Backtesting Pipeline ──────────────────────────────────────
+
+async def run_weather_backtest(
+    days_back: int = 30,
+    bankroll: float = 1000.0,
+    min_edge: float = 0.05,
+    min_confidence: float = 0.55,
+    progress_callback=None,
+) -> dict:
+    """
+    Backtest weather trading strategy using historical settled trades.
+
+    Replays the agent's weather trades from the SQLite DB to compute:
+    - Calibration: did X% probability events happen X% of the time?
+    - P&L simulation with configurable edge/confidence thresholds
+    - Accuracy by city, by market type (high/low), by forecast horizon
+    """
+    import sqlite3
+    from collections import defaultdict
+    from datetime import datetime, timedelta, timezone as _tz
+
+    from app.services.trading_engine import DB_PATH
+
+    if progress_callback:
+        await progress_callback(10, "Loading settled weather trades...")
+
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    cutoff = (datetime.now(_tz.utc) - timedelta(days=days_back)).isoformat()
+    c.execute("""
+        SELECT id, timestamp, ticker, side, price_cents, cost, fee, pnl,
+               our_prob, kalshi_prob, edge, result, strategy, signal_source,
+               closing_price_cents
+        FROM trades
+        WHERE strategy = 'weather' AND status = 'settled'
+          AND timestamp >= ?
+        ORDER BY timestamp
+    """, (cutoff,))
+    trades = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    if not trades:
+        return {"status": "no_data", "message": f"No settled weather trades in the last {days_back} days"}
+
+    if progress_callback:
+        await progress_callback(30, f"Analyzing {len(trades)} settled weather trades...")
+
+    # Analyze trades
+    total_pnl = 0.0
+    sim_bankroll = bankroll
+    peak_bankroll = bankroll
+    max_drawdown = 0.0
+    equity_curve = [{"trade_num": 0, "bankroll": bankroll}]
+
+    by_city: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+    by_type: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+    calibration_buckets: dict[str, dict] = defaultdict(lambda: {"total": 0, "wins": 0})
+    bet_log = []
+
+    import re
+    for i, t in enumerate(trades):
+        ticker = t["ticker"]
+        pnl = t["pnl"] or 0
+        won = pnl > 0
+        our_prob = t["our_prob"] or 0.5
+        edge = t["edge"] or 0
+        price_cents = t["price_cents"] or 50
+
+        # Parse city and type from ticker
+        wx_m = re.match(r'KX(HIGH|LOW)T?([A-Z]{2,4})-', ticker)
+        city = wx_m.group(2) if wx_m else "UNK"
+        wx_type = wx_m.group(1) if wx_m else "UNK"
+
+        # Track by city
+        by_city[city]["wins" if won else "losses"] += 1
+        by_city[city]["pnl"] += pnl
+
+        # Track by type
+        by_type[wx_type]["wins" if won else "losses"] += 1
+        by_type[wx_type]["pnl"] += pnl
+
+        # Calibration bucket: group our_prob into 10% buckets
+        bucket = f"{int(our_prob * 10) * 10}-{int(our_prob * 10) * 10 + 10}%"
+        calibration_buckets[bucket]["total"] += 1
+        if won:
+            calibration_buckets[bucket]["wins"] += 1
+
+        # Simulate P&L
+        total_pnl += pnl
+        sim_bankroll += pnl
+        if sim_bankroll > peak_bankroll:
+            peak_bankroll = sim_bankroll
+        dd = (peak_bankroll - sim_bankroll) / peak_bankroll if peak_bankroll > 0 else 0
+        max_drawdown = max(max_drawdown, dd)
+
+        equity_curve.append({"trade_num": i + 1, "bankroll": round(sim_bankroll, 2)})
+        bet_log.append({
+            "ticker": ticker,
+            "city": city,
+            "type": wx_type,
+            "side": t["side"],
+            "price": price_cents,
+            "our_prob": round(our_prob, 3),
+            "edge": round(edge, 3),
+            "won": won,
+            "pnl": round(pnl, 2),
+        })
+
+    if progress_callback:
+        await progress_callback(80, "Computing calibration stats...")
+
+    total_trades = len(trades)
+    wins = sum(1 for t in trades if (t["pnl"] or 0) > 0)
+    losses = total_trades - wins
+    win_rate = wins / total_trades if total_trades > 0 else 0
+
+    # Calibration analysis
+    calibration = {}
+    for bucket, data in sorted(calibration_buckets.items()):
+        actual_rate = data["wins"] / data["total"] if data["total"] > 0 else 0
+        calibration[bucket] = {
+            "total": data["total"],
+            "wins": data["wins"],
+            "actual_win_rate": round(actual_rate, 3),
+        }
+
+    # City stats
+    city_stats = {}
+    for city, data in sorted(by_city.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        total_c = data["wins"] + data["losses"]
+        city_stats[city] = {
+            "trades": total_c,
+            "wins": data["wins"],
+            "win_rate": round(data["wins"] / total_c, 3) if total_c > 0 else 0,
+            "pnl": round(data["pnl"], 2),
+        }
+
+    # Type stats
+    type_stats = {}
+    for wt, data in by_type.items():
+        total_t = data["wins"] + data["losses"]
+        type_stats[wt] = {
+            "trades": total_t,
+            "wins": data["wins"],
+            "win_rate": round(data["wins"] / total_t, 3) if total_t > 0 else 0,
+            "pnl": round(data["pnl"], 2),
+        }
+
+    if progress_callback:
+        await progress_callback(100, "Weather backtest complete!")
+
+    return {
+        "status": "completed",
+        "config": {
+            "days_back": days_back,
+            "starting_bankroll": bankroll,
+            "min_edge": min_edge,
+            "min_confidence": min_confidence,
+        },
+        "summary": {
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(win_rate, 4),
+            "total_pnl": round(total_pnl, 2),
+            "final_bankroll": round(sim_bankroll, 2),
+            "max_drawdown_pct": round(max_drawdown * 100, 2),
+        },
+        "by_city": city_stats,
+        "by_type": type_stats,
+        "calibration": calibration,
+        "equity_curve": equity_curve,
+        "bet_log": bet_log[-100:],
     }

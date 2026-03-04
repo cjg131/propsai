@@ -5,6 +5,7 @@ import {
   Bot,
   Crosshair,
   History,
+  TrendingUp,
   Wallet,
   Settings,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const kalshiNavItems = [
       { title: "Edge Finder", href: "/kalshi/edges", icon: Crosshair },
       { title: "History", href: "/kalshi/history", icon: History },
       { title: "Agent", href: "/kalshi/agent", icon: Bot },
+      { title: "Performance", href: "/kalshi/performance", icon: TrendingUp },
     ],
   },
   {

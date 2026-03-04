@@ -4,10 +4,15 @@ Provides status, control, signals, trades, and performance data.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.logging_config import get_logger
+from app.services.event_bus import get_event_bus
 from app.services.kalshi_agent import get_kalshi_agent
 from app.services.trading_engine import get_trading_engine
 
@@ -53,6 +58,17 @@ async def get_agent_performance():
         return engine.get_performance_summary()
     except Exception as e:
         logger.error("Failed to get performance", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/clv")
+async def get_clv_stats(strategy: str = ""):
+    """Get Closing Line Value statistics."""
+    try:
+        engine = get_trading_engine()
+        return engine.get_clv_stats(strategy=strategy)
+    except Exception as e:
+        logger.error("Failed to get CLV stats", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -338,6 +354,18 @@ async def get_signal_stats():
     return scorer.get_all_stats()
 
 
+@router.get("/backtest/weather")
+async def run_weather_backtest_endpoint(days_back: int = Query(default=30, le=365)):
+    """Run weather backtesting pipeline on settled weather trades."""
+    from app.services.backtesting import run_weather_backtest
+    try:
+        result = await run_weather_backtest(days_back=days_back)
+        return result
+    except Exception as e:
+        logger.error("Weather backtest failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/reset")
 async def reset_paper_trades():
     """Clear all paper trades, signals, and logs for a fresh start."""
@@ -358,3 +386,33 @@ async def reset_paper_trades():
 
     engine._first_cycle_done = False
     return {"status": "reset", "message": "Paper trades, signals, and logs cleared"}
+
+
+@router.get("/stream")
+async def agent_event_stream():
+    """SSE endpoint — streams real-time agent events (trades, settlements, log entries)."""
+    bus = get_event_bus()
+
+    async def event_generator():
+        try:
+            async for event in bus.subscribe(include_history=True):
+                yield f"data: {json.dumps(event)}\n\n"
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/events/recent")
+async def get_recent_events(count: int = Query(default=20, le=50)):
+    """Get recent agent events (for initial page load before SSE connects)."""
+    bus = get_event_bus()
+    return {"events": bus.get_recent(count)}

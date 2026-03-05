@@ -4068,7 +4068,9 @@ class KalshiAgent:
                 side = "yes" if pos_qty > 0 else "no"
                 qty = abs(pos_qty)
                 exposure_cents = mp.get("market_exposure", 0)
-                avg_entry = round(exposure_cents / qty) if qty > 0 else 50
+                fees_cents = mp.get("fees_paid", 0)
+                total_cost_cents = exposure_cents + fees_cents  # what we actually paid
+                avg_entry = round(total_cost_cents / qty, 1) if qty > 0 else 50
 
                 # Merge DB metadata if available
                 db_rec = db_by_ticker.get(ticker, {})
@@ -4083,10 +4085,10 @@ class KalshiAgent:
                     "signal_source": db_rec.get("signal_source", ""),
                     "contracts": qty,
                     "avg_entry_cents": avg_entry,
-                    "total_cost": round(exposure_cents / 100.0, 2),
-                    "total_fees": db_rec.get("total_fees", 0) or 0,
-                    "max_risk": round(exposure_cents / 100.0 + (db_rec.get("total_fees", 0) or 0), 2),
-                    "max_profit": round(qty * 1.0 - exposure_cents / 100.0 - (db_rec.get("total_fees", 0) or 0), 2),
+                    "total_cost": round(total_cost_cents / 100.0, 2),
+                    "total_fees": round(fees_cents / 100.0, 2),
+                    "max_risk": round(total_cost_cents / 100.0, 2),
+                    "max_profit": round(qty * 1.0 - total_cost_cents / 100.0, 2),
                     "avg_our_prob": db_rec.get("avg_our_prob", 0.5),
                     "avg_entry_kalshi_prob": db_rec.get("avg_entry_kalshi_prob", 0),
                     "avg_entry_edge": db_rec.get("avg_entry_edge", 0),
@@ -4150,7 +4152,7 @@ class KalshiAgent:
 
                 pos["mark_price_cents"] = mark_price
                 mark_value = pos["contracts"] * mark_price / 100.0
-                pos["unrealized_pnl"] = round(mark_value - pos["total_cost"] - pos["total_fees"], 2)
+                pos["unrealized_pnl"] = round(mark_value - pos["total_cost"], 2)
 
                 if pos["side"] == "yes" and yes_ask > 0:
                     pos["current_edge"] = round(pos["avg_our_prob"] - (yes_ask / 100.0), 4)
@@ -4748,8 +4750,8 @@ class KalshiAgent:
         except Exception as e:
             logger.debug("Daily summary failed", error=str(e))
 
-    def get_status(self) -> dict[str, Any]:
-        """Get agent status."""
+    async def get_status(self) -> dict[str, Any]:
+        """Get agent status.  Uses Kalshi API for balance/exposure (source of truth)."""
         # Loop health check
         loop_health = {}
         for name, task in [
@@ -4769,11 +4771,35 @@ class KalshiAgent:
             else:
                 loop_health[name] = "running"
 
+        # Fetch live balance + portfolio value from Kalshi API
+        kalshi_balance_cents = 0
+        kalshi_portfolio_cents = 0
+        try:
+            bal = await self.kalshi.get_balance()
+            kalshi_balance_cents = bal.get("balance", 0)
+            kalshi_portfolio_cents = bal.get("portfolio_value", 0)
+        except Exception:
+            pass  # Fall back to DB values below
+
+        base_status = self.engine.get_status()
+
+        # Override bankroll/exposure/remaining with Kalshi API truth
+        if kalshi_balance_cents > 0 or kalshi_portfolio_cents > 0:
+            total_value = (kalshi_balance_cents + kalshi_portfolio_cents) / 100.0
+            deployed = kalshi_portfolio_cents / 100.0
+            cash = kalshi_balance_cents / 100.0
+            base_status["bankroll"] = round(total_value, 2)
+            base_status["effective_bankroll"] = round(total_value, 2)
+            base_status["total_exposure"] = round(deployed, 2)
+            base_status["remaining_capital"] = round(cash, 2)
+            base_status["max_deployable"] = round(total_value, 2)
+            base_status["over_deployed"] = False
+
         return {
             "running": self._running,
             "paper_mode": self.engine.paper_mode,
             "kill_switch": self.engine.kill_switch,
-            **self.engine.get_status(),
+            **base_status,
             "odds_api_credits_remaining": self.sports.remaining_credits,
             "websocket": self.ws.get_status(),
             "health": {

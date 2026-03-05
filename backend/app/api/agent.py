@@ -44,7 +44,7 @@ async def get_agent_status():
     """Get current agent status including paper mode, kill switch, bankroll."""
     try:
         agent = get_kalshi_agent()
-        return agent.get_status()
+        return await agent.get_status()
     except Exception as e:
         logger.error("Failed to get agent status", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))

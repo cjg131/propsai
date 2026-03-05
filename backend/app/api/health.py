@@ -33,7 +33,7 @@ async def health_check():
         "status": "healthy" if healthy else "degraded",
         "service": "propsai-backend",
         "version": "0.1.0",
-        "agent_running": agent.get_status().get("running", False),
+        "agent_running": agent._running,
         "paper_mode": engine.paper_mode,
         "db_healthy": db_ok,
         "websocket": ws_status,

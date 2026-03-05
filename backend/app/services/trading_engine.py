@@ -1257,6 +1257,13 @@ class TradingEngine:
         Exit (sell) an existing position.
         Records as a sell trade with negative cost (proceeds).
         """
+        import traceback
+        logger.info(
+            "exit_trade called",
+            ticker=ticker, side=side, count=count, price_cents=price_cents,
+            reason=reason, strategy=strategy,
+            caller="".join(traceback.format_stack()[-3:-1])[:300],
+        )
         cost = count * price_cents / 100.0
         fee = _kalshi_maker_fee(count, price_cents)
 

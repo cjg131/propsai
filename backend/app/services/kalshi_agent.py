@@ -4046,32 +4046,71 @@ class KalshiAgent:
         """
         Get open positions enriched with live market data.
         Called by the API for the frontend display.
-        """
-        positions = self.engine.get_open_positions()
-        
-        # Build mapping from event ticker to specific market ticker
-        # Event tickers (e.g., KXLOWTLAX-26FEB22) need to map to 
-        # specific market tickers (e.g., KXLOWTLAX-26FEB22-B46.5)
-        event_to_market_ticker: dict[str, str] = {}
-        try:
-            kalshi_positions = await self.kalshi.get_positions()
-            for mp in kalshi_positions.get("market_positions", []):
-                market_ticker = mp.get("ticker", "")
-                if market_ticker:
-                    # Extract event ticker (remove bracket specifier)
-                    # e.g., KXLOWTLAX-26FEB22-B46.5 -> KXLOWTLAX-26FEB22
-                    parts = market_ticker.rsplit("-", 1)
-                    if len(parts) == 2 and (parts[1].startswith("B") or parts[1].startswith("T")):
-                        event_ticker = parts[0]
-                        event_to_market_ticker[event_ticker] = market_ticker
-        except Exception:
-            pass  # Fall back to using event tickers directly
 
+        IMPORTANT: Uses Kalshi API as the sole source of truth for
+        side, contracts, and ticker. The local DB is only used for
+        metadata (strategy, avg_our_prob, signal_source, etc.).
+        This prevents the dashboard from showing phantom/stale DB
+        positions that don't exist on Kalshi.
+        """
+        # ── 1. Kalshi API = source of truth for positions ──
+        db_positions = self.engine.get_open_positions()
+        db_by_ticker: dict[str, dict] = {p["ticker"]: p for p in db_positions}
+
+        positions: list[dict[str, Any]] = []
+        try:
+            kalshi_pos = await self.kalshi.get_positions()
+            for mp in kalshi_pos.get("market_positions", []):
+                pos_qty = mp.get("position", 0)
+                if pos_qty == 0:
+                    continue
+                ticker = mp.get("ticker", "")
+                side = "yes" if pos_qty > 0 else "no"
+                qty = abs(pos_qty)
+                exposure_cents = mp.get("market_exposure", 0)
+                avg_entry = round(exposure_cents / qty) if qty > 0 else 50
+
+                # Merge DB metadata if available
+                db_rec = db_by_ticker.get(ticker, {})
+
+                positions.append({
+                    "ticker": ticker,
+                    "title": db_rec.get("title") or mp.get("market_title") or ticker,
+                    "side": side,
+                    "strategy": db_rec.get("strategy") or (
+                        "weather" if "HIGH" in ticker or "LOW" in ticker else "unknown"
+                    ),
+                    "signal_source": db_rec.get("signal_source", ""),
+                    "contracts": qty,
+                    "avg_entry_cents": avg_entry,
+                    "total_cost": round(exposure_cents / 100.0, 2),
+                    "total_fees": db_rec.get("total_fees", 0) or 0,
+                    "max_risk": round(exposure_cents / 100.0 + (db_rec.get("total_fees", 0) or 0), 2),
+                    "max_profit": round(qty * 1.0 - exposure_cents / 100.0 - (db_rec.get("total_fees", 0) or 0), 2),
+                    "avg_our_prob": db_rec.get("avg_our_prob", 0.5),
+                    "avg_entry_kalshi_prob": db_rec.get("avg_entry_kalshi_prob", 0),
+                    "avg_entry_edge": db_rec.get("avg_entry_edge", 0),
+                    "first_entry": db_rec.get("first_entry", ""),
+                    "last_entry": db_rec.get("last_entry", ""),
+                    "num_fills": db_rec.get("num_fills", 0),
+                    "paper_mode": db_rec.get("paper_mode", False),
+                    # Placeholders — filled below with live market data
+                    "current_yes_bid": None,
+                    "current_yes_ask": None,
+                    "current_no_bid": None,
+                    "current_no_ask": None,
+                    "mark_price_cents": None,
+                    "unrealized_pnl": None,
+                    "current_edge": None,
+                    "status": "open",
+                })
+        except Exception as e:
+            logger.warning("Kalshi API positions failed for dashboard, falling back to DB", error=str(e))
+            positions = db_positions  # Last resort
+
+        # ── 2. Enrich each position with live market data ──
         for pos in positions:
-            event_ticker = pos["ticker"]
-            # Use specific market ticker if available, otherwise fall back to event ticker
-            market_ticker = event_to_market_ticker.get(event_ticker, event_ticker)
-            
+            market_ticker = pos["ticker"]
             try:
                 await asyncio.sleep(0.15)
                 data = await self.kalshi._get(f"/markets/{market_ticker}")
@@ -4086,6 +4125,10 @@ class KalshiAgent:
                 pos["current_yes_ask"] = yes_ask
                 pos["current_no_bid"] = no_bid
                 pos["current_no_ask"] = no_ask
+
+                # Use title from market data if we don't have one
+                if pos.get("title") == pos["ticker"] and market.get("title"):
+                    pos["title"] = market["title"]
 
                 # Mark-to-market: use same-side bid if spread is tight.
                 # Wide spread = bid is garbage lowball, use last_price or ask.

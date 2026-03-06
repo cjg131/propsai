@@ -4493,7 +4493,6 @@ class KalshiAgent:
         - Same-day markets exist with <3 hours to close → 15 min
         - Same-day markets exist with 3-6 hours → 30 min
         - Next-day markets only → 60 min
-        - 2+ day markets only → 120 min
         """
         try:
             from zoneinfo import ZoneInfo
@@ -4502,21 +4501,20 @@ class KalshiAgent:
             positions = self.engine.get_open_positions()
             weather_positions = [p for p in positions if p.get("strategy") == "weather"]
             if weather_positions:
-                # If we have open weather positions, run fast
-                return 15 * 60  # 15 min — monitor positions closely
+                return 5 * 60
 
             # Check if there are same-day weather markets
             today_str = now_utc.strftime("%Y-%m-%d")
             # Approximate: if it's past noon ET, same-day markets close soon
             now_et = datetime.now(ZoneInfo("America/New_York"))
             if now_et.hour >= 18:
-                return 15 * 60   # evening — same-day markets closing soon
+                return 5 * 60
             elif now_et.hour >= 12:
-                return 30 * 60   # afternoon — moderate urgency
+                return 10 * 60
             elif now_et.hour >= 6:
-                return 60 * 60   # morning — standard
+                return 15 * 60
             else:
-                return 120 * 60  # overnight — slow
+                return 60 * 60
         except Exception:
             return 60 * 60  # fallback to 1 hour
 

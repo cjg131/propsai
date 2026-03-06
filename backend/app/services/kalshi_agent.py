@@ -642,8 +642,7 @@ class KalshiAgent:
             # If our model says probability of winning is <40%, don't trade it
             # even if we think the market is mispriced. Longshots lose too often.
             our_prob = candidate.get("our_prob", 0)
-            side = candidate.get("side", "")
-            win_prob = our_prob if side == "yes" else (1.0 - our_prob)
+            win_prob = our_prob
             if win_prob < 0.40:
                 continue
 

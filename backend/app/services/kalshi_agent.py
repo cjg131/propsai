@@ -477,9 +477,47 @@ class KalshiAgent:
 
         # ── Skip tickers where we already hold an open position on the same side ──
         # Prevents re-entering the same market every cycle (econ CPI stacking, etc.)
-        open_positions = self.engine.get_open_positions()
+        db_open_positions: list[dict[str, Any]] = []
+        try:
+            db_open_positions = self.engine.get_open_positions()
+        except Exception:
+            db_open_positions = []
+
+        open_positions = db_open_positions
+        try:
+            kalshi_positions = await self.kalshi.get_positions()
+            db_by_ticker = {p.get("ticker", ""): p for p in db_open_positions if p.get("ticker")}
+            kalshi_open_positions: list[dict[str, Any]] = []
+            mismatched_sides = 0
+            for mp in kalshi_positions.get("market_positions", []):
+                pos_qty = mp.get("position", 0)
+                if pos_qty == 0:
+                    continue
+                ticker = mp.get("ticker", "")
+                if not ticker:
+                    continue
+                kalshi_side = "yes" if pos_qty > 0 else "no"
+                merged = dict(db_by_ticker.get(ticker, {}))
+                if merged.get("side") and merged.get("side") != kalshi_side:
+                    mismatched_sides += 1
+                merged["ticker"] = ticker
+                merged["side"] = kalshi_side
+                kalshi_open_positions.append(merged)
+            open_positions = kalshi_open_positions
+            if mismatched_sides > 0:
+                self.engine.log_event(
+                    "warning",
+                    f"Execution dedup: corrected {mismatched_sides} DB/Kalshi side mismatches using Kalshi positions",
+                    strategy="risk",
+                )
+        except Exception:
+            open_positions = db_open_positions
+
         open_keys: set[str] = {
             f"{p['ticker']}_{p['side']}" for p in open_positions
+        }
+        existing_tickers: set[str] = {
+            p["ticker"] for p in open_positions if p.get("ticker")
         }
 
         pre_filter = len(candidates)
@@ -558,22 +596,7 @@ class KalshiAgent:
         )
 
         # ── Skip tickers we already hold ──
-        # Check BOTH internal DB and Kalshi API (DB may be empty after rebuild)
-        existing_tickers: set[str] = set()
-        try:
-            for pos in self.engine.get_open_positions():
-                existing_tickers.add(pos["ticker"])
-        except Exception:
-            pass
-        try:
-            kalshi_positions = await self.kalshi.get_positions()
-            for mp in kalshi_positions.get("market_positions", []):
-                mt = mp.get("ticker", "")
-                # position > 0 = long YES, position < 0 = long NO, 0 = closed
-                if mp.get("position", 0) != 0:
-                    existing_tickers.add(mt)
-        except Exception:
-            pass
+        # Uses the Kalshi-first open_positions view built above.
         if existing_tickers:
             self.engine.log_event(
                 "info",

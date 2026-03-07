@@ -48,6 +48,15 @@ const STRATEGY_COLORS: Record<string, string> = {
   arbitrage: "#06b6d4",
 };
 
+const formatCurrencyValue = (value: unknown) => {
+  const normalizedValue = Array.isArray(value) ? value[0] : value;
+  const numericValue =
+    typeof normalizedValue === "number"
+      ? normalizedValue
+      : Number(normalizedValue ?? 0);
+  return `$${numericValue.toFixed(2)}`;
+};
+
 function StatCard({
   label,
   value,
@@ -81,7 +90,16 @@ export default function KalshiPerformancePage() {
   const { data: perf, isLoading } = useAgentPerformance();
   const { data: clvData } = useQuery({
     queryKey: ["agent-clv"],
-    queryFn: () => api.get<{ total_trades: number; avg_clv_cents: number; positive_clv_pct: number; by_strategy: Record<string, { count: number; avg_clv_cents: number; positive_clv_pct: number }> }>("/api/kalshi/agent/clv"),
+    queryFn: () =>
+      api.get<{
+        total_trades: number;
+        avg_clv_cents: number;
+        positive_clv_pct: number;
+        by_strategy: Record<
+          string,
+          { count: number; avg_clv_cents: number; positive_clv_pct: number }
+        >;
+      }>("/api/kalshi/agent/clv"),
     refetchInterval: 60_000,
   });
 
@@ -229,8 +247,8 @@ export default function KalshiPerformancePage() {
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip
-                      formatter={(v: number, name: string) => [
-                        `$${v.toFixed(2)}`,
+                      formatter={(value, name) => [
+                        formatCurrencyValue(value),
                         name === "equity" ? "Equity" : "Drawdown",
                       ]}
                     />
@@ -276,7 +294,7 @@ export default function KalshiPerformancePage() {
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip
-                      formatter={(v: number) => [`$${v.toFixed(2)}`, "P&L"]}
+                      formatter={(value) => [formatCurrencyValue(value), "P&L"]}
                     />
                     <Bar
                       dataKey="pnl"
@@ -316,7 +334,7 @@ export default function KalshiPerformancePage() {
                       <XAxis type="number" tick={{ fontSize: 11 }} />
                       <YAxis dataKey="name" type="category" tick={{ fontSize: 11 }} width={70} />
                       <Tooltip
-                        formatter={(v: number) => [`$${v.toFixed(2)}`, "P&L"]}
+                        formatter={(value) => [formatCurrencyValue(value), "P&L"]}
                       />
                       <Bar dataKey="pnl" radius={[0, 4, 4, 0]}>
                         {stratBarData.map((entry, i) => (
@@ -349,7 +367,7 @@ export default function KalshiPerformancePage() {
                         cx="50%"
                         cy="50%"
                         outerRadius={100}
-                        label={({ name, trades }) => `${name}: ${trades}`}
+                        label={({ name, value }) => `${name}: ${value ?? 0}`}
                       >
                         {stratPieData.map((entry, i) => (
                           <Cell key={i} fill={entry.color} />

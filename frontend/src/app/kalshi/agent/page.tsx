@@ -33,12 +33,16 @@ import {
 } from "lucide-react";
 import {
   useAgentStatus,
+  useAgentReadiness,
+  useWeatherVolumeDiagnostics,
+  useWeatherScanStats,
   useAgentPerformance,
   useAgentTrades,
   useAgentSignals,
   useAgentLog,
   useAgentPositions,
   useStartAgent,
+  useStartLiveWeatherAgent,
   useStopAgent,
   useSetKillSwitch,
   useSetPaperMode,
@@ -218,6 +222,9 @@ export default function AgentPage() {
   >("positions");
 
   const { data: status, isLoading: statusLoading } = useAgentStatus();
+  const { data: readiness } = useAgentReadiness();
+  const { data: weatherVolume } = useWeatherVolumeDiagnostics();
+  const { data: weatherScanStats } = useWeatherScanStats();
   const { data: performance } = useAgentPerformance();
   const { data: tradesData } = useAgentTrades({ limit: 50 });
   const { data: signalsData } = useAgentSignals({ limit: 50 });
@@ -225,6 +232,7 @@ export default function AgentPage() {
   const { data: positionsData } = useAgentPositions();
 
   const startAgent = useStartAgent();
+  const startLiveWeatherAgent = useStartLiveWeatherAgent();
   const stopAgent = useStopAgent();
   const setKillSwitch = useSetKillSwitch();
   const setPaperMode = useSetPaperMode();
@@ -247,6 +255,19 @@ export default function AgentPage() {
   const isRunning = status?.running ?? false;
   const isPaper = status?.paper_mode ?? true;
   const isKilled = status?.kill_switch ?? false;
+  const allowedStrategies = new Set(
+    isPaper
+      ? status?.allowed_paper_strategies ?? ["weather"]
+      : status?.allowed_live_strategies ?? ["weather"],
+  );
+  const startAction = isPaper ? startAgent : startLiveWeatherAgent;
+  const startLabel = isPaper ? "Start Paper Agent" : "Start Live Weather";
+  const currentReadiness = readiness?.current;
+  const liveReadiness = readiness?.live;
+
+  function strategyToggleDisabled(strategy: string) {
+    return !allowedStrategies.has(strategy);
+  }
 
   return (
     <div className="space-y-6">
@@ -259,7 +280,7 @@ export default function AgentPage() {
           <div>
             <h1 className="text-2xl font-bold">Trading Agent</h1>
             <p className="text-sm text-muted-foreground">
-              Autonomous Kalshi trading — weather & cross-market sports
+              Autonomous Kalshi trading with live weather-only guardrails
             </p>
           </div>
         </div>
@@ -284,9 +305,7 @@ export default function AgentPage() {
           <div className="flex flex-wrap items-center gap-4">
             {/* Start/Stop */}
             <Button
-              onClick={() =>
-                isRunning ? stopAgent.mutate() : startAgent.mutate()
-              }
+              onClick={() => (isRunning ? stopAgent.mutate() : startAction.mutate())}
               variant={isRunning ? "destructive" : "default"}
               size="sm"
               disabled={isKilled && !isRunning}
@@ -297,7 +316,7 @@ export default function AgentPage() {
                 </>
               ) : (
                 <>
-                  <Play className="h-4 w-4 mr-1" /> Start Agent
+                  <Play className="h-4 w-4 mr-1" /> {startLabel}
                 </>
               )}
             </Button>
@@ -336,6 +355,7 @@ export default function AgentPage() {
               <span className="text-sm">Weather</span>
               <Switch
                 checked={status?.strategy_enabled?.weather ?? true}
+                disabled={strategyToggleDisabled("weather")}
                 onCheckedChange={(v) =>
                   toggleStrategy.mutate({ strategy: "weather", enabled: v })
                 }
@@ -346,7 +366,8 @@ export default function AgentPage() {
               <Trophy className="h-4 w-4 text-orange-500" />
               <span className="text-sm">Sports</span>
               <Switch
-                checked={status?.strategy_enabled?.sports ?? true}
+                checked={status?.strategy_enabled?.sports ?? false}
+                disabled={strategyToggleDisabled("sports")}
                 onCheckedChange={(v) =>
                   toggleStrategy.mutate({ strategy: "sports", enabled: v })
                 }
@@ -357,7 +378,8 @@ export default function AgentPage() {
               <Bitcoin className="h-4 w-4 text-yellow-500" />
               <span className="text-sm">Crypto</span>
               <Switch
-                checked={status?.strategy_enabled?.crypto ?? true}
+                checked={status?.strategy_enabled?.crypto ?? false}
+                disabled={strategyToggleDisabled("crypto")}
                 onCheckedChange={(v) =>
                   toggleStrategy.mutate({ strategy: "crypto", enabled: v })
                 }
@@ -368,7 +390,8 @@ export default function AgentPage() {
               <LineChart className="h-4 w-4 text-blue-500" />
               <span className="text-sm">Finance</span>
               <Switch
-                checked={status?.strategy_enabled?.finance ?? true}
+                checked={status?.strategy_enabled?.finance ?? false}
+                disabled={strategyToggleDisabled("finance")}
                 onCheckedChange={(v) =>
                   toggleStrategy.mutate({ strategy: "finance", enabled: v })
                 }
@@ -379,7 +402,8 @@ export default function AgentPage() {
               <Landmark className="h-4 w-4 text-emerald-500" />
               <span className="text-sm">Econ</span>
               <Switch
-                checked={status?.strategy_enabled?.econ ?? true}
+                checked={status?.strategy_enabled?.econ ?? false}
+                disabled={strategyToggleDisabled("econ")}
                 onCheckedChange={(v) =>
                   toggleStrategy.mutate({ strategy: "econ", enabled: v })
                 }
@@ -390,7 +414,8 @@ export default function AgentPage() {
               <Dribbble className="h-4 w-4 text-orange-600" />
               <span className="text-sm">NBA Props</span>
               <Switch
-                checked={status?.strategy_enabled?.nba_props ?? true}
+                checked={status?.strategy_enabled?.nba_props ?? false}
+                disabled={strategyToggleDisabled("nba_props")}
                 onCheckedChange={(v) =>
                   toggleStrategy.mutate({ strategy: "nba_props", enabled: v })
                 }
@@ -453,6 +478,178 @@ export default function AgentPage() {
                 <Dribbble className="h-3.5 w-3.5 mr-1" />
                 {runNbaProps.isPending ? "Running..." : "NBA Props"}
               </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className={currentReadiness?.ready ? "border-emerald-500/40" : "border-red-500/50"}>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center justify-between">
+            <span>Readiness</span>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-[10px]">
+                Current: {readiness?.current_mode ?? (isPaper ? "paper" : "live")}
+              </Badge>
+              <Badge
+                variant="outline"
+                className={
+                  currentReadiness?.ready
+                    ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
+                    : "bg-red-500/10 text-red-600 border-red-500/30"
+                }
+              >
+                {currentReadiness?.ready ? "Ready" : "Blocked"}
+              </Badge>
+            </div>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="outline" className="bg-sky-500/10 text-sky-700 border-sky-500/30">
+              Live policy: {readiness?.strategy_policy.live_weather_only ? "Weather only" : "Broader than weather"}
+            </Badge>
+            <Badge variant="outline">
+              Start path: {currentReadiness?.recommended_start_endpoint ?? "—"}
+            </Badge>
+            <Badge
+              variant="outline"
+              className={
+                liveReadiness?.ready
+                  ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
+                  : "bg-amber-500/10 text-amber-700 border-amber-500/30"
+              }
+            >
+              Live weather: {liveReadiness?.ready ? "ready" : "blocked"}
+            </Badge>
+          </div>
+
+          {currentReadiness?.blockers && currentReadiness.blockers.length > 0 ? (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
+              <div className="text-sm font-semibold text-red-600 mb-2">Blockers</div>
+              <div className="flex flex-wrap gap-2">
+                {currentReadiness.blockers.map((blocker) => (
+                  <Badge key={blocker} variant="outline" className="bg-red-500/10 text-red-600 border-red-500/30">
+                    {blocker}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-emerald-700">
+              Current mode checks are passing. Live start remains constrained to the weather-only path.
+            </div>
+          )}
+
+          {currentReadiness?.warnings && currentReadiness.warnings.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+              <div className="text-sm font-semibold text-amber-700 mb-2">Warnings</div>
+              <div className="flex flex-wrap gap-2">
+                {currentReadiness.warnings.map((warning) => (
+                  <Badge key={warning} variant="outline" className="bg-amber-500/10 text-amber-700 border-amber-500/30">
+                    {warning}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            {currentReadiness?.checks?.map((check) => (
+              <div
+                key={`${check.name}-${check.detail}`}
+                className={`rounded-lg border p-3 text-sm ${
+                  check.ok
+                    ? "border-emerald-500/20 bg-emerald-500/5"
+                    : "border-red-500/20 bg-red-500/5"
+                }`}
+              >
+                <div className="font-semibold">{check.name}</div>
+                <div className="text-muted-foreground mt-1">{check.detail}</div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center justify-between">
+            <span>Weather Volume Funnel</span>
+            <Badge variant="outline" className="text-[10px]">
+              Last {weatherVolume?.window_days ?? 7}d
+            </Badge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            {[
+              ["Cycles", weatherVolume?.funnel.weather_cycles_started ?? 0],
+              ["Signals", weatherVolume?.funnel.signals_recorded ?? 0],
+              ["Attempts", weatherVolume?.funnel.trade_attempts ?? 0],
+              ["Filled", weatherVolume?.funnel.filled_or_settled_trades ?? 0],
+              ["Open Pos.", weatherVolume?.funnel.open_positions_seen ?? 0],
+              ["Complete", weatherVolume?.funnel.weather_cycles_completed ?? 0],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="rounded-lg border p-3 bg-muted/20">
+                <div className="text-xs text-muted-foreground">{label}</div>
+                <div className="text-2xl font-bold">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            {[
+              ["Markets Seen", weatherScanStats?.markets_seen ?? 0],
+              ["Hydration Try", weatherScanStats?.hydration_attempted ?? 0],
+              ["Detail Updates", weatherScanStats?.detail_updates ?? 0],
+              ["2-Sided Rescued", weatherScanStats?.rescued_two_sided_asks ?? 0],
+              ["Full Quotes", weatherScanStats?.rescued_full_quotes ?? 0],
+              ["Parsed", weatherScanStats?.parsed_markets ?? 0],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="rounded-lg border p-3 bg-sky-500/5 border-sky-500/20">
+                <div className="text-xs text-muted-foreground">{label}</div>
+                <div className="text-2xl font-bold">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="rounded-lg border p-4">
+              <div className="text-sm font-semibold mb-3">Top Weather Blockers</div>
+              <div className="space-y-2">
+                {weatherVolume?.top_blockers?.length ? (
+                  weatherVolume.top_blockers.slice(0, 8).map((row) => (
+                    <div key={`${row.reason}-${row.stage}-${row.signal_source}`} className="flex items-center justify-between gap-3 text-sm">
+                      <div>
+                        <div className="font-medium">{row.reason}</div>
+                        <div className="text-muted-foreground">
+                          {row.stage || "unknown"} · {row.signal_source || "unknown"}
+                        </div>
+                      </div>
+                      <Badge variant="outline">{row.count}</Badge>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-sm text-muted-foreground">No blocker data yet.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border p-4">
+              <div className="text-sm font-semibold mb-3">Worst One-Sided Markets</div>
+              <div className="space-y-2">
+                {weatherVolume?.top_one_sided_tickers?.length ? (
+                  weatherVolume.top_one_sided_tickers.slice(0, 8).map((row) => (
+                    <div key={row.ticker} className="flex items-center justify-between gap-3 text-sm">
+                      <div className="font-mono truncate">{row.ticker}</div>
+                      <Badge variant="outline">{row.count}</Badge>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-sm text-muted-foreground">No one-sided ticker data yet.</div>
+                )}
+              </div>
             </div>
           </div>
         </CardContent>

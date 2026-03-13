@@ -4,12 +4,17 @@
 
 1. Keep `PAPER_MODE=true` and run:
    - `python3 scripts/live_readiness_check.py`
+   - `GET /api/kalshi/agent/readiness`
 2. Confirm API health:
    - `GET /health`
    - `GET /api/kalshi/agent/status`
-3. Confirm no ghost resting orders:
+3. Confirm readiness says:
+   - `current.status=ready` for paper work
+   - `live.status=ready` before any live launch
+   - `strategy_policy.live_weather_only=true`
+4. Confirm no ghost resting orders:
    - `GET /api/kalshi/agent/trades?status=resting`
-4. Confirm monitor heartbeat updates in `/health.guardrails.runtime_health.last_monitor_heartbeat`.
+5. Confirm monitor heartbeat updates in `/health.guardrails.runtime_health.last_monitor_heartbeat`.
 
 ## 2) Secrets Rotation (manual, required before real money)
 
@@ -36,6 +41,9 @@ Then update deployment env only (do not commit `.env`).
    - order failures
    - cancel storm warnings
    - realized P&L stability
+4. Start live only via:
+   - `POST /api/kalshi/agent/start-live-weather`
+   - or `./launch_agent.sh`
 
 ## 4) Emergency Controls
 
@@ -49,7 +57,8 @@ Then update deployment env only (do not commit `.env`).
 ## 5) Re-enable after incident
 
 1. Verify `/health` is healthy and runtime flags are green.
+2. Verify `GET /api/kalshi/agent/readiness` shows `live.status=ready`.
 2. Verify no unexpected resting orders at broker.
 3. Deactivate kill switch:
    - `POST /api/kalshi/agent/kill-switch` with `{ "active": false }`
-4. Restart agent in paper first, then live.
+4. Restart agent in paper first, then live weather-only.

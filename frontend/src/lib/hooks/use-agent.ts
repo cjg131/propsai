@@ -6,10 +6,13 @@ import { api } from "@/lib/api";
 export interface AgentStatus {
   running: boolean;
   paper_mode: boolean;
+  mode?: string;
   kill_switch: boolean;
   bankroll: number;
   effective_bankroll: number;
   strategy_enabled: Record<string, boolean>;
+  allowed_live_strategies?: string[];
+  allowed_paper_strategies?: string[];
   allocations: Record<string, number>;
   daily_loss_limit: number;
   max_bet_size: number;
@@ -20,6 +23,80 @@ export interface AgentStatus {
   remaining_capital: number;
   over_deployed: boolean;
   odds_api_credits_remaining: number | null;
+}
+
+export interface ReadinessCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface ReadinessTarget {
+  target_mode: string;
+  ready: boolean;
+  status: string;
+  recommended_start_endpoint: string;
+  blockers: string[];
+  warnings: string[];
+  checks: ReadinessCheck[];
+}
+
+export interface AgentReadiness {
+  current_mode: string;
+  current: ReadinessTarget;
+  paper: ReadinessTarget;
+  live: ReadinessTarget;
+  strategy_policy: {
+    allowed_live_strategies: string[];
+    allowed_paper_strategies: string[];
+    live_weather_only: boolean;
+  };
+  summary: {
+    db_ok: boolean;
+    db_failures: string[];
+    live_ready: boolean;
+    paper_ready: boolean;
+  };
+}
+
+export interface WeatherVolumeDiagnostics {
+  window_days: number;
+  funnel: {
+    weather_cycles_started: number;
+    weather_cycles_completed: number;
+    signals_recorded: number;
+    trade_attempts: number;
+    filled_or_settled_trades: number;
+    open_positions_seen: number;
+  };
+  top_blockers: Array<{
+    reason: string;
+    stage: string;
+    signal_source: string;
+    count: number;
+  }>;
+  rejection_sources: Array<{
+    signal_source: string;
+    count: number;
+  }>;
+  top_one_sided_tickers: Array<{
+    ticker: string;
+    count: number;
+  }>;
+  daily_rejections: Array<{
+    day: string;
+    rejections: number;
+    near_misses: number;
+  }>;
+}
+
+export interface WeatherScanStats {
+  markets_seen: number;
+  hydration_attempted: number;
+  detail_updates: number;
+  rescued_two_sided_asks: number;
+  rescued_full_quotes: number;
+  parsed_markets: number;
 }
 
 export interface StrategyStats {
@@ -171,6 +248,33 @@ export function useAgentStatus() {
   });
 }
 
+export function useAgentReadiness() {
+  return useQuery<AgentReadiness>({
+    queryKey: ["agent", "readiness"],
+    queryFn: () => api.get("/api/kalshi/agent/readiness"),
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+  });
+}
+
+export function useWeatherVolumeDiagnostics(days = 7) {
+  return useQuery<WeatherVolumeDiagnostics>({
+    queryKey: ["agent", "weather-volume", days],
+    queryFn: () => api.get(`/api/kalshi/agent/weather-volume?days=${days}`),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+}
+
+export function useWeatherScanStats() {
+  return useQuery<WeatherScanStats>({
+    queryKey: ["agent", "weather-scan-stats"],
+    queryFn: () => api.get("/api/kalshi/agent/weather-scan-stats"),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+}
+
 export function useAgentPerformance() {
   return useQuery<AgentPerformance>({
     queryKey: ["agent", "performance"],
@@ -251,6 +355,16 @@ export function useStartAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post("/api/kalshi/agent/start"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agent"] });
+    },
+  });
+}
+
+export function useStartLiveWeatherAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post("/api/kalshi/agent/start-live-weather"),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["agent"] });
     },

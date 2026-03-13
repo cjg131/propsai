@@ -25,7 +25,7 @@ from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs
 from app.services.kalshi_ws import KalshiWebSocket, get_kalshi_ws
 from app.services.nba_data import NBADataService, get_nba_data
 from app.services.news_sentiment import get_market_news_sentiment
-from app.services.parlay_pricer import price_parlay_legs, teams_match
+from app.services.parlay_pricer import TEAM_ALIASES, normalize_team, price_parlay_legs, teams_match
 from app.services.polymarket_data import get_polymarket_data
 from app.services.referee_data import RefereeDataService, get_referee_data
 from app.services.signal_scorer import get_signal_scorer
@@ -39,6 +39,116 @@ from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
 logger = get_logger(__name__)
 
 UTC = timezone.utc
+
+
+def _normalize_person_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _person_name_matches(left: str, right: str) -> bool:
+    """Require a high-confidence name match instead of loose substring guesses."""
+    left_norm = _normalize_person_name(left)
+    right_norm = _normalize_person_name(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+
+    left_parts = left_norm.split()
+    right_parts = right_norm.split()
+    if not left_parts or not right_parts:
+        return False
+
+    left_first, left_last = left_parts[0], left_parts[-1]
+    right_first, right_last = right_parts[0], right_parts[-1]
+    if left_last != right_last:
+        return False
+    if left_first == right_first:
+        return True
+
+    # Allow "J Brunson" / "Jalen Brunson" style matches, but not loose prefixes.
+    return (
+        len(left_first) == 1 and left_first == right_first[:1]
+    ) or (
+        len(right_first) == 1 and right_first == left_first[:1]
+    )
+
+
+def _find_unique_person_match(records: dict[str, Any], player_name: str) -> Any | None:
+    normalized_target = _normalize_person_name(player_name)
+    if not normalized_target:
+        return None
+
+    if normalized_target in records:
+        return records[normalized_target]
+
+    matches = [
+        value
+        for candidate_name, value in records.items()
+        if _person_name_matches(player_name, candidate_name)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _find_unique_prop_match(
+    odds_props_lookup: dict[str, dict[str, Any]],
+    player_name: str,
+    prop_type: str,
+) -> dict[str, Any] | None:
+    exact_key = f"{_normalize_person_name(player_name)}|{prop_type}"
+    if exact_key in odds_props_lookup:
+        return odds_props_lookup[exact_key]
+
+    matches = []
+    for odds_key, odds_value in odds_props_lookup.items():
+        try:
+            odds_player, odds_prop_type = odds_key.rsplit("|", 1)
+        except ValueError:
+            continue
+        if odds_prop_type != prop_type:
+            continue
+        if _person_name_matches(player_name, odds_player):
+            matches.append(odds_value)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _suffix_matches_team_name(team_suffix: str, team_name: str) -> bool:
+    """Match Kalshi ticker suffixes to team names without broad substring guesses."""
+    suffix = normalize_team(team_suffix)
+    target = normalize_team(team_name)
+    if not suffix or not target:
+        return False
+
+    if suffix == target:
+        return True
+
+    # Exact alias-group match covers club abbreviations like PSG, BVB, etc.
+    for canonical, aliases in TEAM_ALIASES.items():
+        normalized_names = {normalize_team(canonical), *(normalize_team(name) for name in aliases)}
+        if suffix in normalized_names and target in normalized_names:
+            return True
+
+    target_words = target.split()
+
+    # Acronym match: "psg" -> "paris saint germain"
+    acronym = "".join(word[0] for word in target_words if word)
+    if suffix == acronym:
+        return True
+
+    # Fall back to token-prefix matching for compact abbreviations only.
+    if len(suffix) < 2 or len(suffix) > 4:
+        return False
+
+    for word in target_words:
+        if len(word) > len(suffix) and word.startswith(suffix):
+            return True
+
+    return False
 
 
 class KalshiAgent:
@@ -128,6 +238,140 @@ class KalshiAgent:
         self._cancel_alert_threshold = int(os.environ.get("CANCEL_ALERT_THRESHOLD", "6"))
         self._auto_kill_on_cancel_storm = os.environ.get("AUTO_KILL_ON_CANCEL_STORM", "false").lower() == "true"
         self._resting_cancel_timestamps: dict[str, list[float]] = {}
+        self._performance_model_refresh_secs = int(os.environ.get("PERFORMANCE_MODEL_REFRESH_SECS", "900"))
+        self._last_performance_model_refresh: float = 0.0
+
+    def _build_live_position_record(
+        self,
+        market_position: dict[str, Any],
+        db_rec: dict[str, Any] | None = None,
+        *,
+        include_title: bool = False,
+    ) -> dict[str, Any]:
+        """Merge Kalshi position truth with local metadata using fee-aware economics."""
+        db_rec = db_rec or {}
+        ticker = market_position.get("ticker", "")
+        pos_qty = market_position.get("position", 0) or 0
+        qty = abs(pos_qty)
+        side = "yes" if pos_qty > 0 else "no"
+        exposure_cents = float(market_position.get("market_exposure", 0) or 0)
+        fees_cents = float(market_position.get("fees_paid", 0) or 0)
+        total_cost_cents = exposure_cents + fees_cents
+        avg_entry = round(total_cost_cents / qty, 1) if qty > 0 else 50
+
+        record: dict[str, Any] = {
+            "ticker": ticker,
+            "side": side,
+            "contracts": qty,
+            "total_cost": round(exposure_cents / 100.0, 2),
+            "total_fees": round(fees_cents / 100.0, 2),
+            "avg_entry_cents": avg_entry,
+            "avg_our_prob": db_rec.get("avg_our_prob", 0.5),
+            "strategy": db_rec.get("strategy") or (
+                "weather" if "HIGH" in ticker or "LOW" in ticker else "unknown"
+            ),
+            "max_risk": round(total_cost_cents / 100.0, 2),
+            "max_profit": round(max(0.0, qty * 1.0 - total_cost_cents / 100.0), 2),
+        }
+
+        if include_title:
+            record.update({
+                "title": db_rec.get("title") or market_position.get("market_title") or ticker,
+                "signal_source": db_rec.get("signal_source", ""),
+                "avg_entry_kalshi_prob": db_rec.get("avg_entry_kalshi_prob", 0),
+                "avg_entry_edge": db_rec.get("avg_entry_edge", 0),
+                "first_entry": db_rec.get("first_entry", ""),
+                "last_entry": db_rec.get("last_entry", ""),
+                "num_fills": db_rec.get("num_fills", 0),
+                "paper_mode": db_rec.get("paper_mode", False),
+                "current_yes_bid": None,
+                "current_yes_ask": None,
+                "current_no_bid": None,
+                "current_no_ask": None,
+                "mark_price_cents": None,
+                "unrealized_pnl": None,
+                "current_edge": None,
+                "status": "open",
+            })
+
+        return record
+
+    @staticmethod
+    def _compute_side_market_prices(
+        *,
+        side: str,
+        yes_bid: int,
+        yes_ask: int,
+        no_bid: int,
+        no_ask: int,
+        last_price: int,
+        avg_entry_cents: int,
+    ) -> tuple[int, int]:
+        """Return (valuation_mark, executable_exit_price) for a side contract."""
+        if side == "yes":
+            bid, ask = yes_bid, yes_ask
+            last_side_price = last_price if last_price > 0 else 0
+        else:
+            bid, ask = no_bid, no_ask
+            last_side_price = (100 - last_price) if last_price > 0 else 0
+
+        if bid > 0 and ask > 0 and bid >= ask * 0.5:
+            mark_price = bid
+        elif bid > 0 and ask > 0 and bid <= last_side_price <= ask:
+            mark_price = last_side_price
+        elif ask > 0:
+            mark_price = ask
+        elif last_side_price > 0:
+            mark_price = last_side_price
+        elif bid > 0:
+            mark_price = bid
+        else:
+            mark_price = avg_entry_cents
+
+        if bid > 0:
+            exit_price = bid
+        elif last_side_price > 0:
+            exit_price = last_side_price
+        elif ask > 0:
+            exit_price = ask
+        else:
+            exit_price = avg_entry_cents
+
+        return int(mark_price), int(exit_price)
+
+    @staticmethod
+    def _compute_hold_ev_cents(*, our_prob: float, exit_price: int) -> float:
+        """Expected liquidation edge of holding vs selling now, in cents per contract."""
+        prob = max(0.0, min(1.0, float(our_prob)))
+        return (prob * 100.0) - float(exit_price)
+
+    @staticmethod
+    def _compute_position_pnl(*, contracts: int, price_cents: int, total_cost: float, total_fees: float) -> float:
+        """P&L of a position marked or liquidated at a given side price."""
+        value = contracts * price_cents / 100.0
+        return round(value - total_cost - total_fees, 2)
+
+    @staticmethod
+    def _nba_prop_within_time_gate(ticker: str, *, now_dt: datetime | None = None) -> bool:
+        """Return True only for NBA prop tickers within the 12-hour trading window."""
+        ticker_date_match = re.search(r'(\d{2})([A-Z]{3})(\d{2})', ticker or "")
+        if not ticker_date_match:
+            return False
+
+        months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                  "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+        try:
+            yr = int("20" + ticker_date_match.group(1))
+            mon = months[ticker_date_match.group(2)]
+            day = int(ticker_date_match.group(3))
+            from zoneinfo import ZoneInfo
+
+            game_dt = datetime(yr, mon, day, 19, 0, tzinfo=ZoneInfo("America/New_York"))
+            now = now_dt or datetime.now(ZoneInfo("America/New_York"))
+            hours_until_game = (game_dt - now).total_seconds() / 3600
+            return hours_until_game <= 12
+        except Exception:
+            return False
 
     # ── Cross-Strategy Correlation Helpers ────────────────────────────
 
@@ -178,6 +422,29 @@ class KalshiAgent:
         except Exception as e:
             logger.debug("Cross-strategy adjustment failed", error=str(e))
         return confidence
+
+    def _refresh_performance_model_if_due(self, *, force: bool = False) -> None:
+        """Refresh runtime performance model so filters learn from new realized results."""
+        import time
+
+        now_ts = time.time()
+        if not force and (now_ts - self._last_performance_model_refresh) < self._performance_model_refresh_secs:
+            return
+
+        try:
+            model = self.engine.load_performance_model(force_refresh=True)
+            self._last_performance_model_refresh = now_ts
+            self.engine.log_event(
+                "info",
+                "Performance model refreshed "
+                f"(families={len(model.get('family_multipliers', {}))}, "
+                f"sources={len(model.get('signal_source_multipliers', {}))}, "
+                f"blocked_families={len(model.get('blocked_families', []))}, "
+                f"blocked_sources={len(model.get('blocked_sources', []))})",
+                strategy="risk",
+            )
+        except Exception as e:
+            self.engine.log_event("warning", f"Performance model refresh failed: {e}", strategy="risk")
 
     def _extract_signal_components(self, trade: dict[str, Any]) -> dict[str, float]:
         """Extract signal component values from a trade's notes/details for quality scoring."""
@@ -323,6 +590,54 @@ class KalshiAgent:
             return title
         return f"[{city_name}] {title}"
 
+    def _record_weather_rejection(
+        self,
+        market: dict[str, Any],
+        reason: str,
+        *,
+        stage: str,
+        signal_source: str,
+        near_miss: bool = False,
+        details: str = "",
+    ) -> None:
+        ticker = market.get("ticker", "")
+        self.engine.record_candidate_rejection(
+            "weather",
+            reason,
+            ticker=ticker,
+            signal_source=signal_source,
+            stage=stage,
+            near_miss=near_miss,
+            details=details,
+        )
+
+    def _observed_weather_thresholds(self) -> dict[str, float]:
+        min_edge = 0.08
+        max_edge = 0.60
+        min_price_cents = 15.0
+
+        get_quality = getattr(self.engine, "get_recent_source_quality", None)
+        if callable(get_quality):
+            stats = get_quality("weather_observed_arbitrage", lookback_days=45)
+        else:
+            stats = {"trades": 0.0, "avg_pnl": 0.0, "win_rate": 0.0}
+        if stats["trades"] >= 8:
+            if stats["avg_pnl"] > 0.5 and stats["win_rate"] >= 0.55:
+                min_edge = 0.07
+                min_price_cents = 12.0
+            elif stats["avg_pnl"] < -0.5 or stats["win_rate"] < 0.45:
+                min_edge = 0.10
+                min_price_cents = 18.0
+
+        return {
+            "min_edge": min_edge,
+            "max_edge": max_edge,
+            "min_price_cents": min_price_cents,
+            "trades": stats["trades"],
+            "avg_pnl": stats["avg_pnl"],
+            "win_rate": stats["win_rate"],
+        }
+
     def _record_resting_cancel(self, ticker: str) -> None:
         """Track canceled resting orders per ticker and alert on cancel storms."""
         now_ts = datetime.now(UTC).timestamp()
@@ -404,7 +719,7 @@ class KalshiAgent:
 
     async def execute_ranked_signals(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
-        Rank all candidates globally by edge * confidence, then execute
+        Rank all candidates globally by historical quality, then execute
         the top ones.  Each cycle deploys up to 85% of AVAILABLE capital
         (bankroll − current net exposure).  The remaining 15% is held back
         for the next cycle to DCA into existing positions or catch new
@@ -413,6 +728,7 @@ class KalshiAgent:
         """
         if not candidates:
             return []
+        self._refresh_performance_model_if_due()
 
         if (
             not self.engine.paper_mode
@@ -472,8 +788,37 @@ class KalshiAgent:
 
         candidates = deduped
 
-        # Sort by edge * confidence descending
-        candidates.sort(key=lambda c: c.get("edge", 0) * c.get("confidence", 0), reverse=True)
+        quality_filtered: list[dict[str, Any]] = []
+        blocked_for_quality = 0
+        for candidate in candidates:
+            quality = self.engine.evaluate_candidate_quality(candidate)
+            candidate["quality_family"] = quality.get("family", "other")
+            candidate["quality_score"] = quality.get("quality_score", 0.0)
+            if quality.get("reasons"):
+                candidate["quality_reasons"] = ", ".join(quality["reasons"])
+            if not quality.get("allowed", False):
+                blocked_for_quality += 1
+                self.engine.record_candidate_rejection(
+                    candidate.get("strategy", ""),
+                    "quality_filter_blocked",
+                    ticker=candidate.get("ticker", ""),
+                    signal_source=candidate.get("signal_source", ""),
+                    stage="ranking_quality",
+                    near_miss=True,
+                    details=", ".join(quality.get("reasons", [])),
+                )
+                continue
+            quality_filtered.append(candidate)
+
+        if blocked_for_quality:
+            self.engine.log_event(
+                "info",
+                f"Quality filter: blocked {blocked_for_quality} low-quality candidates",
+                strategy="risk",
+            )
+
+        candidates = quality_filtered
+        candidates.sort(key=lambda c: c.get("quality_score", 0.0), reverse=True)
 
         # ── Skip tickers where we already hold an open position on the same side ──
         # Prevents re-entering the same market every cycle (econ CPI stacking, etc.)
@@ -608,10 +953,34 @@ class KalshiAgent:
         # Prevents dumping multiple bets on the same city/date
         MAX_TRADES_PER_EVENT = 2
         event_trade_count: dict[str, int] = {}
+        family_trade_count: dict[str, int] = {}
+        family_cycle_caps = {
+            "weather_observed": 2,
+            "weather_forecast": 0 if not self.engine.paper_mode else 1,
+            "sports_single": 1,
+            "sports_single_soccer": 0 if not self.engine.paper_mode else 1,
+            "sports_parlay": 0,
+            "crypto_momentum": 1,
+            "finance_bracket": 1,
+            "finance_threshold": 1,
+            "econ": 1,
+            "nba_props": 1,
+            "other": 1,
+        }
+        max_trades_per_cycle = int(os.environ.get("MAX_TRADES_PER_CYCLE", "3"))
+        if self.engine.get_effective_bankroll() <= 250:
+            max_trades_per_cycle = min(max_trades_per_cycle, 1)
 
         traded: list[dict[str, Any]] = []
         for candidate in candidates:
             if cycle_budget <= 0:
+                break
+            if len(traded) >= max_trades_per_cycle:
+                self.engine.log_event(
+                    "info",
+                    f"Global cycle cap reached ({max_trades_per_cycle} trades)",
+                    strategy="risk",
+                )
                 break
 
             strategy = candidate.get("strategy", "")
@@ -619,12 +988,32 @@ class KalshiAgent:
             edge = candidate.get("edge", 0)
             confidence = candidate.get("confidence", 0)
             price_cents = candidate.get("price_cents", 0)
+            sig_source = candidate.get("signal_source", "")
+            quality_family = candidate.get("quality_family", "other")
 
             if not ticker or price_cents <= 0:
                 continue
 
+            if (
+                not self.engine.paper_mode
+                and strategy == "weather"
+                and sig_source != "weather_observed_arbitrage"
+            ):
+                continue
+
             # ── Skip if we already hold this ticker ──
             if ticker in existing_tickers:
+                continue
+
+            family_cap = family_cycle_caps.get(quality_family, 1)
+            if family_cap <= 0:
+                continue
+            if family_trade_count.get(quality_family, 0) >= family_cap:
+                self.engine.log_event(
+                    "info",
+                    f"Family cycle cap: skipping {ticker} in {quality_family}",
+                    strategy="risk",
+                )
                 continue
 
             # ── Per-event concentration guard ──
@@ -648,7 +1037,6 @@ class KalshiAgent:
 
             # Position sizing (respects per-strategy and per-ticker caps)
             # CRITICAL: signal_source differentiates forecast (small) vs observed arb (full)
-            sig_source = candidate.get("signal_source", "")
             count = self.engine.calculate_position_size(
                 strategy=strategy,
                 edge=edge,
@@ -709,6 +1097,7 @@ class KalshiAgent:
                 traded.append(candidate)
                 # Track event concentration
                 event_trade_count[event_key] = event_trade_count.get(event_key, 0) + 1
+                family_trade_count[quality_family] = family_trade_count.get(quality_family, 0) + 1
 
                 # Discord alert + SSE event for trade execution
                 try:
@@ -758,6 +1147,7 @@ class KalshiAgent:
         self.engine.log_event("info", "Weather cycle starting", strategy="weather")
         self.engine.start_cycle("weather")
         results = []
+        cycle_started_at = datetime.now(UTC).isoformat()
 
         if not self.engine.strategy_enabled.get("weather", True):
             self.engine.log_event("info", "Weather strategy disabled", strategy="weather")
@@ -769,6 +1159,16 @@ class KalshiAgent:
             self.engine.log_event(
                 "info",
                 f"Found {len(weather_markets)} weather markets",
+                strategy="weather",
+            )
+            scan_stats = self.scanner.get_weather_scan_stats()
+            self.engine.log_event(
+                "info",
+                "Weather quote hydration: "
+                f"attempted={scan_stats.get('hydration_attempted', 0)}, "
+                f"detail_updates={scan_stats.get('detail_updates', 0)}, "
+                f"rescued_two_sided_asks={scan_stats.get('rescued_two_sided_asks', 0)}, "
+                f"rescued_full_quotes={scan_stats.get('rescued_full_quotes', 0)}",
                 strategy="weather",
             )
 
@@ -889,6 +1289,14 @@ class KalshiAgent:
             f"Weather cycle complete: {len(results)} candidates",
             strategy="weather",
         )
+        rejection_summary = self.engine.get_rejection_summary_since("weather", cycle_started_at, limit=6)
+        if rejection_summary:
+            summary_text = ", ".join(f"{row['reason']}={row['count']}" for row in rejection_summary)
+            self.engine.log_event(
+                "info",
+                f"Weather rejection summary: {summary_text}",
+                strategy="weather",
+            )
         return results
 
     async def _evaluate_weather_market(
@@ -905,8 +1313,10 @@ class KalshiAgent:
 
         # Safety filter: Max Spread Limit = 5¢
         if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            self._record_weather_rejection(market, "yes_spread_too_wide", stage="forecast_precheck", signal_source="weather_consensus")
             return None
         if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            self._record_weather_rejection(market, "no_spread_too_wide", stage="forecast_precheck", signal_source="weather_consensus")
             return None
 
         strike_type = market.get("strike_type", "")
@@ -933,6 +1343,7 @@ class KalshiAgent:
             cap_strike = None
 
         if not yes_ask and not no_ask:
+            self._record_weather_rejection(market, "no_two_sided_market", stage="forecast_precheck", signal_source="weather_consensus")
             return None
 
         # Calculate Maker Prices (Pennying the bid)
@@ -942,11 +1353,13 @@ class KalshiAgent:
         # Safety filter: skip effectively-settled markets where either side is <=3c
         # (means the outcome is near-certain, no real edge to capture)
         if yes_maker_price <= 3 or no_maker_price <= 3:
+            self._record_weather_rejection(market, "near_settled_market", stage="forecast_precheck", signal_source="weather_consensus")
             return None
 
         # Safety filter: skip very cheap contracts (< 10c on either side)
         # These are long-shot bets with high loss rates even with edge
         if min(yes_maker_price, no_maker_price) < 10:
+            self._record_weather_rejection(market, "cheap_longshot_filtered", stage="forecast_precheck", signal_source="weather_consensus")
             return None
 
         # Time-aware trading rules
@@ -963,6 +1376,7 @@ class KalshiAgent:
                 
                 # Skip markets closing within 2 hours
                 if hours_until_close < 2:
+                    self._record_weather_rejection(market, "close_too_soon", stage="forecast_time_gate", signal_source="weather_consensus")
                     return None
                 
                 # Get city timezone for local time
@@ -976,6 +1390,7 @@ class KalshiAgent:
                 # Money is better spent elsewhere when outcome is uncertain
                 if local_hour < 12:
                     if yes_maker_price > 90 or no_maker_price > 90:
+                        self._record_weather_rejection(market, "late_day_expensive_market", stage="forecast_time_gate", signal_source="weather_consensus")
                         return None
                 
                 # Late day (>3pm local): Only take locked outcomes
@@ -985,6 +1400,7 @@ class KalshiAgent:
                     # This will be handled by observed data path
                     # For forecast-based evaluation, skip late-day unless very cheap
                     if min(yes_maker_price, no_maker_price) > 50:
+                        self._record_weather_rejection(market, "late_day_forecast_disabled", stage="forecast_time_gate", signal_source="weather_consensus")
                         return None
 
                 # LOW TEMP GUARD: During daytime (10 AM - 6 PM), the overnight
@@ -993,15 +1409,18 @@ class KalshiAgent:
                 # Skip low temp forecast bets entirely during the day.
                 market_type_check = weather_info.get("market_type", "high_temp")
                 if market_type_check == "low_temp" and 10 <= local_hour <= 18:
+                    self._record_weather_rejection(market, "daytime_low_temp_forecast_disabled", stage="forecast_time_gate", signal_source="weather_consensus")
                     return None  # Let observed-data path handle same-day low temp
                         
             except (ValueError, TypeError, Exception):
                 # If time parsing fails, apply conservative 2hr close filter
                 if hours_until_close < 2:
+                    self._record_weather_rejection(market, "close_too_soon", stage="forecast_time_gate", signal_source="weather_consensus")
                     return None
 
         # Safety filter: skip very low volume markets (< 50 contracts traded)
         if market.get("volume", 0) < 50:
+            self._record_weather_rejection(market, "low_volume", stage="forecast_precheck", signal_source="weather_consensus")
             return None
 
         # Build consensus for this specific market's strike structure
@@ -1016,6 +1435,7 @@ class KalshiAgent:
             all_city_forecasts=all_city_forecasts,
         )
         if "error" in consensus:
+            self._record_weather_rejection(market, "consensus_unavailable", stage="forecast_consensus", signal_source="weather_consensus")
             return None
 
         # Generate signal
@@ -1030,6 +1450,18 @@ class KalshiAgent:
         )
 
         if not signal:
+            self._record_weather_rejection(
+                market,
+                "signal_below_threshold",
+                stage="forecast_signal",
+                signal_source="weather_consensus",
+                near_miss=(consensus.get("confidence", 0) >= max(0.2, wx_thresh["min_confidence"] - 0.1)),
+                details=json.dumps({
+                    "confidence": consensus.get("confidence", 0),
+                    "source_count": consensus.get("source_count", 0),
+                    "mean_temp": consensus.get("mean_low_f") if market_type == "low_temp" else consensus.get("mean_high_f"),
+                }),
+            )
             return None
 
         # ── Order Book Imbalance / Smart Money Flow ──
@@ -1059,6 +1491,7 @@ class KalshiAgent:
                     # Reduce confidence to potentially skip
                     signal["confidence"] -= 0.2
                     if signal["edge"] < wx_thresh["min_edge"] + 0.05:
+                        self._record_weather_rejection(market, "orderbook_resistance", stage="forecast_orderbook", signal_source="weather_consensus", near_miss=True)
                         return None # Need +5% extra edge to fight the flow
                         
                 # Conversely, if flow is heavily with us, we can boost confidence
@@ -1069,6 +1502,7 @@ class KalshiAgent:
             pass
 
         if signal["confidence"] < wx_thresh["min_confidence"]:
+            self._record_weather_rejection(market, "confidence_after_orderbook_below_floor", stage="forecast_signal", signal_source="weather_consensus", near_miss=True)
             return None
 
         # Record signal (with enriched city title)
@@ -1104,6 +1538,7 @@ class KalshiAgent:
         )
 
         if count <= 0:
+            self._record_weather_rejection(market, "position_size_zero", stage="forecast_sizing", signal_source="weather_consensus", near_miss=True)
             return {**signal, "ticker": market["ticker"], "action": "skip", "reason": "position_size_zero"}
 
         # Return candidate for ranking (execution happens in the cycle)
@@ -1158,22 +1593,27 @@ class KalshiAgent:
             cap_strike = None
 
         if not yes_ask and not no_ask:
+            self._record_weather_rejection(market, "no_two_sided_market", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
 
         # Skip markets where one side is at near-zero — already resolved or no real liquidity.
         # yes_ask=1, no_ask=100 means Kalshi already knows the answer; there's nothing to buy.
         if yes_ask <= 5 or no_ask <= 5:
+            self._record_weather_rejection(market, "near_settled_market", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
         # Both sides must have real two-sided liquidity (not 100¢ = no sellers)
         if yes_ask >= 97 or no_ask >= 97:
+            self._record_weather_rejection(market, "one_sided_liquidity", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
             
         # Safety filter: Max Spread Limit = 5¢
         yes_bid = market.get("yes_bid", 0)
         no_bid = market.get("no_bid", 0)
         if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 5:
+            self._record_weather_rejection(market, "yes_spread_too_wide", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
         if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
+            self._record_weather_rejection(market, "no_spread_too_wide", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
 
         # Calculate Maker Prices (Pennying the bid)
@@ -1181,6 +1621,7 @@ class KalshiAgent:
         no_maker_price = min(no_bid + 1, no_ask) if no_bid > 0 else no_ask
 
         if market.get("volume", 0) < 50:
+            self._record_weather_rejection(market, "low_volume", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
 
         # Skip markets closing within 30 min (too late to act)
@@ -1190,12 +1631,14 @@ class KalshiAgent:
                 close_dt = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
                 mins_left = (close_dt - _dt.now(UTC)).total_seconds() / 60
                 if mins_left < 30:
+                    self._record_weather_rejection(market, "close_too_soon", stage="observed_time_gate", signal_source="weather_observed_arbitrage")
                     return None
             except (ValueError, TypeError):
                 pass
 
         # Need at least 3 hourly readings for data quality
         if obs.get("obs_count", 0) < 3:
+            self._record_weather_rejection(market, "insufficient_observations", stage="observed_data", signal_source="weather_observed_arbitrage")
             return None
 
         observed_high = obs.get("observed_high_f")
@@ -1312,6 +1755,14 @@ class KalshiAgent:
 
         if our_prob_yes is None:
             # Outcome not yet deterministic — skip, don't guess
+            self._record_weather_rejection(
+                market,
+                "outcome_not_deterministic_yet",
+                stage="observed_logic",
+                signal_source="weather_observed_arbitrage",
+                near_miss=True,
+                details=f"obs_count={obs_count} local_hour={local_hour}",
+            )
             return None
 
         # Calculate edge
@@ -1329,17 +1780,33 @@ class KalshiAgent:
         else:
             return None
 
-        # Require meaningful edge — but lower bar than forecast since this is near-certain
-        MIN_OBSERVED_EDGE = 0.10
-        # Cap at 30%: edges >30% mean Kalshi has already priced in the outcome (e.g. 6¢ market).
-        # We'd just be agreeing with the market and paying the spread on a near-settled contract.
-        MAX_OBSERVED_EDGE = 0.30
-        if edge < MIN_OBSERVED_EDGE or edge > MAX_OBSERVED_EDGE:
+        # Require meaningful edge — but observed/weather-confirmed trades can justify
+        # larger mispricings than the forecast path, especially on a slow retail book.
+        observed_rules = self._observed_weather_thresholds()
+        min_observed_edge = observed_rules["min_edge"]
+        max_observed_edge = observed_rules["max_edge"]
+        if edge < min_observed_edge or edge > max_observed_edge:
+            self._record_weather_rejection(
+                market,
+                "observed_edge_outside_band",
+                stage="observed_edge",
+                signal_source="weather_observed_arbitrage",
+                near_miss=edge >= max(0.05, min_observed_edge - 0.03),
+                details=f"edge={edge:.4f} min_edge={min_observed_edge:.4f} max_edge={max_observed_edge:.4f}",
+            )
             return None
 
-        # Require Kalshi price >= 20¢ on our side — if it's already at 6-9¢, the market
-        # has already resolved this in price and there's no real opportunity left.
-        if price_cents < 20:
+        # Require Kalshi price >= 15¢ on our side — still avoids ultra-cheap near-settled
+        # contracts while allowing slightly earlier entry on confirmed observation moves.
+        if price_cents < observed_rules["min_price_cents"]:
+            self._record_weather_rejection(
+                market,
+                "observed_price_too_low",
+                stage="observed_price",
+                signal_source="weather_observed_arbitrage",
+                near_miss=price_cents >= max(8, observed_rules["min_price_cents"] - 3),
+                details=f"price_cents={price_cents} min_price_cents={observed_rules['min_price_cents']}",
+            )
             return None
 
         # High confidence since this is based on actuals, not forecast
@@ -1376,6 +1843,7 @@ class KalshiAgent:
         )
 
         if count <= 0:
+            self._record_weather_rejection(market, "position_size_zero", stage="observed_sizing", signal_source="weather_observed_arbitrage", near_miss=True)
             return {
                 "ticker": ticker, "title": title, "side": side, "edge": edge,
                 "our_prob": our_prob, "kalshi_prob": kalshi_prob, "confidence": confidence,
@@ -1670,12 +2138,7 @@ class KalshiAgent:
                     if not key.startswith("h2h|"):
                         continue
                     team_name = key.split("|", 1)[1]
-                    # Check if the suffix matches the team (e.g., PSG matches "Paris Saint Germain")
-                    team_words = team_name.lower().split()
-                    suffix_lower = outcome_suffix.lower()
-                    if (suffix_lower in team_name.lower() or
-                        any(w.startswith(suffix_lower) for w in team_words) or
-                        team_name.lower().startswith(suffix_lower)):
+                    if _suffix_matches_team_name(outcome_suffix, team_name):
                         sharp_prob = prob
                         match_desc = key
                         break
@@ -1716,12 +2179,15 @@ class KalshiAgent:
                         line = float(parts[2])
                     except ValueError:
                         continue
-                    # Match team from suffix and line from floor_strike
-                    suffix_lower = outcome_suffix.lower()
+                    # Match team from suffix and line from floor_strike.
+                    # Kalshi "Team wins by over X.5" corresponds to that team at -X.5,
+                    # not +X.5. Matching on absolute value would wrongly turn
+                    # an underdog +X.5 cover price into a margin-of-victory price.
+                    if line >= 0:
+                        continue
                     # Remove trailing digits from suffix to get team part
-                    team_part = suffix_lower.rstrip("0123456789")
-                    if (team_part in team_name.lower() or
-                        team_name.lower().startswith(team_part)):
+                    team_part = outcome_suffix.rstrip("0123456789")
+                    if _suffix_matches_team_name(team_part, team_name):
                         if abs(abs(line) - target_line) < 0.5:
                             sharp_prob = prob
                             match_desc = key
@@ -2434,7 +2900,7 @@ class KalshiAgent:
             is_down_market = any(kw in title_lower for kw in ["down", "below", "lower", "close below", "lose", "drop"])
 
             if not is_up_market and not is_down_market:
-                is_up_market = True
+                return None
 
             our_prob_yes = p_up if is_up_market else (1.0 - p_up)
             signal_source = "finance_momentum"
@@ -2631,6 +3097,8 @@ class KalshiAgent:
 
         signal = econ_signals[econ_type]
         title_lower = title.lower()
+        is_above_market = any(kw in title_lower for kw in ["above", "over", "higher"])
+        is_below_market = any(kw in title_lower for kw in ["below", "under", "lower"])
 
         # Extract threshold from title (e.g., "Will CPI be above 3.0%?")
         threshold_match = re.search(r'(\d+\.?\d*)\s*%', title)
@@ -2656,6 +3124,10 @@ class KalshiAgent:
                 our_prob_yes = self.econ.estimate_probability_above(
                     estimated, threshold, volatility=cpi_vol
                 )
+                if is_below_market and not is_above_market:
+                    our_prob_yes = 1.0 - our_prob_yes
+                elif not is_above_market and not is_below_market:
+                    return None
                 confidence = 0.4
             else:
                 return None
@@ -2679,6 +3151,10 @@ class KalshiAgent:
                 our_prob_yes = self.econ.estimate_probability_above(
                     signal["estimated_next"], threshold, volatility=0.10
                 )
+                if is_below_market and not is_above_market:
+                    our_prob_yes = 1.0 - our_prob_yes
+                elif not is_above_market and not is_below_market:
+                    return None
                 confidence = 0.4
             else:
                 return None
@@ -2690,6 +3166,10 @@ class KalshiAgent:
                 our_prob_yes = self.econ.estimate_probability_above(
                     signal["estimated_next_rate"], threshold, volatility=0.2
                 )
+                if is_below_market and not is_above_market:
+                    our_prob_yes = 1.0 - our_prob_yes
+                elif not is_above_market and not is_below_market:
+                    return None
                 confidence = 0.4
             else:
                 return None
@@ -3147,38 +3627,12 @@ class KalshiAgent:
         if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 5:
             return None
 
-        # 12-hour time gate: parse game date from ticker and skip if >12hrs away
-        # Ticker format: KXNBAPTS-26FEB19PHXSAS-...  (26FEB19 = Feb 19, 2026)
-        try:
-            ticker_date_match = re.search(r'(\d{2})([A-Z]{3})(\d{2})', ticker)
-            if ticker_date_match:
-                yr = int("20" + ticker_date_match.group(1))
-                mon_str = ticker_date_match.group(2)
-                day = int(ticker_date_match.group(3))
-                months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-                          "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
-                mon = months.get(mon_str, 0)
-                if mon > 0:
-                    from zoneinfo import ZoneInfo
-                    # NBA games typically start 7pm ET, use that as reference
-                    game_dt = datetime(yr, mon, day, 19, 0, tzinfo=ZoneInfo("America/New_York"))
-                    now = datetime.now(ZoneInfo("America/New_York"))
-                    hours_until_game = (game_dt - now).total_seconds() / 3600
-                    if hours_until_game > 12:
-                        return None
-        except Exception:
-            pass  # If parsing fails, proceed anyway
+        # 12-hour time gate: fail closed if we can't confidently parse the game date.
+        if not self._nba_prop_within_time_gate(ticker):
+            return None
 
         # Match player name to our data
-        player_key = player_name.lower().strip()
-        player = name_to_player.get(player_key)
-
-        # Try partial match if exact fails
-        if not player:
-            for name, pf in name_to_player.items():
-                if player_key in name or name in player_key:
-                    player = pf
-                    break
+        player = _find_unique_person_match(name_to_player, player_name)
 
         if not player:
             logger.debug("Player not found in data", player=player_name)
@@ -3193,17 +3647,10 @@ class KalshiAgent:
         # ── SportsDataIO injury status: skip Out/Doubtful, penalize Questionable ──
         injury_status_detail = ""
         if sdio_injuries and player_name:
-            inj_key = player_name.lower().strip()
+            inj_key = _normalize_person_name(player_name)
             inj_status = sdio_injuries.get(inj_key, "")
             if not inj_status:
-                # Partial match on last name
-                parts = inj_key.split()
-                if parts:
-                    last = parts[-1]
-                    for ik, iv in sdio_injuries.items():
-                        if ik.endswith(last) and len(last) >= 4:
-                            inj_status = iv
-                            break
+                inj_status = _find_unique_person_match(sdio_injuries, player_name) or ""
             if inj_status:
                 status_upper = inj_status.upper()
                 if status_upper in ("OUT", "DOUBTFUL", "IR", "SUSPENDED"):
@@ -3245,14 +3692,7 @@ class KalshiAgent:
         # If they disagree significantly, reduce confidence.
         odds_detail = ""
         if odds_props_lookup and prop_type and player_name:
-            odds_key = f"{player_name.lower()}|{prop_type}"
-            odds_prop = odds_props_lookup.get(odds_key)
-            if not odds_prop:
-                # Try partial player name match
-                for ok, ov in odds_props_lookup.items():
-                    if ok.endswith(f"|{prop_type}") and player_name.lower()[:6] in ok:
-                        odds_prop = ov
-                        break
+            odds_prop = _find_unique_prop_match(odds_props_lookup, player_name, prop_type)
 
             if odds_prop:
                 books_consensus_over = odds_prop.get("consensus_over_prob", 0.5)
@@ -3277,13 +3717,9 @@ class KalshiAgent:
         # ── SportsDataIO news: injury/status context ───────────────────────
         news_detail = ""
         if sdio_news and player_name:
-            player_news = sdio_news.get(player_name.lower(), [])
+            player_news = sdio_news.get(_normalize_person_name(player_name), [])
             if not player_news:
-                # Try partial match
-                for nk, nv in sdio_news.items():
-                    if player_name.lower()[:6] in nk:
-                        player_news = nv
-                        break
+                player_news = _find_unique_person_match(sdio_news, player_name) or []
 
             if player_news:
                 # Check for injury/questionable keywords in most recent news
@@ -3417,12 +3853,20 @@ class KalshiAgent:
                         status = order_info.get("status", "pending")
                         
                         if status == "filled":
-                            fill_count = order_info.get("fill_count", rt["count"])
-                            raw_cost = fill_count * rt["price_cents"] / 100.0
-                            cost = -raw_cost if rt.get("action") == "sell" else raw_cost
-                            from app.services.trading_engine import _kalshi_maker_fee
-                            fee = _kalshi_maker_fee(fill_count, rt["price_cents"])
-                            self.engine.update_trade_status(rt["id"], "filled", fill_count, cost, fee)
+                            fill_count, actual_price_cents, cost, fee = self.engine._extract_actual_fill_execution(
+                                order_info,
+                                fallback_count=rt["count"],
+                                fallback_price_cents=rt["price_cents"],
+                                action=rt.get("action", "buy"),
+                            )
+                            self.engine.update_trade_status(
+                                rt["id"],
+                                "filled",
+                                fill_count,
+                                cost,
+                                fee,
+                                price_cents=actual_price_cents,
+                            )
                             self.engine.log_event("live_trade", f"Resting order filled: {fill_count}x @ {rt['price_cents']}c", strategy=rt["strategy"])
                             actions.append({"action": "filled_resting", "ticker": rt["ticker"]})
                         elif status in ("canceled", "error"):
@@ -3492,13 +3936,12 @@ class KalshiAgent:
                     if pos_qty == 0:
                         continue
                     ticker = mp.get("ticker", "")
-                    side = "yes" if pos_qty > 0 else "no"
-                    qty = abs(pos_qty)
-                    exposure_cents = mp.get("market_exposure", 0)
-                    avg_entry = round(exposure_cents / qty) if qty > 0 else 50
 
                     # Merge with DB metadata if available
                     db_rec = db_by_ticker.get(ticker, {})
+                    pos_record = self._build_live_position_record(mp, db_rec)
+                    side = pos_record["side"]
+                    qty = pos_record["contracts"]
                     if db_rec and db_rec.get("side") != side:
                         logger.warning(
                             "DB/Kalshi side mismatch — using Kalshi truth",
@@ -3506,18 +3949,15 @@ class KalshiAgent:
                             kalshi_side=side, kalshi_qty=qty,
                         )
 
-                    positions.append({
-                        "ticker": ticker,
-                        "side": side,  # Kalshi truth
-                        "contracts": qty,  # Kalshi truth
-                        "total_cost": exposure_cents / 100.0,
-                        "total_fees": db_rec.get("total_fees", 0) or 0,
-                        "avg_entry_cents": avg_entry,
-                        "avg_our_prob": db_rec.get("avg_our_prob", 0.5),
-                        "strategy": db_rec.get("strategy") or (
-                            "weather" if "HIGH" in ticker or "LOW" in ticker else "unknown"
-                        ),
-                    })
+                    positions.append(pos_record)
+                self.engine.set_broker_positions_snapshot([
+                    {
+                        "ticker": p["ticker"],
+                        "exposure_dollars": p["total_cost"],
+                        "strategy": p["strategy"],
+                    }
+                    for p in positions
+                ])
                 if positions:
                     logger.info("Monitor positions from Kalshi API", count=len(positions))
             except Exception as e:
@@ -3590,25 +4030,28 @@ class KalshiAgent:
                     last_price = market.get("last_price", 0) or 0
                     mkt_status = market.get("status", "")
 
-                    # Mark-to-market: use same-side bid if spread is tight.
-                    # Wide spread = bid is garbage lowball, use last_price or ask.
-                    if pos["side"] == "yes":
-                        bid, ask = yes_bid, yes_ask
-                    else:
-                        bid, ask = no_bid, no_ask
-                    if bid > 0 and ask > 0 and bid >= ask * 0.5:
-                        mark_price = bid  # tight spread — bid is real
-                    elif last_price > 0:
-                        mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
-                    elif ask > 0:
-                        mark_price = ask  # wide spread, no trades — ask is best proxy
-                    elif bid > 0:
-                        mark_price = bid
-                    else:
-                        mark_price = pos["avg_entry_cents"]
+                    mark_price, exit_price = self._compute_side_market_prices(
+                        side=pos["side"],
+                        yes_bid=yes_bid,
+                        yes_ask=yes_ask,
+                        no_bid=no_bid,
+                        no_ask=no_ask,
+                        last_price=last_price,
+                        avg_entry_cents=pos["avg_entry_cents"],
+                    )
 
-                    mark_value = pos["contracts"] * mark_price / 100.0
-                    unrealized_pnl = round(mark_value - pos["total_cost"] - pos["total_fees"], 2)
+                    unrealized_pnl = self._compute_position_pnl(
+                        contracts=pos["contracts"],
+                        price_cents=mark_price,
+                        total_cost=pos["total_cost"],
+                        total_fees=pos["total_fees"],
+                    )
+                    liquidation_pnl = self._compute_position_pnl(
+                        contracts=pos["contracts"],
+                        price_cents=exit_price,
+                        total_cost=pos["total_cost"],
+                        total_fees=pos["total_fees"],
+                    )
 
                     logger.info(
                         "Position MTM",
@@ -3631,45 +4074,45 @@ class KalshiAgent:
                     # ── DECISION 0a: STOP-LOSS — position down >50% of cost ──
                     # Catches cases where original signal was wrong but edge
                     # never technically "flips" (e.g., broken crypto bracket trades)
-                    if pos["total_cost"] > 0 and unrealized_pnl < -(pos["total_cost"] * 0.50):
-                        if mark_price > 0:
+                    if pos["total_cost"] > 0 and liquidation_pnl < -(pos["total_cost"] * 0.50):
+                        if exit_price > 0:
                             await self.engine.exit_trade(
                                 strategy=pos["strategy"],
                                 ticker=ticker,
                                 side=pos["side"],
                                 count=pos["contracts"],
-                                price_cents=mark_price,
-                                reason=f"stop_loss pnl=${unrealized_pnl:+.2f} ({unrealized_pnl/pos['total_cost']:.0%} of cost)",
+                                price_cents=exit_price,
+                                reason=f"stop_loss pnl=${liquidation_pnl:+.2f} ({liquidation_pnl/pos['total_cost']:.0%} of cost)",
                             )
                             self.engine.log_event(
                                 "paper_trade",
-                                f"STOP-LOSS {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — down ${unrealized_pnl:+.2f}",
+                                f"STOP-LOSS {pos['side'].upper()} {pos['contracts']}x {ticker} @ {exit_price}c — down ${liquidation_pnl:+.2f}",
                                 strategy="monitor",
                             )
                             actions.append({"action": "exit", "reason": "stop_loss", "ticker": ticker,
-                                            "pnl": unrealized_pnl})
+                                            "pnl": liquidation_pnl})
                             exited_this_cycle.add(ticker)
                             self._exited_tickers[ticker] = _time.time()
                             continue
 
                     # ── DECISION 0b: DEAD CONTRACT — mark price near zero ──
                     # If our side is trading at <=3c, the position is effectively dead
-                    if 0 < mark_price <= 3:
+                    if 0 < exit_price <= 3:
                         await self.engine.exit_trade(
                             strategy=pos["strategy"],
                             ticker=ticker,
                             side=pos["side"],
                             count=pos["contracts"],
-                            price_cents=mark_price,
-                            reason=f"dead_contract mark={mark_price}c",
+                            price_cents=exit_price,
+                            reason=f"dead_contract mark={exit_price}c",
                         )
                         self.engine.log_event(
                             "paper_trade",
-                            f"DEAD CONTRACT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — P&L: ${unrealized_pnl:+.2f}",
+                            f"DEAD CONTRACT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {exit_price}c — P&L: ${liquidation_pnl:+.2f}",
                             strategy="monitor",
                         )
                         actions.append({"action": "exit", "reason": "dead_contract", "ticker": ticker,
-                                        "pnl": unrealized_pnl})
+                                        "pnl": liquidation_pnl})
                         exited_this_cycle.add(ticker)
                         self._exited_tickers[ticker] = _time.time()
                         continue
@@ -3678,43 +4121,43 @@ class KalshiAgent:
                     # If YES reaches 95c, probability of winning is very high. 
                     # Instead of waiting days for settlement to free up $1.00, sell now for 0.95 
                     # to free up the capital immediately for other trades.
-                    if mark_price >= 95 and unrealized_pnl > 0:
+                    if exit_price >= 95 and liquidation_pnl > 0:
                         await self.engine.exit_trade(
                             strategy=pos["strategy"],
                             ticker=ticker,
                             side=pos["side"],
                             count=pos["contracts"],
-                            price_cents=mark_price,
-                            reason=f"dynamic_take_profit mark={mark_price}c (freeing capital)",
+                            price_cents=exit_price,
+                            reason=f"dynamic_take_profit mark={exit_price}c (freeing capital)",
                         )
                         self.engine.log_event(
                             "paper_trade",
-                            f"DYNAMIC TP {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — P&L: ${unrealized_pnl:+.2f}",
+                            f"DYNAMIC TP {pos['side'].upper()} {pos['contracts']}x {ticker} @ {exit_price}c — P&L: ${liquidation_pnl:+.2f}",
                             strategy="monitor",
                         )
                         actions.append({"action": "take_profit", "ticker": ticker,
-                                        "pnl": unrealized_pnl, "profit_pct": 1.0})
+                                        "pnl": liquidation_pnl, "profit_pct": 1.0})
                         exited_this_cycle.add(ticker)
                         self._exited_tickers[ticker] = _time.time()
                         continue
 
                     # ── DECISION 1: EXIT — edge has flipped significantly ──
-                    if current_edge < -0.05 and mark_price > 0:
+                    if current_edge < -0.05 and exit_price > 0:
                         await self.engine.exit_trade(
                             strategy=pos["strategy"],
                             ticker=ticker,
                             side=pos["side"],
                             count=pos["contracts"],
-                            price_cents=mark_price,
+                            price_cents=exit_price,
                             reason=f"edge_flipped edge={current_edge:.3f}",
                         )
                         self.engine.log_event(
                             "paper_trade",
-                            f"EXIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — edge flipped to {current_edge:.1%}, P&L: ${unrealized_pnl:+.2f}",
+                            f"EXIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {exit_price}c — edge flipped to {current_edge:.1%}, P&L: ${liquidation_pnl:+.2f}",
                             strategy="monitor",
                         )
                         actions.append({"action": "exit", "reason": "edge_flipped", "ticker": ticker,
-                                        "current_edge": current_edge, "pnl": unrealized_pnl})
+                                        "current_edge": current_edge, "pnl": liquidation_pnl})
                         exited_this_cycle.add(ticker)
                         self._exited_tickers[ticker] = _time.time()
                         continue
@@ -3731,14 +4174,17 @@ class KalshiAgent:
                     # we should only sell if the capital is better deployed elsewhere.
                     max_profit = pos.get("max_profit", 0) or 0
                     
-                    if max_profit > 0 and unrealized_pnl > 0 and mark_price > 0:
-                        profit_pct = unrealized_pnl / max_profit
+                    if max_profit > 0 and liquidation_pnl > 0 and exit_price > 0:
+                        profit_pct = liquidation_pnl / max_profit
                         
-                        # Calculate Expected Value (EV) of holding the current contract for the final remaining cents
-                        # Use current market-implied probability (mark_price) instead of stale entry-time prob
-                        prob_of_winning = mark_price / 100.0
-                        remaining_upside_cents = 100 - mark_price
-                        ev_of_holding = (prob_of_winning * remaining_upside_cents) - ((1 - prob_of_winning) * mark_price)
+                        # Compare our stored thesis value to the executable exit price.
+                        # Using the same current price as both probability and liquidation
+                        # value cancels to ~0 and makes this branch meaningless.
+                        thesis_prob = pos.get("avg_our_prob", 0.0) or 0.0
+                        ev_of_holding = self._compute_hold_ev_cents(
+                            our_prob=thesis_prob,
+                            exit_price=exit_price,
+                        ) / 100.0
                         
                         # If the EV of holding the remaining position is negative or very low, AND we have 
                         # captured a significant chunk of profit, it makes sense to exit.
@@ -3751,7 +4197,7 @@ class KalshiAgent:
                         should_take_profit = False
                         reason = ""
                         
-                        if mark_price >= 95:
+                        if exit_price >= 95:
                             should_take_profit = True
                             reason = "locked_in_guaranteed_profit"
                         elif ev_of_holding < 0 and profit_pct > 0.50:
@@ -3767,16 +4213,16 @@ class KalshiAgent:
                                 ticker=ticker,
                                 side=pos["side"],
                                 count=pos["contracts"],
-                                price_cents=mark_price,
-                                reason=f"dynamic_take_profit ({reason}) pnl=${unrealized_pnl:+.2f}",
+                                price_cents=exit_price,
+                                reason=f"dynamic_take_profit ({reason}) pnl=${liquidation_pnl:+.2f}",
                             )
                             self.engine.log_event(
                                 "paper_trade",
-                                f"DYNAMIC TAKE-PROFIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {mark_price}c — {reason}, P&L: ${unrealized_pnl:+.2f}",
+                                f"DYNAMIC TAKE-PROFIT {pos['side'].upper()} {pos['contracts']}x {ticker} @ {exit_price}c — {reason}, P&L: ${liquidation_pnl:+.2f}",
                                 strategy="monitor",
                             )
                             actions.append({"action": "dynamic_take_profit", "ticker": ticker,
-                                            "reason": reason, "pnl": unrealized_pnl})
+                                            "reason": reason, "pnl": liquidation_pnl})
                             exited_this_cycle.add(ticker)
                             self._exited_tickers[ticker] = _time.time()
                             continue
@@ -4087,47 +4533,10 @@ class KalshiAgent:
                 if pos_qty == 0:
                     continue
                 ticker = mp.get("ticker", "")
-                side = "yes" if pos_qty > 0 else "no"
-                qty = abs(pos_qty)
-                exposure_cents = mp.get("market_exposure", 0)
-                fees_cents = mp.get("fees_paid", 0)
-                total_cost_cents = exposure_cents + fees_cents  # what we actually paid
-                avg_entry = round(total_cost_cents / qty, 1) if qty > 0 else 50
 
                 # Merge DB metadata if available
                 db_rec = db_by_ticker.get(ticker, {})
-
-                positions.append({
-                    "ticker": ticker,
-                    "title": db_rec.get("title") or mp.get("market_title") or ticker,
-                    "side": side,
-                    "strategy": db_rec.get("strategy") or (
-                        "weather" if "HIGH" in ticker or "LOW" in ticker else "unknown"
-                    ),
-                    "signal_source": db_rec.get("signal_source", ""),
-                    "contracts": qty,
-                    "avg_entry_cents": avg_entry,
-                    "total_cost": round(total_cost_cents / 100.0, 2),
-                    "total_fees": round(fees_cents / 100.0, 2),
-                    "max_risk": round(total_cost_cents / 100.0, 2),
-                    "max_profit": round(qty * 1.0 - total_cost_cents / 100.0, 2),
-                    "avg_our_prob": db_rec.get("avg_our_prob", 0.5),
-                    "avg_entry_kalshi_prob": db_rec.get("avg_entry_kalshi_prob", 0),
-                    "avg_entry_edge": db_rec.get("avg_entry_edge", 0),
-                    "first_entry": db_rec.get("first_entry", ""),
-                    "last_entry": db_rec.get("last_entry", ""),
-                    "num_fills": db_rec.get("num_fills", 0),
-                    "paper_mode": db_rec.get("paper_mode", False),
-                    # Placeholders — filled below with live market data
-                    "current_yes_bid": None,
-                    "current_yes_ask": None,
-                    "current_no_bid": None,
-                    "current_no_ask": None,
-                    "mark_price_cents": None,
-                    "unrealized_pnl": None,
-                    "current_edge": None,
-                    "status": "open",
-                })
+                positions.append(self._build_live_position_record(mp, db_rec, include_title=True))
         except Exception as e:
             logger.warning("Kalshi API positions failed for dashboard, falling back to DB", error=str(e))
             positions = db_positions  # Last resort
@@ -4154,27 +4563,20 @@ class KalshiAgent:
                 if pos.get("title") == pos["ticker"] and market.get("title"):
                     pos["title"] = market["title"]
 
-                # Mark-to-market: use same-side bid if spread is tight.
-                # Wide spread = bid is garbage lowball, use last_price or ask.
                 last_price = market.get("last_price", 0) or 0
-                if pos["side"] == "yes":
-                    bid, ask = yes_bid, yes_ask
-                else:
-                    bid, ask = no_bid, no_ask
-                if bid > 0 and ask > 0 and bid >= ask * 0.5:
-                    mark_price = bid  # tight spread — bid is real
-                elif last_price > 0:
-                    mark_price = last_price if pos["side"] == "yes" else (100 - last_price)
-                elif ask > 0:
-                    mark_price = ask  # wide spread, no trades — ask is best proxy
-                elif bid > 0:
-                    mark_price = bid
-                else:
-                    mark_price = pos["avg_entry_cents"]
+                mark_price, _ = self._compute_side_market_prices(
+                    side=pos["side"],
+                    yes_bid=yes_bid,
+                    yes_ask=yes_ask,
+                    no_bid=no_bid,
+                    no_ask=no_ask,
+                    last_price=last_price,
+                    avg_entry_cents=pos["avg_entry_cents"],
+                )
 
                 pos["mark_price_cents"] = mark_price
                 mark_value = pos["contracts"] * mark_price / 100.0
-                pos["unrealized_pnl"] = round(mark_value - pos["total_cost"], 2)
+                pos["unrealized_pnl"] = round(mark_value - pos["total_cost"] - pos["total_fees"], 2)
 
                 if pos["side"] == "yes" and yes_ask > 0:
                     pos["current_edge"] = round(pos["avg_our_prob"] - (yes_ask / 100.0), 4)
@@ -4221,9 +4623,16 @@ class KalshiAgent:
                     position_exposure = 0.0
                     try:
                         kalshi_pos = await self.kalshi.get_positions()
+                        broker_positions_snapshot: list[dict[str, Any]] = []
                         for mp in kalshi_pos.get("market_positions", []):
                             if mp.get("position", 0) != 0:
-                                position_exposure += float(mp.get("market_exposure_dollars", 0) or 0)
+                                exposure = float(mp.get("market_exposure_dollars", 0) or 0)
+                                position_exposure += exposure
+                                broker_positions_snapshot.append({
+                                    "ticker": mp.get("ticker", ""),
+                                    "exposure_dollars": exposure,
+                                })
+                        self.engine.set_broker_positions_snapshot(broker_positions_snapshot)
                     except Exception:
                         pass
 
@@ -4246,7 +4655,7 @@ class KalshiAgent:
                             "warning",
                             f"Syncing bankroll: ${self.engine.bankroll:.2f} → ${total_portfolio:.2f} (actual portfolio value)",
                         )
-                    self.engine.bankroll = total_portfolio
+                    self.engine.sync_bankroll(total_portfolio)
                     balance_verified = True
                     break
                 except Exception as e:
@@ -4303,6 +4712,7 @@ class KalshiAgent:
         """
         self.engine.log_event("info", "Boot cycle: running all strategies sequentially")
         try:
+            self._refresh_performance_model_if_due(force=True)
             all_candidates: list[dict[str, Any]] = []
 
             for name, coro in [
@@ -4829,6 +5239,39 @@ class KalshiAgent:
                 "last_heartbeat": self.engine._last_monitor_heartbeat,
                 "loops": loop_health,
             },
+        }
+
+    def get_weather_diagnostics(self) -> dict[str, Any]:
+        """Summarize observed-weather trade gates, provider health, and recent misses."""
+        thresholds = self._observed_weather_thresholds()
+        provider_health = self.weather.get_source_diagnostics()
+        near_miss_summary = self.engine.get_near_miss_summary(strategy="weather", limit=8)
+        recent_near_misses = self.engine.get_candidate_rejections(
+            strategy="weather",
+            near_miss_only=True,
+            limit=12,
+        )
+
+        recent_live_weather_trades = self.engine.get_trades(
+            strategy="weather",
+            limit=40,
+            paper_only=False,
+        )
+        recent_observed_trades = [
+            trade for trade in recent_live_weather_trades
+            if trade.get("signal_source") == "weather_observed_arbitrage"
+        ][:10]
+
+        return {
+            "observed_thresholds": thresholds,
+            "provider_health": provider_health,
+            "near_miss_summary": near_miss_summary,
+            "recent_near_misses": recent_near_misses,
+            "recent_observed_trades": recent_observed_trades,
+            "recent_observed_quality": self.engine.get_recent_source_quality(
+                "weather_observed_arbitrage",
+                lookback_days=45,
+            ),
         }
 
 

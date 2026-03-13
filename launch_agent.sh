@@ -7,10 +7,9 @@ PID=$!
 echo "Agent API started with PID $PID"
 sleep 5
 
-echo "Starting autonomous trading loop (LIVE MONEY)..."
-curl -X POST http://localhost:8000/api/kalshi/agent/start \
-  -H "Content-Type: application/json" \
-  -d '{"interval_seconds": 60, "paper_mode": false}'
+echo "Starting autonomous trading loop (LIVE WEATHER ONLY)..."
+curl -X POST http://localhost:8000/api/kalshi/agent/start-live-weather \
+  -H "Content-Type: application/json"
 
 echo ""
 echo "Agent loop started. Keep this terminal open."

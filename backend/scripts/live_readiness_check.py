@@ -1,90 +1,74 @@
 from __future__ import annotations
 
 import os
-import sqlite3
+import sys
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "app" / "data" / "trading_engine.db"
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.services.live_readiness import evaluate_readiness
+from app.services.trading_engine import get_trading_engine
 
 
-def _check_env() -> list[str]:
-    errors: list[str] = []
-    required = [
-        "SUPABASE_URL",
-        "SUPABASE_KEY",
-        "SPORTSDATAIO_API_KEY",
-    ]
-    for key in required:
-        if not os.environ.get(key):
-            errors.append(f"missing env: {key}")
-
-    if os.environ.get("PAPER_MODE", "true").lower() == "false":
-        live_required = ["KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PATH"]
-        for key in live_required:
-            if not os.environ.get(key):
-                errors.append(f"missing live env: {key}")
-
-    return errors
+ENV_PATH = ROOT / ".env"
 
 
-def _check_db() -> list[str]:
-    errors: list[str] = []
-    if not DB_PATH.exists():
-        errors.append(f"db missing: {DB_PATH}")
-        return errors
+def _load_env_file() -> None:
+    if not ENV_PATH.exists():
+        return
 
-    try:
-        conn = sqlite3.connect(str(DB_PATH))
-        c = conn.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
-        if not c.fetchone():
-            errors.append("db table missing: trades")
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_log'")
-        if not c.fetchone():
-            errors.append("db table missing: agent_log")
-        conn.close()
-    except Exception as e:
-        errors.append(f"db check failed: {e}")
-
-    return errors
+    for raw_line in ENV_PATH.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
-def _print_config_summary() -> None:
-    keys = [
-        "PAPER_MODE",
-        "BANKROLL",
-        "ENABLE_DYNAMIC_REPRICING",
-        "MAX_TOTAL_RESTING_ORDERS",
-        "MAX_RESTING_ORDERS_PER_STRATEGY",
-        "MAX_ORDER_FAILURES_WINDOW",
-        "ORDER_FAILURE_WINDOW_MINS",
-        "REQUIRE_WS_FOR_LIVE",
-        "AUTO_KILL_ON_ORDER_FAILURES",
-        "CANCEL_ALERT_WINDOW_MINS",
-        "CANCEL_ALERT_THRESHOLD",
-        "AUTO_KILL_ON_CANCEL_STORM",
-    ]
-    print("\nConfig summary:")
-    for key in keys:
-        print(f"  {key}={os.environ.get(key, '<unset>')}")
+def _print_target(title: str, payload: dict) -> None:
+    icon = "PASS" if payload.get("ready") else "BLOCKED"
+    print(f"\n{title}: {icon}")
+    print(f"  Start endpoint: {payload.get('recommended_start_endpoint')}")
+    for check in payload.get("checks", []):
+        marker = "ok" if check.get("ok") else "x"
+        print(f"  [{marker}] {check.get('name')}: {check.get('detail')}")
+    if payload.get("warnings"):
+        print("  Warnings:")
+        for warning in payload["warnings"]:
+            print(f"    - {warning}")
+    if payload.get("blockers"):
+        print("  Blockers:")
+        for blocker in payload["blockers"]:
+            print(f"    - {blocker}")
 
 
 def main() -> int:
-    print("Live readiness check")
-    env_errors = _check_env()
-    db_errors = _check_db()
+    _load_env_file()
+    engine = get_trading_engine()
+    readiness = evaluate_readiness(engine=engine, agent=None)
 
-    _print_config_summary()
+    print("PropsAI readiness check")
+    print(f"Current mode: {readiness['current_mode']}")
+    print(
+        "Strategy policy: "
+        f"live={','.join(readiness['strategy_policy']['allowed_live_strategies']) or 'none'} "
+        f"paper={','.join(readiness['strategy_policy']['allowed_paper_strategies']) or 'none'}"
+    )
 
-    all_errors = env_errors + db_errors
-    if all_errors:
-        print("\nFAILED:")
-        for err in all_errors:
-            print(f"  - {err}")
-        return 1
+    _print_target("Paper readiness", readiness["paper"])
+    _print_target("Live readiness", readiness["live"])
 
-    print("\nPASS: core readiness checks succeeded")
-    return 0
+    if readiness["live"]["ready"]:
+        print("\nPASS: live weather-only readiness checks succeeded")
+        return 0
+
+    print("\nFAILED: live readiness is blocked")
+    return 1
 
 
 if __name__ == "__main__":

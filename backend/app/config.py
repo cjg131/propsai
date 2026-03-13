@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     kalshi_private_key_path: str = Field(
         default="kalshi.key", description="Path to Kalshi RSA private key file"
     )
+    kalshi_base_url: str = Field(
+        default="https://api.elections.kalshi.com/trade-api/v2",
+        description="Kalshi API base URL. Use demo-api.kalshi.co for demo keys.",
+    )
 
     # Sentry
     sentry_dsn: str = Field(default="", description="Sentry DSN for error tracking")
@@ -90,6 +94,14 @@ class Settings(BaseSettings):
     app_debug: bool = Field(default=True, description="Debug mode")
     cors_origins: str = Field(
         default="http://localhost:3000", description="Allowed CORS origins"
+    )
+    live_enabled_strategies: str = Field(
+        default="weather",
+        description="Comma-separated strategies allowed in live trading",
+    )
+    paper_enabled_strategies: str = Field(
+        default="weather",
+        description="Comma-separated strategies allowed in paper trading",
     )
 
     @property

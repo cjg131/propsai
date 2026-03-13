@@ -17,7 +17,7 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+DEFAULT_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 # NBA player prop series tickers on Kalshi (discovered from /series endpoint)
 # Individual stat props
@@ -112,8 +112,9 @@ class KalshiClient:
     def __init__(self) -> None:
         settings = get_settings()
         self.api_key_id = settings.kalshi_api_key_id
+        self.base_url = settings.kalshi_base_url or DEFAULT_BASE_URL
         self.private_key: rsa.RSAPrivateKey | None = None
-        self._http = httpx.AsyncClient(base_url=BASE_URL, timeout=30.0)
+        self._http = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
         self._semaphore = asyncio.Semaphore(self._MAX_CONCURRENT)
         self._last_request_time: float = 0.0
 
@@ -232,7 +233,7 @@ class KalshiClient:
 
     async def get_orderbook(self, ticker: str) -> dict[str, Any]:
         """Fetch orderbook for a market."""
-        return await self._get(f"/orderbook/{ticker}")
+        return await self._get(f"/markets/{ticker}/orderbook")
 
     # ── Authenticated endpoints ─────────────────────────────────────
 
@@ -294,6 +295,7 @@ class KalshiClient:
         ticker: str | None = None,
         status: str | None = None,
         limit: int = 100,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """Get orders, optionally filtered."""
         params: dict[str, Any] = {"limit": limit}
@@ -301,6 +303,8 @@ class KalshiClient:
             params["ticker"] = ticker
         if status:
             params["status"] = status
+        if cursor:
+            params["cursor"] = cursor
         return await self._get("/portfolio/orders", params=params, auth=True)
 
     async def get_fills(
@@ -308,6 +312,7 @@ class KalshiClient:
         ticker: str | None = None,
         order_id: str | None = None,
         limit: int = 100,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """Get fill history."""
         params: dict[str, Any] = {"limit": limit}
@@ -315,6 +320,8 @@ class KalshiClient:
             params["ticker"] = ticker
         if order_id:
             params["order_id"] = order_id
+        if cursor:
+            params["cursor"] = cursor
         return await self._get("/portfolio/fills", params=params, auth=True)
 
     async def get_market(self, ticker: str) -> dict[str, Any]:

@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -421,7 +421,10 @@ class OpenMeteoClient:
 
     _cache: dict[str, dict] = {}
     _cache_ts: dict[str, float] = {}
-    _CACHE_TTL: float = 7200.0  # 2 hours — avoids 429 rate limiting
+    _CACHE_TTL: float = 10800.0  # 3 hours — reduces repeat hits when scans run often
+    _STALE_CACHE_TTL: float = 21600.0  # 6 hours — stale fallback during provider incidents
+    _backoff_until: float = 0.0
+    _backoff_reason: str = ""
 
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(timeout=15.0)
@@ -437,8 +440,28 @@ class OpenMeteoClient:
         if target_date is None:
             target_date = datetime.now(UTC).date()
         cache_key = f"{city_key}_{target_date.isoformat()}"
-        if cache_key in OpenMeteoClient._cache and (now - OpenMeteoClient._cache_ts.get(cache_key, 0)) < OpenMeteoClient._CACHE_TTL:
-            return OpenMeteoClient._cache[cache_key]
+        cached = OpenMeteoClient._cache.get(cache_key)
+        cached_ts = OpenMeteoClient._cache_ts.get(cache_key, 0)
+        cache_age = now - cached_ts
+        if cached and cache_age < OpenMeteoClient._CACHE_TTL:
+            return cached
+
+        if now < OpenMeteoClient._backoff_until:
+            if cached and cache_age < OpenMeteoClient._STALE_CACHE_TTL:
+                logger.debug(
+                    "Open-Meteo in cooldown, using stale cache",
+                    city=city_key,
+                    stale_age_seconds=round(cache_age),
+                    reason=OpenMeteoClient._backoff_reason,
+                )
+                return cached
+            logger.debug(
+                "Open-Meteo in cooldown, skipping request",
+                city=city_key,
+                retry_in_seconds=round(OpenMeteoClient._backoff_until - now),
+                reason=OpenMeteoClient._backoff_reason,
+            )
+            return None
 
         config = CITY_CONFIGS.get(city_key)
         if not config:
@@ -460,6 +483,8 @@ class OpenMeteoClient:
                 },
             )
             resp.raise_for_status()
+            OpenMeteoClient._backoff_until = 0.0
+            OpenMeteoClient._backoff_reason = ""
             data = resp.json()
 
             daily = data.get("daily", {})
@@ -527,7 +552,35 @@ class OpenMeteoClient:
             OpenMeteoClient._cache_ts[cache_key] = now
             return result
 
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 429:
+                OpenMeteoClient._backoff_until = now + 2 * 3600
+                OpenMeteoClient._backoff_reason = "rate_limited"
+            elif status and status >= 500:
+                OpenMeteoClient._backoff_until = now + 30 * 60
+                OpenMeteoClient._backoff_reason = f"server_{status}"
+
+            if cached and cache_age < OpenMeteoClient._STALE_CACHE_TTL:
+                logger.warning(
+                    "Open-Meteo failed, using stale cache",
+                    city=city_key,
+                    status=status,
+                    stale_age_seconds=round(cache_age),
+                )
+                return cached
+
+            logger.warning("Open-Meteo ensemble failed", city=city_key, error=str(e))
+            return None
         except Exception as e:
+            if cached and cache_age < OpenMeteoClient._STALE_CACHE_TTL:
+                logger.warning(
+                    "Open-Meteo failed, using stale cache",
+                    city=city_key,
+                    stale_age_seconds=round(cache_age),
+                    error=str(e),
+                )
+                return cached
             logger.warning("Open-Meteo ensemble failed", city=city_key, error=str(e))
             return None
 
@@ -540,7 +593,10 @@ class TomorrowIOClient:
 
     _cache: dict[str, dict] = {}
     _cache_ts: dict[str, float] = {}
-    _CACHE_TTL: float = 3600.0  # 1 hour — keeps us under 25 req/hr free tier (20 cities = 20 req/hr)
+    _CACHE_TTL: float = 10800.0  # 3 hours — keeps us comfortably under Tomorrow.io free-tier limits
+    _STALE_CACHE_TTL: float = 21600.0  # 6 hours — stale fallback during provider incidents
+    _backoff_until: float = 0.0
+    _backoff_reason: str = ""
 
     def __init__(self, api_key: str = "") -> None:
         self.api_key = api_key
@@ -568,8 +624,28 @@ class TomorrowIOClient:
         import time as _time
         _now = _time.time()
         cache_key = f"{city_key}_{target_str}"
-        if cache_key in TomorrowIOClient._cache and (_now - TomorrowIOClient._cache_ts.get(cache_key, 0)) < TomorrowIOClient._CACHE_TTL:
-            return TomorrowIOClient._cache[cache_key]
+        cached = TomorrowIOClient._cache.get(cache_key)
+        cached_ts = TomorrowIOClient._cache_ts.get(cache_key, 0)
+        cache_age = _now - cached_ts
+        if cached and cache_age < TomorrowIOClient._CACHE_TTL:
+            return cached
+
+        if _now < TomorrowIOClient._backoff_until:
+            if cached and cache_age < TomorrowIOClient._STALE_CACHE_TTL:
+                logger.debug(
+                    "Tomorrow.io in cooldown, using stale cache",
+                    city=city_key,
+                    stale_age_seconds=round(cache_age),
+                    reason=TomorrowIOClient._backoff_reason,
+                )
+                return cached
+            logger.debug(
+                "Tomorrow.io in cooldown, skipping request",
+                city=city_key,
+                retry_in_seconds=round(TomorrowIOClient._backoff_until - _now),
+                reason=TomorrowIOClient._backoff_reason,
+            )
+            return None
 
         try:
             # Fetch daily + hourly in one request using comma-separated timesteps
@@ -584,6 +660,8 @@ class TomorrowIOClient:
                 },
             )
             resp.raise_for_status()
+            TomorrowIOClient._backoff_until = 0.0
+            TomorrowIOClient._backoff_reason = ""
             data = resp.json()
 
             timelines = data.get("timelines", {})
@@ -641,7 +719,35 @@ class TomorrowIOClient:
             TomorrowIOClient._cache_ts[cache_key] = _now
             return result
 
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 429:
+                TomorrowIOClient._backoff_until = _now + 4 * 3600
+                TomorrowIOClient._backoff_reason = "rate_limited"
+            elif status and status >= 500:
+                TomorrowIOClient._backoff_until = _now + 45 * 60
+                TomorrowIOClient._backoff_reason = f"server_{status}"
+
+            if cached and cache_age < TomorrowIOClient._STALE_CACHE_TTL:
+                logger.warning(
+                    "Tomorrow.io failed, using stale cache",
+                    city=city_key,
+                    status=status,
+                    stale_age_seconds=round(cache_age),
+                )
+                return cached
+
+            logger.warning("Tomorrow.io forecast failed", city=city_key, error=str(e))
+            return None
         except Exception as e:
+            if cached and cache_age < TomorrowIOClient._STALE_CACHE_TTL:
+                logger.warning(
+                    "Tomorrow.io failed, using stale cache",
+                    city=city_key,
+                    stale_age_seconds=round(cache_age),
+                    error=str(e),
+                )
+                return cached
             logger.warning("Tomorrow.io forecast failed", city=city_key, error=str(e))
             return None
 
@@ -997,30 +1103,30 @@ class WeatherConsensus:
             target_date = datetime.now(UTC).date()
         forecasts: dict[str, Any] = {"city": city_key, "sources": {}, "target_date": target_date.isoformat()}
 
-        # NWS is free/unlimited — call first
-        calls = [
-            ("nws", self.nws.get_forecast(city_key, target_date)),
-            ("nws_hourly", self.nws.get_hourly_daily_forecast(city_key, target_date)),
-            ("hrrr", self.hrrr.get_forecast(city_key, target_date)),
-            ("open_meteo", self.open_meteo.get_ensemble_forecast(city_key, target_date)),
-            ("tomorrow_io", self.tomorrow_io.get_forecast(city_key, target_date)),
-            ("visual_crossing", self.visual_crossing.get_forecast(city_key, target_date)),
-            ("weatherbit", self.weatherbit.get_forecast(city_key, target_date)),
-            ("openweathermap", self.openweathermap.get_forecast(city_key, target_date)),
+        # Build provider calls lazily so skipped sources do not leave pending coroutines behind.
+        calls: list[tuple[str, Callable[[], Any]]] = [
+            ("nws", lambda: self.nws.get_forecast(city_key, target_date)),
+            ("nws_hourly", lambda: self.nws.get_hourly_daily_forecast(city_key, target_date)),
+            ("hrrr", lambda: self.hrrr.get_forecast(city_key, target_date)),
+            ("open_meteo", lambda: self.open_meteo.get_ensemble_forecast(city_key, target_date)),
+            ("tomorrow_io", lambda: self.tomorrow_io.get_forecast(city_key, target_date)),
+            ("visual_crossing", lambda: self.visual_crossing.get_forecast(city_key, target_date)),
+            ("weatherbit", lambda: self.weatherbit.get_forecast(city_key, target_date)),
+            ("openweathermap", lambda: self.openweathermap.get_forecast(city_key, target_date)),
         ]
 
         import time as _time
         now_ts = _time.time()
 
-        for name, coro in calls:
+        for name, make_coro in calls:
             # Circuit breaker: skip sources that have failed repeatedly
             open_until = self._source_circuit_open_until.get(name, 0)
             if now_ts < open_until:
                 logger.debug("Circuit breaker open, skipping source", source=name, city=city_key)
-                coro.close()  # prevent "coroutine was never awaited" warning
                 continue
 
             try:
+                coro = make_coro()
                 result = await coro
                 if result is not None:
                     forecasts["sources"][name] = result
@@ -1495,3 +1601,52 @@ class WeatherConsensus:
             self.weatherbit.close(),
             self.openweathermap.close(),
         )
+
+    def get_source_diagnostics(self) -> dict[str, Any]:
+        """Expose weather provider health/cooldown info for diagnostics."""
+        import time as _time
+
+        now = _time.time()
+        return {
+            "nws": {
+                "enabled": True,
+                "cooldown_remaining_sec": 0,
+            },
+            "nws_hourly": {
+                "enabled": True,
+                "cooldown_remaining_sec": 0,
+            },
+            "hrrr": {
+                "enabled": True,
+                "cooldown_remaining_sec": 0,
+            },
+            "open_meteo": {
+                "enabled": True,
+                "cooldown_remaining_sec": max(0, int(OpenMeteoClient._backoff_until - now)),
+                "cooldown_reason": OpenMeteoClient._backoff_reason,
+                "cache_ttl_sec": int(OpenMeteoClient._CACHE_TTL),
+                "stale_cache_ttl_sec": int(OpenMeteoClient._STALE_CACHE_TTL),
+            },
+            "tomorrow_io": {
+                "enabled": bool(self.tomorrow_io.api_key),
+                "cooldown_remaining_sec": max(0, int(TomorrowIOClient._backoff_until - now)),
+                "cooldown_reason": TomorrowIOClient._backoff_reason,
+                "cache_ttl_sec": int(TomorrowIOClient._CACHE_TTL),
+                "stale_cache_ttl_sec": int(TomorrowIOClient._STALE_CACHE_TTL),
+            },
+            "visual_crossing": {
+                "enabled": bool(self.visual_crossing.api_key),
+                "cooldown_remaining_sec": 0,
+                "cache_ttl_sec": int(VisualCrossingClient._CACHE_TTL),
+            },
+            "weatherbit": {
+                "enabled": bool(self.weatherbit.api_key),
+                "cooldown_remaining_sec": 0,
+                "cache_ttl_sec": int(WeatherbitClient._CACHE_TTL),
+            },
+            "openweathermap": {
+                "enabled": bool(self.openweathermap.api_key),
+                "cooldown_remaining_sec": 0,
+                "cache_ttl_sec": int(OpenWeatherMapClient._CACHE_TTL),
+            },
+        }

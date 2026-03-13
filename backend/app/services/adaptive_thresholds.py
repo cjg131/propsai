@@ -106,7 +106,7 @@ class AdaptiveThresholds:
             # Get last N settled trades for this strategy
             c.execute(
                 """SELECT id, pnl FROM trades
-                WHERE strategy = ? AND status = 'settled' AND action = 'buy'
+                WHERE strategy = ? AND (status = 'settled' OR action = 'sell')
                 ORDER BY settled_at DESC LIMIT ?""",
                 (strategy, ROLLING_WINDOW),
             )

@@ -114,7 +114,9 @@ TEAM_ALIASES: dict[str, list[str]] = {
 
 def normalize_team(name: str) -> str:
     """Normalize a team name for matching."""
-    return name.lower().strip().replace(".", "").replace("'", "'")
+    normalized = name.lower().strip()
+    normalized = normalized.replace(".", "").replace("'", "").replace("-", " ")
+    return " ".join(normalized.split())
 
 
 def teams_match(kalshi_name: str, odds_name: str) -> bool:
@@ -126,22 +128,32 @@ def teams_match(kalshi_name: str, odds_name: str) -> bool:
     if k == o:
         return True
 
-    # Substring match (Kalshi "Rutgers" in Odds "Rutgers Scarlet Knights")
-    if k in o or o in k:
-        return True
-
-    # Last-word match ("Rutgers" matches "Rutgers Scarlet Knights" via first word)
     k_words = k.split()
     o_words = o.split()
-    if k_words and o_words:
-        if k_words[0] == o_words[0] and len(k_words[0]) > 3:
+
+    # Single-word short names often appear as the first token of a fuller team name.
+    if len(k_words) == 1 and len(o_words) > 1 and len(k_words[0]) > 3 and k_words[0] == o_words[0]:
+        return True
+    if len(o_words) == 1 and len(k_words) > 1 and len(o_words[0]) > 3 and o_words[0] == k_words[0]:
+        return True
+
+    # Multi-word containment only when the shorter side appears as a full token sequence.
+    shorter_words, longer_words = (k_words, o_words) if len(k_words) <= len(o_words) else (o_words, k_words)
+    if len(shorter_words) >= 2:
+        for idx in range(len(longer_words) - len(shorter_words) + 1):
+            if longer_words[idx:idx + len(shorter_words)] == shorter_words:
+                return True
+
+    # Distinctive mascot/club endings can match on the final token.
+    if k_words and o_words and k_words[-1] == o_words[-1] and len(k_words[-1]) > 4:
             return True
 
     # Alias matching
     for canonical, aliases in TEAM_ALIASES.items():
         all_names = [canonical] + aliases
-        k_match = any(normalize_team(n) == k or normalize_team(n) in k or k in normalize_team(n) for n in all_names)
-        o_match = any(normalize_team(n) == o or normalize_team(n) in o or o in normalize_team(n) for n in all_names)
+        normalized_names = [normalize_team(n) for n in all_names]
+        k_match = any(name == k for name in normalized_names)
+        o_match = any(name == o for name in normalized_names)
         if k_match and o_match:
             return True
 
@@ -322,6 +334,8 @@ def _price_spread(
                 # Kalshi "wins by over X.5" = spread of -X.5
                 # Odds API spread: team at -3.5 means they need to win by 4+
                 # Kalshi "wins by over 3.5 Points" = same as spread -3.5
+                if point is None or point >= 0:
+                    continue
                 odds_spread = abs(point) if point else 0
                 if abs(odds_spread - line) <= 1.0:  # Allow 1-point tolerance
                     if direction == "yes":
@@ -339,30 +353,9 @@ def _price_total(
     direction: str,
 ) -> float | None:
     """Price a total leg: 'yes Over X.5 points scored'."""
-    line = leg.get("line", 0)
-    if not line:
-        return None
-
-    # For totals, we need to find the right event
-    # This is tricky for parlays since we don't know which game the total belongs to
-    # We'll try to match by looking at the total line proximity
-
-    for event in odds_events:
-        probs = _extract_sharp_total_probs(event, sharp_books)
-        if not probs:
-            continue
-
-        for (over_under, point), prob in probs.items():
-            if abs(point - line) <= 2.0:  # Allow 2-point tolerance for totals
-                if over_under.lower() == "over" and direction == "yes":
-                    return prob
-                elif over_under.lower() == "under" and direction == "no":
-                    return prob
-                elif over_under.lower() == "over" and direction == "no":
-                    return 1.0 - prob
-                elif over_under.lower() == "under" and direction == "yes":
-                    return 1.0 - prob
-
+    # Total legs in Kalshi parlays do not identify which game they belong to.
+    # Matching on a nearby total line across all events can silently price
+    # the wrong game, so fail closed instead.
     return None
 
 

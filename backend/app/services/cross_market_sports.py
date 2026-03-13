@@ -5,11 +5,13 @@ Finds mispricings where Kalshi retail traders are slow to react to sharp line mo
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
 
 from app.logging_config import get_logger
+from app.services.parlay_pricer import TEAM_ALIASES, normalize_team
 
 logger = get_logger(__name__)
 
@@ -288,17 +290,38 @@ class CrossMarketScanner:
             if probs:
                 raw_consensus[key] = sum(probs) / len(probs)
 
-        # Normalize within each market type to remove vig
+        # Normalize within each market bucket to remove vig.
+        # Spreads/totals must normalize per line, not across every point level.
         from collections import defaultdict as _dd
         market_totals: dict[str, float] = _dd(float)
         for key, prob in raw_consensus.items():
-            market_key = key.split("|")[0]
-            market_totals[market_key] += prob
+            parts = key.split("|")
+            market_key = parts[0]
+            bucket_key = market_key
+            if market_key in {"spreads", "totals"} and len(parts) >= 3:
+                point_key = parts[2]
+                if market_key == "spreads":
+                    try:
+                        point_key = str(abs(float(point_key)))
+                    except ValueError:
+                        point_key = point_key.lstrip("+-")
+                bucket_key = f"{market_key}|{point_key}"
+            market_totals[bucket_key] += prob
 
         consensus: dict[str, float] = {}
         for key, prob in raw_consensus.items():
-            market_key = key.split("|")[0]
-            total = market_totals[market_key]
+            parts = key.split("|")
+            market_key = parts[0]
+            bucket_key = market_key
+            if market_key in {"spreads", "totals"} and len(parts) >= 3:
+                point_key = parts[2]
+                if market_key == "spreads":
+                    try:
+                        point_key = str(abs(float(point_key)))
+                    except ValueError:
+                        point_key = point_key.lstrip("+-")
+                bucket_key = f"{market_key}|{point_key}"
+            total = market_totals[bucket_key]
             consensus[key] = prob / total if total > 0 else prob
 
         return {
@@ -442,51 +465,24 @@ class CrossMarketScanner:
 
     def _team_matches(self, odds_team: str, kalshi_title: str) -> bool:
         """Check if an Odds API team name matches a Kalshi market title."""
-        # Direct substring match
-        if odds_team in kalshi_title:
+        odds_norm = normalize_team(odds_team)
+        title_norm = normalize_team(kalshi_title)
+        if not odds_norm or not title_norm:
+            return False
+
+        if re.search(rf"\b{re.escape(odds_norm)}\b", title_norm):
             return True
 
-        # Try last word of team name (e.g., "Lakers" from "Los Angeles Lakers")
-        words = odds_team.split()
-        if len(words) > 1 and words[-1] in kalshi_title:
-            return True
+        tokens = odds_norm.split()
+        if len(tokens) > 1:
+            last_token = tokens[-1]
+            if len(last_token) >= 4 and re.search(rf"\b{re.escape(last_token)}\b", title_norm):
+                return True
 
-        # Common abbreviation patterns
-        abbrevs = {
-            "los angeles lakers": ["lakers", "lal"],
-            "boston celtics": ["celtics", "bos"],
-            "golden state warriors": ["warriors", "gsw"],
-            "new york knicks": ["knicks", "nyk"],
-            "milwaukee bucks": ["bucks", "mil"],
-            "denver nuggets": ["nuggets", "den"],
-            "philadelphia 76ers": ["76ers", "sixers", "phi"],
-            "phoenix suns": ["suns", "phx"],
-            "dallas mavericks": ["mavericks", "mavs", "dal"],
-            "miami heat": ["heat", "mia"],
-            "cleveland cavaliers": ["cavaliers", "cavs", "cle"],
-            "oklahoma city thunder": ["thunder", "okc"],
-            "minnesota timberwolves": ["timberwolves", "wolves", "min"],
-            "sacramento kings": ["kings", "sac"],
-            "indiana pacers": ["pacers", "ind"],
-            "new orleans pelicans": ["pelicans", "nop"],
-            "orlando magic": ["magic", "orl"],
-            "chicago bulls": ["bulls", "chi"],
-            "houston rockets": ["rockets", "hou"],
-            "atlanta hawks": ["hawks", "atl"],
-            "toronto raptors": ["raptors", "tor"],
-            "brooklyn nets": ["nets", "bkn"],
-            "memphis grizzlies": ["grizzlies", "mem"],
-            "portland trail blazers": ["blazers", "por"],
-            "san antonio spurs": ["spurs", "sas"],
-            "utah jazz": ["jazz", "uta"],
-            "detroit pistons": ["pistons", "det"],
-            "charlotte hornets": ["hornets", "cha"],
-            "washington wizards": ["wizards", "was"],
-        }
-
-        for full_name, aliases in abbrevs.items():
-            if odds_team == full_name or odds_team in aliases:
-                if any(alias in kalshi_title for alias in aliases):
+        for canonical, aliases in TEAM_ALIASES.items():
+            normalized_names = {normalize_team(canonical), *(normalize_team(alias) for alias in aliases)}
+            if odds_norm in normalized_names:
+                if any(re.search(rf"\b{re.escape(alias)}\b", title_norm) for alias in normalized_names if alias):
                     return True
 
         return False

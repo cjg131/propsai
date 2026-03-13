@@ -76,6 +76,20 @@ poetry run uvicorn app.main:app --reload --port 8000
 
 Verify: `curl http://localhost:8000/health` → `{"status": "healthy"}`
 
+Weather-only operator checks:
+
+```bash
+cd backend
+python3 scripts/live_readiness_check.py
+curl http://localhost:8000/api/kalshi/agent/readiness
+```
+
+Live trading is intentionally locked to the weather-only path:
+
+```bash
+curl -X POST http://localhost:8000/api/kalshi/agent/start-live-weather
+```
+
 ### 3. Frontend Setup
 
 ```bash

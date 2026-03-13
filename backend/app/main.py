@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 import sentry_sdk
@@ -17,6 +18,7 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config = get_settings()
+    engine = None
     setup_logging(debug=config.app_debug)
     logger.info("Starting PropsAI backend", env=config.app_env)
 
@@ -28,25 +30,43 @@ async def lifespan(app: FastAPI):
         )
         logger.info("Sentry initialized")
 
-    # DISABLED: Do not auto-start agent on boot to prevent unwanted trading
-    # Agent must be manually started via API endpoint
-    # try:
-    #     from app.api.agent import get_kalshi_agent
-    #     agent = get_kalshi_agent()
-    #     await agent.start()
-    #     logger.info("Kalshi agent auto-started")
-    # except Exception as e:
-    #     logger.error("Failed to auto-start agent", error=str(e))
-    logger.info("Kalshi agent auto-start DISABLED - must be started manually")
+    auto_start = os.environ.get("AGENT_AUTO_START", "false").lower() == "true"
+    if auto_start:
+        try:
+            from app.services.trading_engine import get_trading_engine
+            from app.api.agent import get_kalshi_agent
+
+            engine = get_trading_engine()
+            live_weather_only = engine.allowed_live_strategies == {"weather"}
+            logger.info(
+                "Auto-start requested",
+                paper_mode=engine.paper_mode,
+                allowed_live_strategies=sorted(engine.allowed_live_strategies),
+                allowed_paper_strategies=sorted(engine.allowed_paper_strategies),
+            )
+            if not engine.paper_mode and not live_weather_only:
+                raise RuntimeError(
+                    "Refusing AGENT_AUTO_START in live mode unless LIVE_ENABLED_STRATEGIES=weather"
+                )
+
+            agent = get_kalshi_agent()
+            await agent.start()
+            logger.info("Kalshi agent auto-started")
+        except Exception as e:
+            logger.error("Failed to auto-start agent", error=str(e))
+    else:
+        logger.info("Kalshi agent auto-start DISABLED - must be started manually")
 
     yield
 
     # Gracefully stop agent on shutdown
     try:
         from app.api.agent import get_kalshi_agent
+
         agent = get_kalshi_agent()
-        await agent.stop()
-        logger.info("Kalshi agent stopped")
+        if getattr(agent, "_running", False):
+            await agent.stop()
+            logger.info("Kalshi agent stopped")
     except Exception:
         pass
 

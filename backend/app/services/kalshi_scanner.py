@@ -464,6 +464,76 @@ class KalshiScanner:
 
     def __init__(self, kalshi: KalshiClient) -> None:
         self.kalshi = kalshi
+        self._last_weather_scan_stats: dict[str, int] = {
+            "markets_seen": 0,
+            "hydration_attempted": 0,
+            "detail_updates": 0,
+            "rescued_two_sided_asks": 0,
+            "rescued_full_quotes": 0,
+            "parsed_markets": 0,
+        }
+
+    @staticmethod
+    def _price_cents(market: dict[str, Any], key: str) -> int:
+        raw = market.get(key)
+        if raw not in (None, ""):
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                pass
+        raw_dollars = market.get(f"{key}_dollars")
+        if raw_dollars not in (None, ""):
+            try:
+                return int(round(float(raw_dollars) * 100))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
+    @staticmethod
+    def _numeric_value(market: dict[str, Any], key: str) -> float:
+        raw = market.get(key)
+        if raw not in (None, ""):
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+        raw_fp = market.get(f"{key}_fp")
+        if raw_fp not in (None, ""):
+            try:
+                return float(raw_fp)
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    async def _hydrate_weather_market_quotes(self, market: dict[str, Any]) -> dict[str, Any]:
+        """Weather list responses often omit quote fields; hydrate from market detail."""
+        yes_ask = self._price_cents(market, "yes_ask")
+        no_ask = self._price_cents(market, "no_ask")
+        yes_bid = self._price_cents(market, "yes_bid")
+        no_bid = self._price_cents(market, "no_bid")
+
+        # Weather list responses are frequently partial; if any side is missing,
+        # fetch the market detail before deciding the book is one-sided.
+        if yes_ask > 0 and no_ask > 0 and yes_bid > 0 and no_bid > 0:
+            return market
+
+        ticker = market.get("ticker", "")
+        if not ticker:
+            return market
+
+        try:
+            detail = await self.kalshi.get_market(ticker)
+        except Exception as exc:
+            logger.debug("Weather market detail hydrate failed", ticker=ticker, error=str(exc))
+            return market
+
+        detail_market = detail.get("market", detail)
+        if isinstance(detail_market, dict):
+            return {**market, **detail_market}
+        return market
+
+    def get_weather_scan_stats(self) -> dict[str, int]:
+        return dict(self._last_weather_scan_stats)
 
     async def scan_all_open_markets(
         self,
@@ -526,6 +596,14 @@ class KalshiScanner:
         We fetch without status filter and check locally to be safe.
         """
         weather_markets: list[dict[str, Any]] = []
+        stats = {
+            "markets_seen": 0,
+            "hydration_attempted": 0,
+            "detail_updates": 0,
+            "rescued_two_sided_asks": 0,
+            "rescued_full_quotes": 0,
+            "parsed_markets": 0,
+        }
 
         for series_ticker, config in WEATHER_SERIES_ALL.items():
             try:
@@ -537,7 +615,35 @@ class KalshiScanner:
                     # Only include active (tradeable) markets
                     if m.get("status") not in ("active", "open"):
                         continue
-                    parsed = self._enrich_market(m, "weather")
+                    stats["markets_seen"] += 1
+                    before_two_sided_asks = (
+                        self._price_cents(m, "yes_ask") > 0 and self._price_cents(m, "no_ask") > 0
+                    )
+                    before_full_quotes = (
+                        self._price_cents(m, "yes_ask") > 0
+                        and self._price_cents(m, "no_ask") > 0
+                        and self._price_cents(m, "yes_bid") > 0
+                        and self._price_cents(m, "no_bid") > 0
+                    )
+                    if not before_full_quotes:
+                        stats["hydration_attempted"] += 1
+                    hydrated = await self._hydrate_weather_market_quotes(m)
+                    if hydrated != m:
+                        stats["detail_updates"] += 1
+                    after_two_sided_asks = (
+                        self._price_cents(hydrated, "yes_ask") > 0 and self._price_cents(hydrated, "no_ask") > 0
+                    )
+                    after_full_quotes = (
+                        self._price_cents(hydrated, "yes_ask") > 0
+                        and self._price_cents(hydrated, "no_ask") > 0
+                        and self._price_cents(hydrated, "yes_bid") > 0
+                        and self._price_cents(hydrated, "no_bid") > 0
+                    )
+                    if not before_two_sided_asks and after_two_sided_asks:
+                        stats["rescued_two_sided_asks"] += 1
+                    if not before_full_quotes and after_full_quotes:
+                        stats["rescued_full_quotes"] += 1
+                    parsed = self._enrich_market(hydrated, "weather")
                     if parsed:
                         # Attach city code and market type from our config
                         if "weather" not in parsed:
@@ -546,10 +652,12 @@ class KalshiScanner:
                         parsed["weather"]["market_type"] = config["type"]
                         parsed["weather"]["series_ticker"] = series_ticker
                         weather_markets.append(parsed)
+                        stats["parsed_markets"] += 1
             except Exception as e:
                 logger.debug("Weather series scan failed", series=series_ticker, error=str(e))
                 continue
 
+        self._last_weather_scan_stats = stats
         logger.info("Weather scan complete", series_checked=len(WEATHER_SERIES_ALL), found=len(weather_markets))
         return weather_markets
 
@@ -1067,8 +1175,8 @@ class KalshiScanner:
         """Add parsed metadata to a raw Kalshi market."""
         ticker = market.get("ticker", "")
         title = market.get("title", "")
-        yes_ask = market.get("yes_ask", 0) or 0
-        no_ask = market.get("no_ask", 0) or 0
+        yes_ask = self._price_cents(market, "yes_ask")
+        no_ask = self._price_cents(market, "no_ask")
 
         result: dict[str, Any] = {
             "ticker": ticker,
@@ -1076,12 +1184,12 @@ class KalshiScanner:
             "category": category,
             "series_ticker": market.get("series_ticker", ""),
             "event_ticker": market.get("event_ticker", ""),
-            "yes_bid": market.get("yes_bid", 0) or 0,
+            "yes_bid": self._price_cents(market, "yes_bid"),
             "yes_ask": yes_ask,
-            "no_bid": market.get("no_bid", 0) or 0,
+            "no_bid": self._price_cents(market, "no_bid"),
             "no_ask": no_ask,
-            "volume": market.get("volume", 0) or 0,
-            "open_interest": market.get("open_interest", 0) or 0,
+            "volume": int(round(self._numeric_value(market, "volume"))),
+            "open_interest": int(round(self._numeric_value(market, "open_interest"))),
             "close_time": market.get("close_time", ""),
             "status": market.get("status", ""),
             "strike_type": market.get("strike_type", ""),

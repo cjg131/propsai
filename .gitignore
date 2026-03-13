@@ -69,6 +69,11 @@ deploy/env/kalshi.key
 
 # SQLite database
 backend/app/data/*.db
+backend/app/data/*.db-shm
+backend/app/data/*.db-wal
+backend/app/data/kalshi_activity_report.json
+backend/app/data/performance_model.json
+backend/app/data/kalshi_exports/
 
 # Debug/utility scripts (local only)
 backend/check_*.py

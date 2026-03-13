@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Callable
 from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -145,13 +146,13 @@ class NWSClient:
         """Extract daily high/low from NWS hourly forecast using Intra-Hour Curve Fitting (Cubic Spline Interpolation)."""
         if target_date is None:
             target_date = datetime.now(UTC).date()
-        
+
         hourly = await self.get_hourly_forecast(city_key)
         if not hourly:
             return None
-        
+
         target_str = target_date.isoformat()
-        
+
         # Fallback raw lists
         temps_for_date: list[float] = []
         for period in hourly:
@@ -160,30 +161,29 @@ class NWSClient:
                 temp = period.get("temp_f")
                 if temp is not None:
                     temps_for_date.append(temp)
-        
+
         if not temps_for_date:
             return None
-            
+
         raw_max = max(temps_for_date)
         raw_min = min(temps_for_date)
-        
+
         spline_max = raw_max
         spline_min = raw_min
-        
+
         # Attempt to use Cubic Spline to find intra-hour peaks/valleys
         try:
             import numpy as np
             from scipy.interpolate import CubicSpline
-            from datetime import datetime
-            
+
             times = []
             temps = []
-            
+
             for period in hourly:
                 time_str = period.get("time", "")
                 temp = period.get("temp_f")
                 if time_str and temp is not None:
-                    # Parse ISO format. Python 3.11+ handles Z, 3.9 might need fromisoformat tweaks, 
+                    # Parse ISO format. Python 3.11+ handles Z, 3.9 might need fromisoformat tweaks,
                     # but NWS usually returns standard formats with timezone offsets
                     try:
                         dt = datetime.fromisoformat(time_str)
@@ -191,21 +191,21 @@ class NWSClient:
                         temps.append(temp)
                     except Exception:
                         pass
-                        
+
             if len(times) >= 4:
                 # Sort pairs
                 sorted_pairs = sorted(zip(times, temps))
                 t_sorted = np.array([p[0] for p in sorted_pairs])
                 temp_sorted = np.array([p[1] for p in sorted_pairs])
-                
+
                 # We need unique x values for CubicSpline
                 _, unique_indices = np.unique(t_sorted, return_index=True)
                 t_unique = t_sorted[unique_indices]
                 temp_unique = temp_sorted[unique_indices]
-                
+
                 if len(t_unique) >= 4:
                     cs = CubicSpline(t_unique, temp_unique)
-                    
+
                     # We only care about interpolating points for the target date
                     # Find min/max timestamps for the target date from our parsed times
                     target_timestamps = []
@@ -217,29 +217,29 @@ class NWSClient:
                                 target_timestamps.append(dt.timestamp())
                             except Exception:
                                 pass
-                                
+
                     if target_timestamps:
                         t_start = min(target_timestamps)
                         t_end = max(target_timestamps)
-                        
+
                         # Generate dense points (every 5 minutes)
                         t_dense = np.linspace(t_start, t_end, num=int((t_end - t_start) / 300) + 1)
                         temp_dense = cs(t_dense)
-                        
+
                         calc_max = float(np.max(temp_dense))
                         calc_min = float(np.min(temp_dense))
-                        
+
                         # Apply sanity checks: spline shouldn't deviate wildly from raw hourly points
                         # Usually peaks are within 1-2 degrees of hourly readings
                         if calc_max > raw_max and calc_max <= raw_max + 2.5:
                             spline_max = calc_max
                         if calc_min < raw_min and calc_min >= raw_min - 2.5:
                             spline_min = calc_min
-                            
-        except Exception as e:
+
+        except Exception:
             # Catch import errors or parsing errors and just fall back to raw
             pass
-        
+
         return {
             "source": "nws_hourly",
             "city": city_key,
@@ -337,7 +337,7 @@ class NWSClient:
 
 class NOAAHRRRClient:
     """NOAA HRRR (High-Resolution Rapid Refresh) model client.
-    
+
     3km resolution, hourly updates. Uses NOMADS OpenDAP server for easier access.
     HRRR is the highest resolution operational weather model for the US.
     """
@@ -367,11 +367,11 @@ class NOAAHRRRClient:
             # HRRR data via NOMADS - simplified access
             # We'll use the 2m temperature field from the latest HRRR run
             lat, lon = config["lat"], config["lon"]
-            
+
             # For now, use a simpler approach: fetch from NOAA's weather.gov API
             # which includes HRRR data in their blend
             # Full HRRR implementation would require GRIB2 parsing
-            
+
             # Alternative: Use Iowa State's HRRR archive which provides JSON
             url = "https://mesonet.agron.iastate.edu/json/hrrr.py"
             params = {
@@ -379,24 +379,24 @@ class NOAAHRRRClient:
                 "lon": lon,
                 "valid": target_date.isoformat(),
             }
-            
+
             resp = await self._http.get(url, params=params)
             if resp.status_code != 200:
                 return None
-                
+
             data = resp.json()
-            
+
             # Extract temperature forecast
             if not data or "data" not in data:
                 return None
-            
+
             temps = [d.get("tmpc") for d in data.get("data", []) if d.get("tmpc") is not None]
             if not temps:
                 return None
-            
+
             # Convert Celsius to Fahrenheit
             temps_f = [(t * 9/5) + 32 for t in temps]
-            
+
             result = {
                 "source": "hrrr",
                 "city": city_key,
@@ -404,7 +404,7 @@ class NOAAHRRRClient:
                 "low_temp_f": min(temps_f),
                 "date": target_date.isoformat(),
             }
-            
+
             self._cache[cache_key] = (now, result)
             return result
 
@@ -1045,17 +1045,17 @@ class WeatherConsensus:
             "weatherbit": 1.0,
             "openweathermap": 1.0
         }
-        
+
         try:
             import os
             import sqlite3
             db_path = os.path.join(os.path.dirname(__file__), "..", "data", "trading_engine.db")
             if not os.path.exists(db_path):
                 return base_weights
-                
+
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
-            
+
             # Get average error per source over the last 30 days
             query = '''
                 SELECT source_name, AVG(ABS(error)) as mae, COUNT(*) as samples
@@ -1066,14 +1066,14 @@ class WeatherConsensus:
             if city:
                 query += f" AND city = '{city}'"
             query += " GROUP BY source_name HAVING samples >= 5"
-            
+
             c.execute(query)
             results = c.fetchall()
             conn.close()
-            
+
             if not results:
                 return base_weights
-                
+
             # Calculate new weights: inverse of MAE (lower error = higher weight)
             dynamic_weights = {}
             for row in results:
@@ -1084,14 +1084,14 @@ class WeatherConsensus:
                 # Cap weight between 0.5 and 3.0
                 weight = max(0.5, min(3.0, weight))
                 dynamic_weights[source_name] = round(weight, 2)
-                
+
             # Merge with base weights for any missing sources
             for src, bw in base_weights.items():
                 if src not in dynamic_weights:
                     dynamic_weights[src] = bw
-                    
+
             return dynamic_weights
-            
+
         except Exception as e:
             logger.error("Error fetching dynamic weights", error=str(e))
             return base_weights
@@ -1149,7 +1149,7 @@ class WeatherConsensus:
     async def get_all_city_forecasts(self, target_date: date | None = None) -> dict[str, dict[str, Any]]:
         """
         Fetch forecasts for ALL cities and calculate confidence scores.
-        
+
         Returns:
             {
                 "NYC": {
@@ -1161,18 +1161,18 @@ class WeatherConsensus:
         """
         if target_date is None:
             target_date = datetime.now(UTC).date()
-        
+
         all_city_forecasts = {}
-        
+
         # Fetch forecasts for all cities
         for city_key in CITY_CONFIGS.keys():
             try:
                 forecasts = await self.get_all_forecasts(city_key, target_date)
                 sources = forecasts.get("sources", {})
-                
+
                 if not sources:
                     continue
-                
+
                 # Get dynamic weights based on historical accuracy
                 SOURCE_WEIGHTS = self.get_dynamic_weights(city_key)
 
@@ -1184,26 +1184,26 @@ class WeatherConsensus:
                 for source_name, s in sources.items():
                     w = SOURCE_WEIGHTS.get(source_name, 1.0)
                     h = s.get("high_temp_f")
-                    l = s.get("low_temp_f")
+                    low_temp = s.get("low_temp_f")
                     if h is not None:
                         high_temps.append(h)
                         high_weights.append(w)
-                    if l is not None:
-                        low_temps.append(l)
+                    if low_temp is not None:
+                        low_temps.append(low_temp)
                         low_weights.append(w)
-                
+
                 city_forecast = {}
-                
+
                 if high_temps:
                     high_temps_sorted = sorted(high_temps)
                     n = len(high_temps_sorted)
                     median_high = high_temps_sorted[n // 2] if n % 2 == 1 else (high_temps_sorted[n // 2 - 1] + high_temps_sorted[n // 2]) / 2
-                    
+
                     # Calculate weighted mean (raw — no bias correction here;
                     # bias is applied only in build_consensus to avoid double-counting)
                     weighted_mean_high = sum(h * w for h, w in zip(high_temps, high_weights)) / sum(high_weights)
                     mean_high = median_high
-                    
+
                     # Calculate confidence based on source agreement
                     spread = max(high_temps) - min(high_temps)
                     if spread <= 2:
@@ -1214,7 +1214,7 @@ class WeatherConsensus:
                         confidence = 0.70  # Medium confidence
                     else:
                         confidence = 0.50  # Low confidence
-                        
+
                     city_forecast["high"] = {
                         "mean": round(mean_high, 2),
                         "weighted_mean": round(weighted_mean_high, 2),
@@ -1223,16 +1223,16 @@ class WeatherConsensus:
                         "confidence": confidence,
                         "sources": len(high_temps)
                     }
-                    
+
                 if low_temps:
                     low_temps_sorted = sorted(low_temps)
                     n = len(low_temps_sorted)
                     median_low = low_temps_sorted[n // 2] if n % 2 == 1 else (low_temps_sorted[n // 2 - 1] + low_temps_sorted[n // 2]) / 2
-                    
+
                     # Raw weighted mean — no bias correction here (applied in build_consensus)
-                    weighted_mean_low = sum(l * w for l, w in zip(low_temps, low_weights)) / sum(low_weights)
+                    weighted_mean_low = sum(temp * w for temp, w in zip(low_temps, low_weights)) / sum(low_weights)
                     mean_low = median_low
-                    
+
                     # Calculate confidence based on source agreement
                     spread = max(low_temps) - min(low_temps)
                     if spread <= 2:
@@ -1243,7 +1243,7 @@ class WeatherConsensus:
                         confidence = 0.70
                     else:
                         confidence = 0.50
-                        
+
                     city_forecast["low"] = {
                         "mean": round(mean_low, 2),
                         "weighted_mean": round(weighted_mean_low, 2),
@@ -1252,13 +1252,13 @@ class WeatherConsensus:
                         "confidence": confidence,
                         "sources": len(low_temps)
                     }
-                    
+
                 if city_forecast:
                     all_city_forecasts[city_key] = city_forecast
-                    
+
             except Exception as e:
                 logger.warning("Failed to calculate consensus forecast", city=city_key, error=str(e))
-                
+
         return all_city_forecasts
 
     def _estimate_std_dev(self, forecasts: dict[str, Any], is_bracket: bool = False, market_type: str = "high_temp") -> float:
@@ -1378,22 +1378,22 @@ class WeatherConsensus:
             if cumulative >= total_weight / 2.0:
                 median_temp = temp_val
                 break
-        
+
         # Retrieve city configuration to apply station-specific microclimate offsets
         city_code = forecasts.get("city", "")
         city_config = CITY_CONFIGS.get(city_code, {})
-        
+
         # Bias correction: forecast models tend to over-predict temps.
         # HIGH temp: warm bias → subtract 2°F to be conservative (prevents false YES on "above X")
         # LOW temp: warm bias on lows → subtract 2°F to push consensus colder
         #           (models under-predict how cold it gets overnight)
         bias_correction = -2.0
-        
+
         # Apply station offset
         station_offset = city_config.get("high_offset", 0.0) if market_type == "high_temp" else city_config.get("low_offset", 0.0)
-        
+
         mean_temp = median_temp + bias_correction + station_offset
-        
+
         # ── Spatial Correlation Arbitrage ──
         # If upstream city forecasts are higher/lower than expected, apply a fraction of that momentum.
         spatial_offset = 0.0
@@ -1405,8 +1405,8 @@ class WeatherConsensus:
                     temp_key = "high" if market_type == "high_temp" else "low"
                     up_forecast = upstream_data.get(temp_key, {})
                     if up_forecast:
-                        # Simple momentum heuristic: if upstream's weighted mean is significantly different 
-                        # from its raw median, it indicates the high-res short-term models (NWS/HRRR) 
+                        # Simple momentum heuristic: if upstream's weighted mean is significantly different
+                        # from its raw median, it indicates the high-res short-term models (NWS/HRRR)
                         # are diverging from the broad consensus. We apply 50% of that divergence here.
                         up_divergence = up_forecast.get("weighted_mean", 0) - up_forecast.get("median_raw", 0)
                         if abs(up_divergence) >= 0.5:

@@ -17,9 +17,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from app.logging_config import get_logger
 

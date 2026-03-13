@@ -10,7 +10,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "data" / "trading_engine.db"
 EXPORT_DIR = ROOT / "data" / "kalshi_exports"

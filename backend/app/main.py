@@ -33,8 +33,8 @@ async def lifespan(app: FastAPI):
     auto_start = os.environ.get("AGENT_AUTO_START", "false").lower() == "true"
     if auto_start:
         try:
-            from app.services.trading_engine import get_trading_engine
             from app.api.agent import get_kalshi_agent
+            from app.services.trading_engine import get_trading_engine
 
             engine = get_trading_engine()
             live_weather_only = engine.allowed_live_strategies == {"weather"}

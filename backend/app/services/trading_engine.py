@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import sqlite3
 import time
 import uuid
@@ -771,12 +770,12 @@ class TradingEngine:
         """Initialize SQLite database for trade logging."""
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH))
-        
+
         # Enable Write-Ahead Logging to prevent database locking errors
         # when multiple concurrent tasks (weather, crypto, main) write.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        
+
         c = conn.cursor()
 
         c.execute("""
@@ -1452,22 +1451,22 @@ class TradingEngine:
                 return False, "DB health degraded — blocking new live trades"
             if self.require_ws_for_live and not self._runtime_ws_healthy:
                 return False, "WebSocket unhealthy (REQUIRE_WS_FOR_LIVE enabled)"
-            
+
         # ── Circuit Breaker (2-Hour Cooldown) ──
         import time
         now_ts = time.time()
         if now_ts < self._cooldown_until:
             mins_left = int((self._cooldown_until - now_ts) / 60)
             return False, f"Circuit breaker cooldown ({mins_left}m remaining)"
-            
+
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         effective = self.get_effective_bankroll()
-        
+
         if today != self._last_cooldown_date:
             self._last_cooldown_date = today
             # Set initial drawdown threshold to -3% of bankroll for the day
             self._cooldown_pnl_threshold = -(effective * 0.03)
-            
+
         today_pnl = self.get_today_pnl()
         if today_pnl <= self._cooldown_pnl_threshold:
             self._cooldown_until = now_ts + (2 * 3600)  # 2 hours
@@ -1536,7 +1535,7 @@ class TradingEngine:
         signal_source: str = "",
     ) -> int:
         """Calculate position size using Kelly criterion with risk limits.
-        
+
         CRITICAL: signal_source determines sizing tier.
         - "weather_observed_arbitrage": confirmed NOAA data → full Kelly caps
         - "weather_consensus" (forecast): speculative → 1/4 Kelly caps
@@ -1558,7 +1557,7 @@ class TradingEngine:
 
         # Safety caps by strategy, signal source, and confidence tier
         is_observed_arb = signal_source == "weather_observed_arbitrage"
-        
+
         if strategy == "weather":
             if is_observed_arb:
                 # OBSERVED ARBITRAGE: confirmed NOAA data — higher caps justified
@@ -1825,7 +1824,7 @@ class TradingEngine:
                 order_id = result.get("order", {}).get("order_id", "")
                 order_info = result.get("order", {})
                 status = order_info.get("status", "pending")
-                
+
                 # If it's resting on the book, mark it as 'resting' so the monitor loop can track it
                 if status in ("resting", "pending"):
                     status = "resting"
@@ -2354,29 +2353,29 @@ class TradingEngine:
             # Check if we already have a filled sell for this ticker+side+count
             # This prevents the reconciliation bug that created 297 phantom duplicate sells
             c.execute(
-                """SELECT COUNT(*) FROM trades 
-                WHERE ticker = ? AND side = ? AND action = 'sell' 
+                """SELECT COUNT(*) FROM trades
+                WHERE ticker = ? AND side = ? AND action = 'sell'
                 AND status = 'filled' AND paper_mode = ?""",
                 (ticker, side, 1 if self.paper_mode else 0),
             )
-            existing_sells = c.fetchone()[0]
-            
+            c.fetchone()[0]
+
             # Check total buy count to see if we've already fully exited
             c.execute(
-                """SELECT SUM(count) as buy_count FROM trades 
-                WHERE ticker = ? AND side = ? AND action = 'buy' 
+                """SELECT SUM(count) as buy_count FROM trades
+                WHERE ticker = ? AND side = ? AND action = 'buy'
                 AND status = 'filled' AND paper_mode = ?""",
                 (ticker, side, 1 if self.paper_mode else 0),
             )
             buy_row = c.fetchone()
             total_buy_count = buy_row[0] if buy_row and buy_row[0] else 0
-            
+
             c.execute(
                 """SELECT
                        SUM(CASE WHEN status = 'filled' THEN count ELSE 0 END) as filled_sell_count,
                        SUM(CASE WHEN status IN ('resting', 'pending') THEN count ELSE 0 END) as open_exit_count
-                   FROM trades 
-                   WHERE ticker = ? AND side = ? AND action = 'sell' 
+                   FROM trades
+                   WHERE ticker = ? AND side = ? AND action = 'sell'
                      AND paper_mode = ?""",
                 (ticker, side, 1 if self.paper_mode else 0),
             )

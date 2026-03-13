@@ -18,7 +18,9 @@ from app.services.adaptive_thresholds import get_adaptive_thresholds
 from app.services.cross_market_sports import CrossMarketScanner
 from app.services.cross_strategy_correlation import get_cross_strategy_engine
 from app.services.crypto_data import CryptoDataService
+from app.services.discord_webhook import send_discord_notification
 from app.services.econ_data import EconDataService
+from app.services.event_bus import get_event_bus
 from app.services.finance_data import FinanceDataService
 from app.services.kalshi_api import get_kalshi_client
 from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs
@@ -32,8 +34,6 @@ from app.services.signal_scorer import get_signal_scorer
 from app.services.smart_predictor import SmartPredictor, get_smart_predictor
 from app.services.trade_analyzer import get_trade_analyzer
 from app.services.trading_engine import get_trading_engine
-from app.services.discord_webhook import send_discord_notification
-from app.services.event_bus import get_event_bus
 from app.services.weather_data import CITY_CONFIGS, WeatherConsensus
 
 logger = get_logger(__name__)
@@ -1174,7 +1174,6 @@ class KalshiAgent:
 
             # Group by (city_code, target_date) so each group gets the right forecast
             import re as _re
-            from datetime import date as _date
             from datetime import datetime as _datetime
             today_str = _datetime.now(UTC).date().isoformat()
             by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1247,7 +1246,7 @@ class KalshiAgent:
                         if candidate:
                             results.append(candidate)
                             continue  # If we got an observed signal, skip forecast evaluation
-                        
+
                         # If observation didn't yield a near-certain trade, fall back to forecast
                         if forecasts:
                             # Build all_city_forecasts for spatial correlation
@@ -1255,7 +1254,7 @@ class KalshiAgent:
                             candidate_forecast = await self._evaluate_weather_market(market, forecasts, all_city_forecasts=all_city_fcasts)
                             if candidate_forecast:
                                 results.append(candidate_forecast)
-                
+
                 # ── Path B: Forecast consensus path (Future or Same Day early) ──
                 elif forecasts:
                     # Build all_city_forecasts for spatial correlation
@@ -1264,7 +1263,7 @@ class KalshiAgent:
                         candidate = await self._evaluate_weather_market(market, forecasts, all_city_forecasts=all_city_fcasts)
                         if candidate:
                             results.append(candidate)
-                
+
                 # ── Path C: No data ──
                 else:
                     self.engine.log_event(
@@ -1368,31 +1367,32 @@ class KalshiAgent:
         if close_time and city_code:
             try:
                 from datetime import datetime as _dt
+
                 import pytz
-                
+
                 close_dt = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
                 now = _dt.now(UTC)
                 hours_until_close = (close_dt - now).total_seconds() / 3600
-                
+
                 # Skip markets closing within 2 hours
                 if hours_until_close < 2:
                     self._record_weather_rejection(market, "close_too_soon", stage="forecast_time_gate", signal_source="weather_consensus")
                     return None
-                
+
                 # Get city timezone for local time
                 city_config = CITY_CONFIGS.get(city_code, {})
                 tz_name = city_config.get("timezone", "America/New_York")
                 city_tz = pytz.timezone(tz_name)
                 local_time = now.astimezone(city_tz)
                 local_hour = local_time.hour
-                
+
                 # Early day (<12pm local): Skip expensive contracts (>90¢)
                 # Money is better spent elsewhere when outcome is uncertain
                 if local_hour < 12:
                     if yes_maker_price > 90 or no_maker_price > 90:
                         self._record_weather_rejection(market, "late_day_expensive_market", stage="forecast_time_gate", signal_source="weather_consensus")
                         return None
-                
+
                 # Late day (>3pm local): Only take locked outcomes
                 # If temp already hit/locked, take 95¢+ bets (guaranteed 5% return)
                 # Otherwise skip - too late for probabilistic bets
@@ -1411,7 +1411,7 @@ class KalshiAgent:
                 if market_type_check == "low_temp" and 10 <= local_hour <= 18:
                     self._record_weather_rejection(market, "daytime_low_temp_forecast_disabled", stage="forecast_time_gate", signal_source="weather_consensus")
                     return None  # Let observed-data path handle same-day low temp
-                        
+
             except (ValueError, TypeError, Exception):
                 # If time parsing fails, apply conservative 2hr close filter
                 if hours_until_close < 2:
@@ -1425,7 +1425,7 @@ class KalshiAgent:
 
         # Build consensus for this specific market's strike structure
         market_type = weather_info.get("market_type", "high_temp")
-        
+
         consensus = self.weather.build_consensus(
             forecasts,
             strike_type=strike_type,
@@ -1466,25 +1466,25 @@ class KalshiAgent:
 
         # ── Order Book Imbalance / Smart Money Flow ──
         # Fetch the orderbook to check if "smart money" is against us.
-        # If we are buying YES, we want to see if there's massive resistance (huge asks) 
+        # If we are buying YES, we want to see if there's massive resistance (huge asks)
         # or if the flow is with us (huge bids pushing price up).
         try:
             ob = await self.kalshi.get_orderbook(market["ticker"])
             if ob and "orderbook" in ob:
                 book = ob["orderbook"]
                 side_key = "yes" if signal["side"] == "yes" else "no"
-                
+
                 # Sum resting liquidity within 5 cents of the current price
                 bids = book.get(side_key, {}).get("bids", [])
                 asks = book.get(side_key, {}).get("asks", [])
-                
+
                 maker_price = yes_maker_price if signal["side"] == "yes" else no_maker_price
-                
+
                 bid_vol = sum(b[1] for b in bids if maker_price - b[0] <= 5)
                 ask_vol = sum(a[1] for a in asks if a[0] - maker_price <= 5)
-                
+
                 # If there is huge resistance (asks > 3x bids) and we are buying,
-                # we might be stepping in front of a freight train. 
+                # we might be stepping in front of a freight train.
                 # Require a higher edge.
                 if ask_vol > bid_vol * 3 and ask_vol > 500:
                     self.engine.log_event("info", f"High resistance for {market['ticker']} {signal['side'].upper()}: {ask_vol} asks vs {bid_vol} bids", strategy="weather")
@@ -1493,11 +1493,11 @@ class KalshiAgent:
                     if signal["edge"] < wx_thresh["min_edge"] + 0.05:
                         self._record_weather_rejection(market, "orderbook_resistance", stage="forecast_orderbook", signal_source="weather_consensus", near_miss=True)
                         return None # Need +5% extra edge to fight the flow
-                        
+
                 # Conversely, if flow is heavily with us, we can boost confidence
                 elif bid_vol > ask_vol * 3 and bid_vol > 500:
                     signal["confidence"] = min(1.0, signal["confidence"] + 0.1)
-        except Exception as e:
+        except Exception:
             # Ignore orderbook errors, proceed with original signal
             pass
 
@@ -1605,7 +1605,7 @@ class KalshiAgent:
         if yes_ask >= 97 or no_ask >= 97:
             self._record_weather_rejection(market, "one_sided_liquidity", stage="observed_precheck", signal_source="weather_observed_arbitrage")
             return None
-            
+
         # Safety filter: Max Spread Limit = 5¢
         yes_bid = market.get("yes_bid", 0)
         no_bid = market.get("no_bid", 0)
@@ -3846,12 +3846,12 @@ class KalshiAgent:
                     for rt in resting_trades:
                         if not rt.get("order_id") or rt["order_id"].startswith("PAPER-"):
                             continue
-                        
+
                         # Fetch latest status
                         order_data = await client.get_order(rt["order_id"])
                         order_info = order_data.get("order", order_data)
                         status = order_info.get("status", "pending")
-                        
+
                         if status == "filled":
                             fill_count, actual_price_cents, cost, fee = self.engine._extract_actual_fill_execution(
                                 order_info,
@@ -4003,7 +4003,7 @@ class KalshiAgent:
                     continue
 
                 # Cross-cycle guard: skip if exited in a previous cycle within 30 min
-                import time as _time  # noqa: already at module level if available
+                import time as _time
                 _exit_ts = self._exited_tickers.get(ticker, 0)
                 if _exit_ts and (_time.time() - _exit_ts) < 1800:
                     logger.info(
@@ -4116,10 +4116,10 @@ class KalshiAgent:
                         exited_this_cycle.add(ticker)
                         self._exited_tickers[ticker] = _time.time()
                         continue
-                        
+
                     # ── DECISION 0c: DYNAMIC TAKE PROFIT (95c rule) ──
-                    # If YES reaches 95c, probability of winning is very high. 
-                    # Instead of waiting days for settlement to free up $1.00, sell now for 0.95 
+                    # If YES reaches 95c, probability of winning is very high.
+                    # Instead of waiting days for settlement to free up $1.00, sell now for 0.95
                     # to free up the capital immediately for other trades.
                     if exit_price >= 95 and liquidation_pnl > 0:
                         await self.engine.exit_trade(
@@ -4173,10 +4173,10 @@ class KalshiAgent:
                     # we do an A/B opportunity cost analysis. If the market is moving in our favor,
                     # we should only sell if the capital is better deployed elsewhere.
                     max_profit = pos.get("max_profit", 0) or 0
-                    
+
                     if max_profit > 0 and liquidation_pnl > 0 and exit_price > 0:
                         profit_pct = liquidation_pnl / max_profit
-                        
+
                         # Compare our stored thesis value to the executable exit price.
                         # Using the same current price as both probability and liquidation
                         # value cancels to ~0 and makes this branch meaningless.
@@ -4185,18 +4185,18 @@ class KalshiAgent:
                             our_prob=thesis_prob,
                             exit_price=exit_price,
                         ) / 100.0
-                        
-                        # If the EV of holding the remaining position is negative or very low, AND we have 
+
+                        # If the EV of holding the remaining position is negative or very low, AND we have
                         # captured a significant chunk of profit, it makes sense to exit.
                         # Also check if we are constrained on capital.
                         try:
                             available_capital = self.engine.get_effective_bankroll()
                         except Exception:
                             available_capital = 100.0 # fallback
-                            
+
                         should_take_profit = False
                         reason = ""
-                        
+
                         if exit_price >= 95:
                             should_take_profit = True
                             reason = "locked_in_guaranteed_profit"
@@ -4206,7 +4206,7 @@ class KalshiAgent:
                         elif available_capital < 50.0 and profit_pct > 0.80:
                             should_take_profit = True
                             reason = "rotate_capital_opportunity_cost"
-                            
+
                         if should_take_profit:
                             await self.engine.exit_trade(
                                 strategy=pos["strategy"],
@@ -4235,12 +4235,12 @@ class KalshiAgent:
                         continue
 
                     # HARD BLOCK: Never add to soccer positions (losing strategy)
-                    soccer_keywords = ["EPL", "LALIGA", "UCL", "SERIE", "BUNDESLIGA", "LIGUE1", 
+                    soccer_keywords = ["EPL", "LALIGA", "UCL", "SERIE", "BUNDESLIGA", "LIGUE1",
                                        "MLS", "LIGAMX", "BRASILEIRO", "FACUP", "EWSL", "SLGREECE",
                                        "EREDIVISIE", "LIGAPORTUGAL", "SCOTTISHPREM", "SUPERLIG"]
                     if any(kw in ticker.upper() for kw in soccer_keywords):
                         continue
-                    
+
                     original_edge = pos.get("avg_entry_edge", 0) or 0
                     edge_increase = current_edge - original_edge
                     # Add if edge increased by >3% AND we still have positive edge >5%
@@ -4842,7 +4842,7 @@ class KalshiAgent:
                         try:
                             asyncio.create_task(send_discord_notification(
                                 title="⚠️ Kalshi API Unreachable",
-                                message=f"The Kalshi API is not responding. Trading paused until connectivity restored.",
+                                message="The Kalshi API is not responding. Trading paused until connectivity restored.",
                                 color=0xe74c3c,
                             ))
                         except Exception:
@@ -4906,7 +4906,6 @@ class KalshiAgent:
         """
         try:
             from zoneinfo import ZoneInfo
-            now_utc = datetime.now(UTC)
             # Check open weather positions for nearest settlement
             positions = self.engine.get_open_positions()
             weather_positions = [p for p in positions if p.get("strategy") == "weather"]
@@ -4914,7 +4913,6 @@ class KalshiAgent:
                 return 5 * 60
 
             # Check if there are same-day weather markets
-            today_str = now_utc.strftime("%Y-%m-%d")
             # Approximate: if it's past noon ET, same-day markets close soon
             now_et = datetime.now(ZoneInfo("America/New_York"))
             if now_et.hour >= 18:

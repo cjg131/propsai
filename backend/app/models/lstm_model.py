@@ -97,14 +97,14 @@ class LSTMPredictor(BasePredictor):
         best_loss = float("inf")
         patience = 3
         patience_counter = 0
-        
+
         for epoch in range(15):
             optimizer.zero_grad()
             output = self.model(X_tensor)
             loss = criterion(output, y_tensor)
             loss.backward()
             optimizer.step()
-            
+
             current_loss = loss.item()
             if current_loss < best_loss:
                 best_loss = current_loss

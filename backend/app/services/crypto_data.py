@@ -211,23 +211,23 @@ class CryptoDataService:
             resp = await client.get(url, params={"symbol": symbol, "limit": 100})
             resp.raise_for_status()
             data = resp.json()
-            
+
             bids = data.get("bids", [])
             asks = data.get("asks", [])
-            
+
             if not bids or not asks:
                 return None
-            
+
             # Get mid price
             best_bid = float(bids[0][0])
             best_ask = float(asks[0][0])
             mid_price = (best_bid + best_ask) / 2
-            
+
             # Sum volume within 0.5% of mid price
             threshold = mid_price * 0.005
             bid_volume = sum(float(qty) for price, qty in bids if float(price) >= mid_price - threshold)
             ask_volume = sum(float(qty) for price, qty in asks if float(price) <= mid_price + threshold)
-            
+
             return {
                 "bid_volume": bid_volume,
                 "ask_volume": ask_volume,
@@ -252,7 +252,7 @@ class CryptoDataService:
             resp = await client.get(url, params={"symbol": symbol, "period": "5m", "limit": 1})
             resp.raise_for_status()
             data = resp.json()
-            
+
             if data and len(data) > 0:
                 return float(data[0].get("longShortRatio", 1.0))
         except Exception as e:
@@ -268,7 +268,7 @@ class CryptoDataService:
             resp = await client.get(FEAR_GREED_API, params={"limit": 1})
             resp.raise_for_status()
             data = resp.json()
-            
+
             if data.get("data") and len(data["data"]) > 0:
                 fg_data = data["data"][0]
                 return {
@@ -321,11 +321,11 @@ class CryptoDataService:
 
     def _compute_funding_signal(self, funding_rate: float | None, contrarian: bool = True) -> float:
         """Convert funding rate to directional signal.
-        
+
         Args:
             funding_rate: Current funding rate
             contrarian: If True, fade extreme funding (contrarian). If False, follow it.
-        
+
         Returns:
             Signal in [-1, 1] where positive = bullish
         """
@@ -338,32 +338,32 @@ class CryptoDataService:
             # Extreme negative funding (<-0.1%) = too many shorts → fade (bet UP)
             signal = -funding_rate / 0.0005  # Inverted
             return max(-1.0, min(1.0, signal * 1.5))  # Amplify contrarian signal
-        
+
         # Normal funding: follow it directionally (but weaker)
         signal = -funding_rate / 0.001  # Less sensitive for non-extreme
         return max(-1.0, min(1.0, signal))
 
     def _compute_volume_signal(self, candles_5m: list[dict[str, float]]) -> float:
         """Analyze volume for breakout confirmation.
-        
+
         Returns:
             Signal in [-1, 1] where positive = bullish volume pattern
         """
         if len(candles_5m) < 10:
             return 0.0
-        
+
         # Get recent volume and average volume
         recent_volume = candles_5m[-1]["volume"]
         avg_volume = statistics.mean(c["volume"] for c in candles_5m[-10:-1])
-        
+
         if avg_volume == 0:
             return 0.0
-        
+
         volume_ratio = recent_volume / avg_volume
-        
+
         # Volume spike with price direction
         recent_price_change = (candles_5m[-1]["close"] - candles_5m[-2]["close"]) / candles_5m[-2]["close"]
-        
+
         # High volume + up = bullish, high volume + down = bearish
         if volume_ratio > VOLUME_SPIKE_MULTIPLIER:
             signal = 0.7 if recent_price_change > 0 else -0.7
@@ -371,18 +371,18 @@ class CryptoDataService:
             signal = 0.4 if recent_price_change > 0 else -0.4
         else:
             signal = 0.0
-        
+
         return max(-1.0, min(1.0, signal))
 
     def _compute_order_book_signal(self, order_book: dict[str, Any] | None) -> float:
         """Convert order book imbalance to directional signal.
-        
+
         Returns:
             Signal in [-1, 1] where positive = more bids (bullish)
         """
         if not order_book:
             return 0.0
-        
+
         imbalance = order_book.get("imbalance", 0)
         # Imbalance is already normalized to [-1, 1]
         return imbalance
@@ -390,13 +390,13 @@ class CryptoDataService:
     def _compute_long_short_signal(self, long_short_ratio: float | None) -> float:
         """Contrarian signal from long/short ratio.
         When too many traders are long, fade them (bet short).
-        
+
         Returns:
             Signal in [-1, 1] where positive = bullish (contrarian)
         """
         if long_short_ratio is None:
             return 0.0
-        
+
         # Extreme long (>3.0 = 75% long) → fade (bet DOWN)
         if long_short_ratio > EXTREME_LONG_SHORT:
             signal = -0.8
@@ -410,21 +410,21 @@ class CryptoDataService:
             signal = 0.4
         else:
             signal = 0.0
-        
+
         return signal
 
     def _compute_fear_greed_signal(self, fear_greed: dict[str, Any] | None) -> float:
         """Contrarian signal from Fear & Greed Index.
         Extreme fear = buy opportunity, extreme greed = sell opportunity.
-        
+
         Returns:
             Signal in [-1, 1] where positive = bullish (contrarian)
         """
         if not fear_greed:
             return 0.0
-        
+
         value = fear_greed.get("value", 50)
-        
+
         # Extreme fear (<20) → buy (contrarian bullish)
         if value < 20:
             signal = 0.8
@@ -439,7 +439,7 @@ class CryptoDataService:
         # Neutral (40-60)
         else:
             signal = 0.0
-        
+
         return signal
 
     def _compute_volatility_signal(
@@ -580,7 +580,7 @@ class CryptoDataService:
             volume_signal, order_book_signal, long_short_signal, fear_greed_signal
         ]
         nonzero = [s for s in all_signals if abs(s) > 0.05]
-        
+
         if len(nonzero) >= 3:
             # Check if signals agree on direction
             positive = sum(1 for s in nonzero if s > 0)

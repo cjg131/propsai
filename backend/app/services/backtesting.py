@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.logging_config import get_logger
@@ -582,7 +582,6 @@ async def run_weather_backtest(
     """
     import sqlite3
     from collections import defaultdict
-    from datetime import datetime, timedelta, timezone as _tz
 
     from app.services.trading_engine import DB_PATH
 
@@ -593,7 +592,7 @@ async def run_weather_backtest(
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
-    cutoff = (datetime.now(_tz.utc) - timedelta(days=days_back)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
     c.execute("""
         SELECT id, timestamp, ticker, side, price_cents, cost, fee, pnl,
                our_prob, kalshi_prob, edge, result, strategy, signal_source,

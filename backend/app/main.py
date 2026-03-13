@@ -75,6 +75,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     config = get_settings()
+    cors_origins = getattr(config, "cors_origin_list", None)
+    if cors_origins is None:
+        raw_cors = getattr(config, "cors_origins", "http://localhost:3000")
+        cors_origins = [origin.strip() for origin in raw_cors.split(",") if origin.strip()]
 
     app = FastAPI(
         title="PropsAI",
@@ -86,7 +90,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=config.cors_origin_list,
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -4,7 +4,7 @@ import sqlite3
 
 from fastapi import APIRouter
 
-from app.services.kalshi_agent import get_kalshi_agent
+from app.services.kalshi_agent import get_existing_kalshi_agent, get_kalshi_agent
 from app.services.trading_engine import DB_PATH, get_trading_engine
 
 router = APIRouter()
@@ -13,7 +13,12 @@ router = APIRouter()
 @router.get("/health")
 async def health_check():
     engine = get_trading_engine()
-    agent = get_kalshi_agent()
+    agent = get_existing_kalshi_agent()
+    if agent is None:
+        try:
+            agent = get_kalshi_agent()
+        except Exception:
+            agent = None
 
     db_ok = True
     try:
@@ -25,7 +30,7 @@ async def health_check():
     except Exception:
         db_ok = False
 
-    ws_status = agent.ws.get_status()
+    ws_status = agent.ws.get_status() if agent is not None else {"connected": False, "status": "unavailable"}
     guardrails = engine.get_guardrail_status()
     runtime_health = guardrails.get("runtime_health", {})
     api_ok = bool(runtime_health.get("api_healthy", True))
@@ -39,7 +44,7 @@ async def health_check():
         "status": "healthy" if healthy else "degraded",
         "service": "propsai-backend",
         "version": "0.1.0",
-        "agent_running": agent._running,
+        "agent_running": bool(getattr(agent, "_running", False)),
         "paper_mode": engine.paper_mode,
         "mode": "paper" if engine.paper_mode else "live",
         "strategy_policy": {

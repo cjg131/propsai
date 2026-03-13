@@ -5277,6 +5277,11 @@ class KalshiAgent:
 _agent: KalshiAgent | None = None
 
 
+def get_existing_kalshi_agent() -> KalshiAgent | None:
+    """Return the singleton agent only if it has already been created."""
+    return _agent
+
+
 def get_kalshi_agent() -> KalshiAgent:
     """Get or create the singleton agent."""
     global _agent

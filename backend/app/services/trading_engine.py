@@ -1578,8 +1578,16 @@ class TradingEngine:
         full_kelly = (our_prob * b - q) / b
         full_kelly = max(0.0, full_kelly)  # Never negative
 
-        # Quarter-Kelly for safety
-        quarter_kelly = 0.25 * full_kelly
+        # Quarter-Kelly for safety, scaled by the learning engine's multiplier
+        # The learning engine adjusts this multiplier based on observed P&L variance:
+        # - High variance / losing → multiplier drops toward 0.5 (more conservative)
+        # - Low variance / profitable → multiplier rises toward 1.5 (capture more)
+        try:
+            from app.services.learning_engine import get_learning_engine
+            kelly_mult = get_learning_engine().get_kelly_multiplier(strategy)
+        except Exception:
+            kelly_mult = 1.0
+        quarter_kelly = 0.25 * full_kelly * kelly_mult
 
         # Safety caps by strategy, signal source, and confidence tier
         is_observed_arb = signal_source == "weather_observed_arbitrage"

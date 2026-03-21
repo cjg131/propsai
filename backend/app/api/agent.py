@@ -1159,3 +1159,40 @@ async def get_market_maker_status():
     except Exception as e:
         logger.error("Failed to get market maker status", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/learning/status")
+async def get_learning_status():
+    """Get continuous learning engine status — all learned parameters and adjustments."""
+    try:
+        from app.services.learning_engine import get_learning_engine
+        learner = get_learning_engine()
+        return learner.get_state()
+    except Exception as e:
+        logger.error("Failed to get learning status", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/learning/report")
+async def get_learning_report():
+    """Get learning calibration report — Brier scores, edge thresholds, Kelly multipliers."""
+    try:
+        from app.services.learning_engine import get_learning_engine
+        learner = get_learning_engine()
+        return learner.get_calibration_report()
+    except Exception as e:
+        logger.error("Failed to get learning report", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/learning/run")
+async def trigger_learning_cycle():
+    """Manually trigger a learning cycle (normally runs automatically after each weather cycle)."""
+    try:
+        from app.services.learning_engine import get_learning_engine
+        learner = get_learning_engine()
+        summary = learner.run_learning_cycle()
+        return summary
+    except Exception as e:
+        logger.error("Failed to run learning cycle", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

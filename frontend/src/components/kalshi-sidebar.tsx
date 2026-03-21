@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   BarChart3,
   Bot,
   Crosshair,
@@ -35,6 +36,7 @@ const kalshiNavItems = [
       { title: "History", href: "/kalshi/history", icon: History },
       { title: "Agent", href: "/kalshi/agent", icon: Bot },
       { title: "Performance", href: "/kalshi/performance", icon: TrendingUp },
+      { title: "Calibration", href: "/kalshi/calibration", icon: Activity },
     ],
   },
   {

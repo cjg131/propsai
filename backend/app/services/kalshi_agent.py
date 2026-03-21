@@ -24,6 +24,7 @@ from app.services.event_bus import get_event_bus
 from app.services.finance_data import FinanceDataService
 from app.services.kalshi_api import get_kalshi_client
 from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs
+from app.services.learning_engine import get_learning_engine
 from app.services.market_maker import get_market_maker
 from app.services.kalshi_ws import KalshiWebSocket, get_kalshi_ws
 from app.services.nba_data import NBADataService, get_nba_data
@@ -181,6 +182,9 @@ class KalshiAgent:
 
         # Market maker for two-sided weather quoting
         self.market_maker = get_market_maker()
+
+        # Continuous learning engine
+        self.learner = get_learning_engine()
 
         # Crypto data service
         self.crypto = CryptoDataService()
@@ -632,6 +636,15 @@ class KalshiAgent:
             elif stats["avg_pnl"] < -0.5 or stats["win_rate"] < 0.45:
                 min_edge = 0.10
                 min_price_cents = 18.0
+
+        # Learning engine override: if the continuous learner has a tuned threshold,
+        # use it as a floor (never go below what the learner recommends)
+        try:
+            learned_edge = self.learner.get_edge_threshold("weather_observed")
+            if learned_edge and learned_edge > min_edge:
+                min_edge = learned_edge
+        except Exception:
+            pass
 
         return {
             "min_edge": min_edge,
@@ -5106,6 +5119,25 @@ class KalshiAgent:
                     # Intraday obs re-eval: for open weather positions on same-day markets,
                     # fetch fresh NWS observations and consider adding if obs strongly confirm
                     await self._weather_intraday_reeval()
+
+                    # Run learning cycle to improve parameters from outcomes
+                    try:
+                        learn_summary = self.learner.run_learning_cycle()
+                        adjustments = learn_summary.get("adjustments", [])
+                        if adjustments:
+                            adj_text = "; ".join(
+                                f"{a['type']}: {a.get('strategy', a.get('city', '?'))} "
+                                f"{a.get('old', '?')}→{a.get('new', '?')}"
+                                for a in adjustments[:5]
+                            )
+                            self.engine.log_event(
+                                "info",
+                                f"Learning engine: {len(adjustments)} adjustments — {adj_text}",
+                                strategy="weather",
+                            )
+                    except Exception as le:
+                        logger.debug("Learning cycle error", error=str(le))
+
             except asyncio.CancelledError:
                 break
             except Exception as e:

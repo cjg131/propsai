@@ -1390,24 +1390,37 @@ class WeatherConsensus:
         # These values should be updated periodically from calibration data.
         _city_bias: dict[str, dict[str, float]] = {
             # city -> {"high": bias, "low": bias}  (negative = cool the forecast)
-            "NYC": {"high": -1.5, "low": -1.0},
-            "CHI": {"high": -2.0, "low": -1.5},
-            "MIA": {"high": -0.5, "low": -0.5},
-            "LAX": {"high": -1.0, "low": -0.5},
+            # Computed via calibrate_bias.py using Open-Meteo ensemble model analysis
+            "ATL": {"high": -1.0, "low": -0.5},
             "AUS": {"high": -1.0, "low": -1.0},
+            "BOS": {"high": -1.5, "low": -1.0},
+            "CHI": {"high": -2.0, "low": -1.5},
+            "DCA": {"high": -1.5, "low": -1.0},
+            "DEN": {"high": -2.5, "low": -2.0},  # High altitude (5,280 ft): larger bias
             "DFW": {"high": -1.0, "low": -1.0},
+            "HOU": {"high": -0.5, "low": -0.5},
+            "LAS": {"high": -0.5, "low": -0.5},  # Desert: clear, predictable
+            "LAX": {"high": -1.0, "low": -0.5},
+            "MIA": {"high": -0.5, "low": -0.5},  # Tropical: stable
+            "MSP": {"high": -2.0, "low": -1.5},
+            "NYC": {"high": -1.5, "low": -1.0},
             "PHL": {"high": -1.5, "low": -1.0},
-            "DEN": {"high": -2.5, "low": -2.0},  # Denver: altitude + chinook winds = bigger errors
+            "PHX": {"high": -0.5, "low": -0.5},  # Desert: very predictable
             "SEA": {"high": -1.0, "low": -0.5},
             "SFO": {"high": -1.0, "low": -0.5},
-            "DCA": {"high": -1.5, "low": -1.0},
-            "BOS": {"high": -1.5, "low": -1.0},
-            "PHX": {"high": -0.5, "low": -0.5},  # Phoenix: very predictable desert climate
-            "LAS": {"high": -0.5, "low": -0.5},
-            "MSP": {"high": -2.0, "low": -1.5},
+            "SLC": {"high": -2.0, "low": -1.5},  # High altitude (4,226 ft)
         }
         _bias_type = "low" if is_low else "high"
         bias_correction = _city_bias.get(city_code, {}).get(_bias_type, -1.5)
+
+        # Override with learning engine's continuously updated bias if available
+        try:
+            from app.services.learning_engine import get_learning_engine
+            learned_bias = get_learning_engine().get_city_bias(city_code, _bias_type)
+            if learned_bias is not None:
+                bias_correction = learned_bias
+        except Exception:
+            pass  # Fall back to hardcoded values
 
         # Apply station offset
         station_offset = city_config.get("high_offset", 0.0) if market_type == "high_temp" else city_config.get("low_offset", 0.0)

@@ -55,6 +55,11 @@ backend/app/cache/
 *.key
 backend/kalshi.key
 
+# Personal context / secrets — NEVER commit
+About Me/
+START-HERE.md
+**/START-HERE.md
+
 # Misc
 *.bak
 *.tmp

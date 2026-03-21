@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   propsai-backend:
     build: .
@@ -8,25 +6,24 @@ services:
     env_file:
       - .env
     volumes:
-      # Persist the SQLite database and learning state between restarts/redeploys
       - propsai-data:/app/app/data
-      # Mount Kalshi private key (copy kalshi.key to the server)
       - ./kalshi.key:/app/kalshi.key:ro
     ports:
       - "8000:8000"
-    labels:
-      # Traefik auto-discovery (Hostinger's Traefik will pick these up)
-      - "traefik.enable=true"
-      - "traefik.http.routers.propsai.rule=Host(`${DOMAIN:-propsai.example.com}`)"
-      - "traefik.http.routers.propsai.entrypoints=websecure"
-      - "traefik.http.routers.propsai.tls.certresolver=letsencrypt"
-      - "traefik.http.services.propsai.loadbalancer.server.port=8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  propsai-frontend:
+    build: ../frontend
+    container_name: propsai-frontend
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
 
 volumes:
   propsai-data:

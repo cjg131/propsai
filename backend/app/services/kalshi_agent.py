@@ -24,6 +24,7 @@ from app.services.event_bus import get_event_bus
 from app.services.finance_data import FinanceDataService
 from app.services.kalshi_api import get_kalshi_client
 from app.services.kalshi_scanner import KalshiScanner, parse_parlay_legs
+from app.services.market_maker import get_market_maker
 from app.services.kalshi_ws import KalshiWebSocket, get_kalshi_ws
 from app.services.nba_data import NBADataService, get_nba_data
 from app.services.news_sentiment import get_market_news_sentiment
@@ -177,6 +178,9 @@ class KalshiAgent:
 
         # Dynamic market scanner
         self.scanner = KalshiScanner(self.kalshi)
+
+        # Market maker for two-sided weather quoting
+        self.market_maker = get_market_maker()
 
         # Crypto data service
         self.crypto = CryptoDataService()
@@ -1153,6 +1157,10 @@ class KalshiAgent:
             self.engine.log_event("info", "Weather strategy disabled", strategy="weather")
             return results
 
+        # Initialize here so market maker can access even if main try partially fails
+        by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        forecasts_by_city_date: dict[tuple[str, str], dict[str, Any]] = {}
+
         try:
             # Dynamically scan ALL open Kalshi weather markets across all cities
             weather_markets = await self.scanner.scan_weather_markets()
@@ -1176,7 +1184,6 @@ class KalshiAgent:
             import re as _re
             from datetime import datetime as _datetime
             today_str = _datetime.now(UTC).date().isoformat()
-            by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for m in weather_markets:
                 city_code = m.get("weather", {}).get("city_code", "")
                 if not city_code:
@@ -1208,7 +1215,6 @@ class KalshiAgent:
                     logger.debug("NWS observation fetch failed", city=city_key, error=str(e))
 
             # Pre-fetch forecasts for all city/date combos
-            forecasts_by_city_date: dict[tuple[str, str], dict[str, Any]] = {}
             for city_key, target_date_str in by_city_date.keys():
                 try:
                     target_dt = _datetime.fromisoformat(target_date_str).date()
@@ -1288,6 +1294,26 @@ class KalshiAgent:
             f"Weather cycle complete: {len(results)} candidates",
             strategy="weather",
         )
+
+        # ── Market Making: post two-sided quotes on weather markets ──
+        # Only on markets where we have a fair value from forecasts
+        try:
+            mm_quotes_posted = await self._post_market_maker_quotes(
+                by_city_date, forecasts_by_city_date
+            )
+            if mm_quotes_posted:
+                self.engine.log_event(
+                    "info",
+                    f"Market maker: posted {mm_quotes_posted} two-sided quotes",
+                    strategy="weather",
+                )
+        except Exception as e:
+            self.engine.log_event(
+                "warning",
+                f"Market maker quote posting failed: {e}",
+                strategy="weather",
+            )
+
         rejection_summary = self.engine.get_rejection_summary_since("weather", cycle_started_at, limit=6)
         if rejection_summary:
             summary_text = ", ".join(f"{row['reason']}={row['count']}" for row in rejection_summary)
@@ -1297,6 +1323,143 @@ class KalshiAgent:
                 strategy="weather",
             )
         return results
+
+    async def _post_market_maker_quotes(
+        self,
+        by_city_date: dict[tuple[str, str], list[dict[str, Any]]],
+        forecasts_by_city_date: dict[tuple[str, str], dict[str, Any]],
+    ) -> int:
+        """
+        Post two-sided market-making quotes on weather markets.
+
+        For each market where we have a consensus forecast, calculate a fair value
+        and post bid-YES + bid-NO limit orders to capture the spread.
+        Kalshi maker fee is $0, so the full spread is profit when both sides fill.
+
+        Returns the number of quote pairs posted.
+        """
+        from app.services.discipline_engine import get_discipline_engine
+
+        mm = self.market_maker
+        discipline = get_discipline_engine()
+        quotes_posted = 0
+
+        for (city_key, target_date_str), city_markets in by_city_date.items():
+            forecasts = forecasts_by_city_date.get((city_key, target_date_str))
+            if not forecasts:
+                continue
+
+            consensus = forecasts.get("consensus", {})
+            if not consensus:
+                continue
+
+            for market in city_markets:
+                ticker = market.get("ticker", "")
+                yes_ask = market.get("yes_ask", 0)
+                yes_bid = market.get("yes_bid", 0)
+
+                if not ticker or not yes_ask:
+                    continue
+
+                # Skip markets with very wide or very thin spreads
+                spread = yes_ask - yes_bid if yes_bid else 0
+                if spread > 0 and (spread < mm.min_spread_to_quote or spread > mm.max_spread_to_quote):
+                    continue
+
+                # Determine our fair value from the consensus probability
+                # _evaluate_weather_market calculates this — we replicate the core logic
+                weather_info = market.get("weather", {})
+                metric = weather_info.get("metric", "")  # "high" or "low"
+                threshold = weather_info.get("threshold")
+                above_or_below = weather_info.get("above_or_below", "above")
+
+                if threshold is None:
+                    continue
+
+                # Get consensus mean and std for this metric
+                consensus_mean = consensus.get(f"{metric}_mean")
+                consensus_std = consensus.get(f"{metric}_std")
+                if consensus_mean is None or consensus_std is None:
+                    continue
+                if consensus_std <= 0:
+                    consensus_std = 2.0  # Safety floor
+
+                # Calculate probability using normal CDF
+                from scipy.stats import norm
+                if above_or_below == "above":
+                    our_prob = 1.0 - norm.cdf(threshold, loc=consensus_mean, scale=consensus_std)
+                else:
+                    our_prob = norm.cdf(threshold, loc=consensus_mean, scale=consensus_std)
+
+                our_prob = max(0.01, min(0.99, our_prob))
+                fair_value_cents = mm.calculate_fair_value(our_prob)
+
+                # Calculate quotes
+                quotes = mm.calculate_quotes(
+                    ticker=ticker,
+                    fair_value_cents=fair_value_cents,
+                    current_yes_bid=yes_bid,
+                    current_yes_ask=yes_ask,
+                )
+
+                if not quotes or quotes.get("action") == "hold":
+                    continue
+
+                # Post the limit orders (respecting paper mode)
+                yes_bid_price = quotes.get("yes_bid_price")
+                no_bid_price = quotes.get("no_bid_price")
+
+                if self.engine.paper_mode:
+                    # In paper mode, just log the quotes
+                    self.engine.log_event(
+                        "info",
+                        f"MM [PAPER] {ticker}: bid YES@{yes_bid_price}c, bid NO@{no_bid_price}c "
+                        f"(fair={fair_value_cents}c, spread={quotes['spread']}c, "
+                        f"delta={quotes['net_delta']})",
+                        strategy="weather",
+                    )
+                    quotes_posted += 1
+                else:
+                    # Live mode: place actual limit orders through the API
+                    try:
+                        # Place YES bid (buy YES below fair value)
+                        if yes_bid_price:
+                            await self.kalshi.place_order(
+                                ticker=ticker,
+                                side="yes",
+                                action="buy",
+                                count=1,
+                                type="limit",
+                                yes_price=yes_bid_price,
+                            )
+
+                        # Place NO bid (buy NO = sell YES above fair value)
+                        if no_bid_price:
+                            await self.kalshi.place_order(
+                                ticker=ticker,
+                                side="no",
+                                action="buy",
+                                count=1,
+                                type="limit",
+                                no_price=no_bid_price,
+                            )
+
+                        self.engine.log_event(
+                            "info",
+                            f"MM [LIVE] {ticker}: bid YES@{yes_bid_price}c, bid NO@{no_bid_price}c "
+                            f"(fair={fair_value_cents}c)",
+                            strategy="weather",
+                        )
+                        quotes_posted += 1
+
+                    except Exception as e:
+                        self.engine.log_event(
+                            "warning",
+                            f"MM order failed {ticker}: {e}",
+                            strategy="weather",
+                        )
+
+        return quotes_posted
 
     async def _evaluate_weather_market(
         self,

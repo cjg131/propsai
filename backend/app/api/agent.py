@@ -1112,3 +1112,50 @@ async def get_recent_events(count: int = Query(default=20, le=50)):
     """Get recent agent events (for initial page load before SSE connects)."""
     bus = get_event_bus()
     return {"events": bus.get_recent(count)}
+
+
+# ── Discipline Engine & Calibration ────────────────────────────
+
+
+@router.get("/discipline/status")
+async def get_discipline_status():
+    """Get discipline engine status: circuit breakers, rate limits, concentrations."""
+    try:
+        from app.services.discipline_engine import get_discipline_engine
+        discipline = get_discipline_engine()
+        engine = get_trading_engine()
+        discipline.update_bankroll(engine.get_effective_bankroll())
+        return discipline.get_status()
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Discipline engine not installed")
+    except Exception as e:
+        logger.error("Failed to get discipline status", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/discipline/calibration")
+async def get_calibration_report(strategy: str = Query(default="")):
+    """Get prediction calibration report — how well do our probabilities match reality."""
+    try:
+        from app.services.discipline_engine import get_discipline_engine
+        discipline = get_discipline_engine()
+        return discipline.get_calibration_report(strategy=strategy)
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Discipline engine not installed")
+    except Exception as e:
+        logger.error("Failed to get calibration report", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/market-maker/status")
+async def get_market_maker_status():
+    """Get market maker status: inventory, delta, resting orders."""
+    try:
+        from app.services.market_maker import get_market_maker
+        mm = get_market_maker()
+        return mm.get_status()
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Market maker not installed")
+    except Exception as e:
+        logger.error("Failed to get market maker status", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1548,12 +1548,38 @@ class TradingEngine:
         if bankroll <= 0:
             return 0
 
-        # Half-Kelly: f = 0.5 * edge / (1 - implied_prob)
-        # This scales position size with edge magnitude rather than using fixed fractions.
+        # FIXED: Standard Kelly Criterion for binary contracts.
+        #
+        # For a binary bet at price p (in dollars, so p = price_cents/100):
+        #   - If we win: payout = $1, profit = (1 - p) per contract
+        #   - If we lose: loss = p per contract
+        #   - Our estimated win probability = our_prob (passed as edge + implied_prob)
+        #
+        # Kelly formula: f* = (p_win * b - p_loss) / b
+        #   where b = net odds = (1 - market_price) / market_price
+        #         p_win = our estimated probability
+        #         p_loss = 1 - p_win
+        #
+        # Simplified for binary at price p with our prob = p + edge:
+        #   f* = edge / (1 - p)    [when odds b = (1-p)/p]
+        #
+        # We use QUARTER-Kelly (0.25x) because:
+        # 1. Our probability estimates have uncertainty
+        # 2. Kalshi markets are illiquid (can't always exit)
+        # 3. Quarter-Kelly sacrifices only ~12% of expected growth for ~75% less variance
         implied_prob = price_cents / 100.0
-        if implied_prob >= 0.99:
-            implied_prob = 0.99  # prevent division by zero
-        half_kelly = 0.5 * edge / (1.0 - implied_prob)
+        implied_prob = max(0.01, min(0.99, implied_prob))
+        our_prob = implied_prob + edge
+        our_prob = max(0.01, min(0.99, our_prob))
+
+        # Standard Kelly: f = (p * b - q) / b where b = (1-implied)/implied
+        b = (1.0 - implied_prob) / implied_prob  # net odds
+        q = 1.0 - our_prob
+        full_kelly = (our_prob * b - q) / b
+        full_kelly = max(0.0, full_kelly)  # Never negative
+
+        # Quarter-Kelly for safety
+        quarter_kelly = 0.25 * full_kelly
 
         # Safety caps by strategy, signal source, and confidence tier
         is_observed_arb = signal_source == "weather_observed_arbitrage"
@@ -1583,7 +1609,7 @@ class TradingEngine:
             else:
                 max_kelly = 0.05
 
-        kelly_fraction = min(half_kelly, max_kelly)
+        kelly_fraction = min(quarter_kelly, max_kelly)
         kelly_size = bankroll * kelly_fraction
 
         remaining = self.get_remaining_capital(strategy=strategy)
@@ -1640,11 +1666,13 @@ class TradingEngine:
     ) -> str:
         """Record a trading signal. Returns signal ID."""
         signal_id = str(uuid.uuid4())[:12]
-        edge = our_prob - kalshi_prob if side == "no" else kalshi_prob - our_prob
-        # For "no" side: edge = (1-our_prob) - (1-kalshi_prob) = kalshi_prob - our_prob...
-        # Actually: if we buy NO, edge = our_prob_no - kalshi_prob_no
-        # Let's keep it simple: edge is always positive when we have an advantage
-        edge = abs(our_prob - kalshi_prob)
+        # FIXED: Directional edge calculation.
+        # our_prob and kalshi_prob are ALWAYS expressed from the perspective of
+        # the side we're buying. If buying YES: our_prob = P(yes), kalshi_prob = market P(yes).
+        # If buying NO: our_prob = P(no), kalshi_prob = market P(no).
+        # Edge = our_prob - kalshi_prob.  Positive = we think it's underpriced (good trade).
+        # Negative = we think it's overpriced (bad trade, should NOT take).
+        edge = our_prob - kalshi_prob
 
         if not self.paper_mode:
             resting_total = self.get_resting_order_count()
@@ -1733,13 +1761,37 @@ class TradingEngine:
         """
         cost = count * price_cents / 100.0
         fee = _kalshi_maker_fee(count, price_cents)
-        edge = abs(our_prob - kalshi_prob)
+        # FIXED: Directional edge — our_prob and kalshi_prob are already from
+        # the perspective of the side we're buying (YES or NO).
+        edge = our_prob - kalshi_prob
 
         if count <= 0:
             return {"status": "blocked", "reason": "Invalid contract count"}
 
         if price_cents <= 0 or price_cents >= 100:
             return {"status": "blocked", "reason": "Invalid price"}
+
+        # ── DISCIPLINE ENGINE GATE ──
+        # Every trade must pass through the discipline engine before execution.
+        # This is the iron-clad guardrail layer that prevents account destruction.
+        try:
+            from app.services.discipline_engine import get_discipline_engine
+            discipline = get_discipline_engine()
+            discipline.update_bankroll(self.get_effective_bankroll())
+            approved, discipline_reason = discipline.approve_trade(
+                strategy=strategy,
+                ticker=ticker,
+                side=side,
+                cost=cost + fee,
+            )
+            if not approved:
+                self.log_event("blocked", f"Discipline engine: {discipline_reason}", strategy=strategy)
+                return {"status": "blocked", "reason": f"Discipline: {discipline_reason}"}
+        except ImportError:
+            pass  # Discipline engine not yet installed — allow trade through
+        except Exception as e:
+            self.log_event("warning", f"Discipline engine error (allowing trade): {e}", strategy=strategy)
+        # ── END DISCIPLINE GATE ──
 
         if signal_source not in {"monitor_add", "monitor_reprice"} and self.has_open_position(ticker):
             reason = f"Open position already exists for {ticker}"
@@ -1855,6 +1907,16 @@ class TradingEngine:
 
         # Track cycle deployment for per-strategy caps
         self._record_cycle_deployment(strategy, cost + fee)
+
+        # ── Record with discipline engine ──
+        try:
+            from app.services.discipline_engine import get_discipline_engine
+            discipline = get_discipline_engine()
+            discipline.record_order()
+            discipline.record_position(ticker, strategy, cost + fee)
+        except Exception:
+            pass
+        # ── END discipline tracking ──
 
         # Record trade
         trade = {

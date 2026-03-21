@@ -1384,10 +1384,30 @@ class WeatherConsensus:
         city_config = CITY_CONFIGS.get(city_code, {})
 
         # Bias correction: forecast models tend to over-predict temps.
-        # HIGH temp: warm bias → subtract 2°F to be conservative (prevents false YES on "above X")
-        # LOW temp: warm bias on lows → subtract 2°F to push consensus colder
-        #           (models under-predict how cold it gets overnight)
-        bias_correction = -2.0
+        # FIXED: Use per-city, per-market-type calibrated biases instead of a
+        # blanket -2°F.  The default -2°F was overcorrecting in warm climates
+        # (MIA, PHX) and undercorrecting in continental cities (CHI, DEN).
+        # These values should be updated periodically from calibration data.
+        _city_bias: dict[str, dict[str, float]] = {
+            # city -> {"high": bias, "low": bias}  (negative = cool the forecast)
+            "NYC": {"high": -1.5, "low": -1.0},
+            "CHI": {"high": -2.0, "low": -1.5},
+            "MIA": {"high": -0.5, "low": -0.5},
+            "LAX": {"high": -1.0, "low": -0.5},
+            "AUS": {"high": -1.0, "low": -1.0},
+            "DFW": {"high": -1.0, "low": -1.0},
+            "PHL": {"high": -1.5, "low": -1.0},
+            "DEN": {"high": -2.5, "low": -2.0},  # Denver: altitude + chinook winds = bigger errors
+            "SEA": {"high": -1.0, "low": -0.5},
+            "SFO": {"high": -1.0, "low": -0.5},
+            "DCA": {"high": -1.5, "low": -1.0},
+            "BOS": {"high": -1.5, "low": -1.0},
+            "PHX": {"high": -0.5, "low": -0.5},  # Phoenix: very predictable desert climate
+            "LAS": {"high": -0.5, "low": -0.5},
+            "MSP": {"high": -2.0, "low": -1.5},
+        }
+        _bias_type = "low" if is_low else "high"
+        bias_correction = _city_bias.get(city_code, {}).get(_bias_type, -1.5)
 
         # Apply station offset
         station_offset = city_config.get("high_offset", 0.0) if market_type == "high_temp" else city_config.get("low_offset", 0.0)

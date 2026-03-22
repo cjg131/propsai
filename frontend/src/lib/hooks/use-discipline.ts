@@ -1,80 +1,50 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
-// ── Types ──────────────────────────────────────────────────────────
-
-export interface CircuitBreakerState {
-  daily_limit_hit: boolean;
-  daily_loss_limit: number;
-  daily_pnl: number;
-  weekly_limit_hit: boolean;
-  weekly_loss_limit: number;
-  weekly_pnl: number;
-  drawdown_limit_hit: boolean;
-  drawdown_limit_pct: number;
-  current_drawdown_pct: number;
-}
-
-export interface RateLimits {
-  orders_today: number;
-  max_orders_daily: number;
-  orders_this_hour: number;
-  max_orders_hourly: number;
-}
-
-export interface Concentration {
-  total_deployed_pct: number;
-  largest_market_pct: number;
-  largest_strategy_pct: number;
-}
+// ── Types (match actual backend responses) ──────────────────────────
 
 export interface DisciplineStatus {
-  circuit_breaker: CircuitBreakerState;
-  rate_limits: RateLimits;
-  concentration: Concentration;
-  cash_reserve_pct: number;
-  timestamp: string;
+  bankroll: number;
+  peak_bankroll: number;
+  drawdown_pct: number;
+  daily_pnl: number;
+  weekly_pnl: number;
+  total_deployed: number;
+  deployment_pct: number;
+  cash_available: number;
+  is_halted: boolean;
+  halt_reason: string;
+  orders_last_hour: number;
+  orders_last_day: number;
+  positions_count: number;
+  strategy_exposure: Record<string, number>;
 }
 
 export interface CalibrationBucket {
-  bucket_start: number;
-  bucket_end: number;
-  predicted_prob: number;
-  actual_win_rate: number;
-  trade_count: number;
-}
-
-export interface StrategyCalibrationStat {
-  strategy: string;
-  total_trades: number;
-  win_rate: number;
-  avg_edge: number;
-  total_pnl: number;
+  count: number;
+  avg_predicted: number;
+  actual_rate: number;
+  calibration_error: number;
 }
 
 export interface CalibrationReport {
-  calibration_curve: CalibrationBucket[];
-  strategy_stats: StrategyCalibrationStat[];
+  total_predictions: number;
+  total_pnl: number;
+  avg_edge_claimed: number;
   overall_win_rate: number;
-  overall_edge: number;
-  timestamp: string;
-}
-
-export interface MarketInventory {
-  ticker: string;
-  title: string;
-  side: string;
-  contracts: number;
-  position_value: number;
+  buckets: Record<string, CalibrationBucket>;
+  calibration_score: number;
+  error?: string;
 }
 
 export interface MarketMakerStatus {
   active_markets: number;
   total_inventory: number;
+  total_yes: number;
+  total_no: number;
   net_delta: number;
   resting_orders: number;
-  inventory_by_market: MarketInventory[];
-  timestamp: string;
+  inventory_by_market: Record<string, { yes: number; no: number }>;
 }
 
 // ── Hooks ──────────────────────────────────────────────────────────
@@ -85,6 +55,7 @@ export function useDisciplineStatus() {
     queryFn: () => api.get("/api/kalshi/agent/discipline/status"),
     refetchInterval: 30_000,
     staleTime: 15_000,
+    retry: 1,
   });
 }
 
@@ -99,6 +70,7 @@ export function useCalibrationReport(strategy?: string) {
       api.get(`/api/kalshi/agent/discipline/calibration${qs ? `?${qs}` : ""}`),
     refetchInterval: 30_000,
     staleTime: 15_000,
+    retry: 1,
   });
 }
 
@@ -108,5 +80,6 @@ export function useMarketMakerStatus() {
     queryFn: () => api.get("/api/kalshi/agent/market-maker/status"),
     refetchInterval: 30_000,
     staleTime: 15_000,
+    retry: 1,
   });
 }

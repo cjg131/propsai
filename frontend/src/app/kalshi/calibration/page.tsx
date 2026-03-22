@@ -258,10 +258,7 @@ export default function CalibrationPage() {
                   <XAxis dataKey="bucket" tick={{ fontSize: 12 }} />
                   <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `${v}%`} />
                   <Tooltip
-                    formatter={(value: number, name: string) => [
-                      `${Number(value).toFixed(1)}%`,
-                      name,
-                    ]}
+                    formatter={(value: unknown) => [`${Number(value).toFixed(1)}%`]}
                     labelFormatter={(label) => `Bucket: ${label}`}
                   />
                   {/* Perfect calibration diagonal */}

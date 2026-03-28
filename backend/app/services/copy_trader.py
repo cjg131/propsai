@@ -32,8 +32,12 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 DATA_BASE = "https://data-api.polymarket.com"
 
-# Default wallets to track — will be loaded from env/config
-DEFAULT_TRACKED_WALLETS: list[str] = []
+# Default wallets to track — env var overrides if set
+DEFAULT_TRACKED_WALLETS: list[str] = [
+    "0x96489abcb9f583d6835c8ef95ffc923d05a86825",  # anoin123 — $5.6M positions
+    "0xda9ed03eb10640d411b35b3773c7af9aade1ac09",  # zhupercyclist — Three Arrows Capital
+    "0x6765c1c000e3b99c7fffea752c561cb868f1fa0d",  # JanAMEX — $1.2M positions
+]
 
 # Position sizing — proportional with caps
 MAX_POSITION_PCT = 0.25     # Max 25% of bankroll per trade ($62.50 on $250)

@@ -98,9 +98,15 @@ class PolymarketTrader:
         if not self._api_key:
             try:
                 creds = await asyncio.to_thread(client.create_or_derive_api_creds)
-                self._api_key = creds.get("apiKey", "")
-                self._api_secret = creds.get("secret", "")
-                self._api_passphrase = creds.get("passphrase", "")
+                # py-clob-client >= 0.30 returns ApiCreds object, not dict
+                if hasattr(creds, "api_key"):
+                    self._api_key = creds.api_key
+                    self._api_secret = creds.api_secret
+                    self._api_passphrase = creds.api_passphrase
+                elif isinstance(creds, dict):
+                    self._api_key = creds.get("apiKey", "")
+                    self._api_secret = creds.get("secret", "")
+                    self._api_passphrase = creds.get("passphrase", "")
 
                 # Re-init client with new creds
                 from py_clob_client.client import ClobClient

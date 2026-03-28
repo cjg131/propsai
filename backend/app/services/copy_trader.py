@@ -6,10 +6,12 @@ Uses Polymarket's public APIs and on-chain data to detect new positions.
 
 Strategy:
 1. Track a curated list of profitable wallets (from leaderboard / manual)
-2. Poll their positions for changes every 30-60 seconds
-3. When a tracked wallet opens/increases a position, mirror it
-4. Apply position sizing rules relative to our bankroll
-5. Log everything for performance tracking
+2. Poll their positions for changes every 45 seconds
+3. First scan is snapshot-only (no trades) to establish baseline
+4. On subsequent scans, when a whale opens/increases a position, mirror it
+5. Proportional sizing: match the whale's portfolio weight (capped at 25%)
+6. Mirror exits: if a whale reduces a position by 50%+, sell our copy
+7. Log everything for performance tracking
 """
 from __future__ import annotations
 
@@ -33,11 +35,10 @@ DATA_BASE = "https://data-api.polymarket.com"
 # Default wallets to track — will be loaded from env/config
 DEFAULT_TRACKED_WALLETS: list[str] = []
 
-# Position sizing
-MAX_POSITION_USDC = 15.0  # Max $15 per copy trade (conservative for $250 bankroll)
-MIN_POSITION_USDC = 2.0   # Min $2 per trade
-MAX_PORTFOLIO_PCT = 0.06   # Max 6% of bankroll per position
-MAX_TOTAL_DEPLOYED = 0.50  # Max 50% of bankroll deployed at once
+# Position sizing — proportional with caps
+MAX_POSITION_PCT = 0.25     # Max 25% of bankroll per trade ($62.50 on $250)
+MIN_POSITION_USDC = 1.0     # Min $1 per trade (roughly 1 contract)
+MAX_TOTAL_DEPLOYED = 0.80   # Max 80% of bankroll deployed at once
 
 
 class CopyTrader:
@@ -48,12 +49,14 @@ class CopyTrader:
         self._http: httpx.AsyncClient | None = None
         self._tracked_wallets: list[str] = self._load_tracked_wallets()
         self._wallet_positions: dict[str, dict[str, Any]] = {}  # wallet -> {market -> position}
+        self._wallet_portfolio_value: dict[str, float] = {}  # wallet -> total portfolio USDC
         self._our_copies: dict[str, dict[str, Any]] = {}  # market -> our copy details
         self._last_scan_ts: float = 0.0
         self._scan_interval: float = 45.0  # seconds between scans
         self._bankroll: float = float(os.getenv("POLYMARKET_BANKROLL", "250"))
         self._total_deployed: float = 0.0
         self._paper_mode: bool = os.getenv("PAPER_MODE", "true").lower() == "true"
+        self._first_scan_done: bool = False  # First scan is snapshot-only
 
     def _load_tracked_wallets(self) -> list[str]:
         """Load tracked wallets from env or defaults."""
@@ -169,19 +172,63 @@ class CopyTrader:
 
         return positions
 
+    # ── Portfolio Estimation ──────────────────────────────────────
+
+    def _estimate_wallet_portfolio(self, positions: list[dict[str, Any]]) -> float:
+        """Estimate a whale's total portfolio value from visible positions.
+
+        Uses current_value if available, otherwise size * avg_price.
+        """
+        total = 0.0
+        for p in positions:
+            value = p.get("current_value", 0)
+            if value > 0:
+                total += value
+            else:
+                # Fallback: size * avg_price as rough value
+                size = p.get("size", 0)
+                price = p.get("avg_price", 0)
+                if size > 0 and price > 0:
+                    total += size * price
+        return total
+
+    def _calculate_whale_position_weight(
+        self, signal: dict[str, Any], wallet: str
+    ) -> float:
+        """Calculate what % of their portfolio a whale put into this position.
+
+        Returns a float between 0.0 and 1.0.
+        """
+        whale_portfolio = self._wallet_portfolio_value.get(wallet, 0)
+        if whale_portfolio <= 0:
+            # Can't estimate — use a conservative default weight
+            return 0.02  # Assume 2% if we can't determine
+
+        position_size = signal.get("size", 0)
+        position_price = signal.get("avg_price", 0)
+        position_value = position_size * position_price if position_price > 0 else position_size
+
+        if position_value <= 0:
+            return 0.01
+
+        weight = position_value / whale_portfolio
+        return min(weight, 1.0)  # Cap at 100% (shouldn't happen but safety)
+
     # ── Copy Trading Logic ───────────────────────────────────────
 
-    async def scan_for_new_trades(self) -> list[dict[str, Any]]:
-        """Scan tracked wallets for new/changed positions.
+    async def scan_for_new_trades(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Scan tracked wallets for new/changed/exited positions.
 
-        Returns list of copy trade signals to execute.
+        Returns (entry_signals, exit_signals).
         """
         now = time.time()
         if now - self._last_scan_ts < self._scan_interval:
-            return []
+            return [], []
 
         self._last_scan_ts = now
-        signals: list[dict[str, Any]] = []
+        entry_signals: list[dict[str, Any]] = []
+        exit_signals: list[dict[str, Any]] = []
+        is_first_scan = not self._first_scan_done
 
         for wallet in self._tracked_wallets:
             try:
@@ -189,41 +236,98 @@ class CopyTrader:
                 current_positions = await self.get_wallet_positions(wallet)
                 previous = self._wallet_positions.get(wallet, {})
 
-                for pos in current_positions:
-                    market_id = pos.get("market_id", "")
-                    if not market_id:
-                        continue
+                # Estimate whale's total portfolio value
+                portfolio_value = self._estimate_wallet_portfolio(current_positions)
+                if portfolio_value > 0:
+                    self._wallet_portfolio_value[wallet] = portfolio_value
 
-                    prev_pos = previous.get(market_id)
+                if is_first_scan:
+                    # First scan: snapshot only, no trade signals
+                    logger.info(
+                        "Copy trader: initial snapshot",
+                        wallet=wallet[:10],
+                        positions=len(current_positions),
+                        portfolio_est=round(portfolio_value, 2),
+                    )
+                else:
+                    # Check for new or increased positions (entry signals)
+                    for pos in current_positions:
+                        market_id = pos.get("market_id", "")
+                        if not market_id:
+                            continue
 
-                    # New position detected
-                    if prev_pos is None and pos.get("size", 0) > 0:
-                        signals.append({
-                            "type": "new_position",
-                            "wallet": wallet,
-                            "market_id": market_id,
-                            "token_id": pos.get("token_id", ""),
-                            "title": pos.get("title", ""),
-                            "side": pos.get("side", ""),
-                            "size": pos.get("size", 0),
-                            "avg_price": pos.get("avg_price", 0),
-                            "timestamp": now,
-                        })
+                        prev_pos = previous.get(market_id)
 
-                    # Position increased
-                    elif prev_pos and pos.get("size", 0) > prev_pos.get("size", 0) * 1.1:
-                        signals.append({
-                            "type": "position_increase",
-                            "wallet": wallet,
-                            "market_id": market_id,
-                            "token_id": pos.get("token_id", ""),
-                            "title": pos.get("title", ""),
-                            "side": pos.get("side", ""),
-                            "old_size": prev_pos.get("size", 0),
-                            "new_size": pos.get("size", 0),
-                            "avg_price": pos.get("avg_price", 0),
-                            "timestamp": now,
-                        })
+                        # New position detected
+                        if prev_pos is None and pos.get("size", 0) > 0:
+                            entry_signals.append({
+                                "type": "new_position",
+                                "wallet": wallet,
+                                "market_id": market_id,
+                                "token_id": pos.get("token_id", ""),
+                                "title": pos.get("title", ""),
+                                "side": pos.get("side", ""),
+                                "size": pos.get("size", 0),
+                                "avg_price": pos.get("avg_price", 0),
+                                "timestamp": now,
+                            })
+
+                        # Position increased by 10%+
+                        elif prev_pos and pos.get("size", 0) > prev_pos.get("size", 0) * 1.1:
+                            entry_signals.append({
+                                "type": "position_increase",
+                                "wallet": wallet,
+                                "market_id": market_id,
+                                "token_id": pos.get("token_id", ""),
+                                "title": pos.get("title", ""),
+                                "side": pos.get("side", ""),
+                                "old_size": prev_pos.get("size", 0),
+                                "new_size": pos.get("size", 0),
+                                "avg_price": pos.get("avg_price", 0),
+                                "timestamp": now,
+                            })
+
+                    # Check for exited/reduced positions (exit signals)
+                    # Mirror proportionally: if whale cuts 30%, we cut 30%
+                    current_market_ids = {
+                        p["market_id"] for p in current_positions if p.get("market_id")
+                    }
+                    for market_id, prev_pos in previous.items():
+                        if market_id not in current_market_ids:
+                            # Position fully closed — exit 100%
+                            exit_signals.append({
+                                "type": "position_closed",
+                                "wallet": wallet,
+                                "market_id": market_id,
+                                "token_id": prev_pos.get("token_id", ""),
+                                "title": prev_pos.get("title", ""),
+                                "old_size": prev_pos.get("size", 0),
+                                "new_size": 0,
+                                "reduction_pct": 100.0,
+                                "timestamp": now,
+                            })
+                        else:
+                            # Check if position was reduced at all (10%+ threshold)
+                            current_pos = next(
+                                (p for p in current_positions if p.get("market_id") == market_id),
+                                None,
+                            )
+                            if current_pos and prev_pos.get("size", 0) > 0:
+                                reduction = 1 - (
+                                    current_pos.get("size", 0) / prev_pos.get("size", 0)
+                                )
+                                if reduction >= 0.10:  # 10% reduction threshold
+                                    exit_signals.append({
+                                        "type": "position_reduced",
+                                        "wallet": wallet,
+                                        "market_id": market_id,
+                                        "token_id": current_pos.get("token_id", ""),
+                                        "title": current_pos.get("title", ""),
+                                        "old_size": prev_pos.get("size", 0),
+                                        "new_size": current_pos.get("size", 0),
+                                        "reduction_pct": round(reduction * 100, 1),
+                                        "timestamp": now,
+                                    })
 
                 # Update stored positions
                 self._wallet_positions[wallet] = {
@@ -234,22 +338,47 @@ class CopyTrader:
                 logger.debug(f"Error scanning wallet {wallet[:10]}: {e}")
                 continue
 
-        if signals:
-            logger.info(f"Copy trader: {len(signals)} new signals from {len(self._tracked_wallets)} wallets")
+        if is_first_scan:
+            self._first_scan_done = True
+            logger.info(
+                f"Copy trader: first scan complete — snapshotted "
+                f"{len(self._tracked_wallets)} wallets, trading starts next cycle"
+            )
 
-        return signals
+        if entry_signals:
+            logger.info(
+                f"Copy trader: {len(entry_signals)} entry signals from "
+                f"{len(self._tracked_wallets)} wallets"
+            )
+        if exit_signals:
+            logger.info(
+                f"Copy trader: {len(exit_signals)} exit signals detected"
+            )
+
+        return entry_signals, exit_signals
 
     def _calculate_position_size(self, signal: dict[str, Any]) -> float:
-        """Calculate how much USDC to deploy for a copy trade."""
-        # Never exceed max portfolio percentage
-        max_by_pct = self._bankroll * MAX_PORTFOLIO_PCT
+        """Calculate how much USDC to deploy for a copy trade.
 
-        # Never exceed max position
-        size = min(MAX_POSITION_USDC, max_by_pct)
+        Uses proportional sizing: match the whale's portfolio weight,
+        capped at MAX_POSITION_PCT (25%) of our bankroll.
+        """
+        wallet = signal.get("wallet", "")
+
+        # Calculate whale's position weight
+        whale_weight = self._calculate_whale_position_weight(signal, wallet)
+
+        # Apply whale's weight to our bankroll
+        proportional_size = self._bankroll * whale_weight
+
+        # Cap at max percentage of bankroll
+        max_size = self._bankroll * MAX_POSITION_PCT
+        size = min(proportional_size, max_size)
 
         # Check total deployment limit
         remaining_capacity = (self._bankroll * MAX_TOTAL_DEPLOYED) - self._total_deployed
         if remaining_capacity <= MIN_POSITION_USDC:
+            logger.debug("Max total deployment reached")
             return 0.0
 
         size = min(size, remaining_capacity)
@@ -257,6 +386,14 @@ class CopyTrader:
         # Minimum viable trade
         if size < MIN_POSITION_USDC:
             return 0.0
+
+        logger.info(
+            "Proportional sizing",
+            whale_weight=f"{whale_weight:.1%}",
+            proportional=f"${proportional_size:.2f}",
+            capped=f"${size:.2f}",
+            whale=wallet[:10],
+        )
 
         return round(size, 2)
 
@@ -276,7 +413,7 @@ class CopyTrader:
             logger.debug(f"Already have copy position in {market_id[:20]}")
             return None
 
-        # Calculate position size
+        # Calculate position size (proportional to whale's weight)
         usdc_amount = self._calculate_position_size(signal)
         if usdc_amount <= 0:
             logger.debug("Position size too small or max deployment reached")
@@ -316,6 +453,14 @@ class CopyTrader:
             if order_result:
                 result["status"] = "filled"
                 result["order_result"] = order_result
+                logger.info(
+                    "Copy trade (LIVE)",
+                    wallet=signal.get("wallet", "")[:10],
+                    title=signal.get("title", "")[:40],
+                    side=side,
+                    amount=usdc_amount,
+                    order_id=order_result.get("id", ""),
+                )
             else:
                 result["status"] = "failed"
                 return result
@@ -332,6 +477,93 @@ class CopyTrader:
 
         return result
 
+    async def execute_exit(self, signal: dict[str, Any]) -> dict[str, Any] | None:
+        """Execute a proportional exit when a whale reduces/closes a position.
+
+        If whale cuts 50%, we cut 50%. If whale exits fully, we exit fully.
+        Returns exit result dict or None.
+        """
+        market_id = signal.get("market_id", "")
+        if market_id not in self._our_copies:
+            # We don't have a copy of this market
+            return None
+
+        our_copy = self._our_copies[market_id]
+        token_id = our_copy.get("token_id", "")
+        if not token_id:
+            return None
+
+        # Calculate proportional exit amount
+        reduction_pct = signal.get("reduction_pct", 100.0) / 100.0  # e.g. 0.50 for 50%
+        full_amount = our_copy.get("amount", 0)
+        exit_amount = round(full_amount * reduction_pct, 2)
+
+        if exit_amount < MIN_POSITION_USDC:
+            # Too small to exit, skip
+            return None
+
+        # Flip side: if we bought, we sell to exit
+        exit_side = "SELL" if our_copy.get("side") == "BUY" else "BUY"
+        is_full_exit = reduction_pct >= 0.95  # Treat 95%+ as full exit
+
+        result: dict[str, Any] = {
+            "signal": signal,
+            "market_id": market_id,
+            "exit_side": exit_side,
+            "exit_amount": exit_amount,
+            "full_amount": full_amount,
+            "reduction_pct": signal.get("reduction_pct", 100.0),
+            "is_full_exit": is_full_exit,
+            "paper_mode": self._paper_mode,
+        }
+
+        if self._paper_mode:
+            result["status"] = "paper_exited"
+            result["order_id"] = f"PAPER-EXIT-{int(time.time())}"
+            logger.info(
+                "Copy exit (PAPER)",
+                title=signal.get("title", "")[:40],
+                exit_side=exit_side,
+                exit_amount=exit_amount,
+                reduction=f"{signal.get('reduction_pct', 100)}%",
+                reason=signal.get("type", ""),
+            )
+        else:
+            # Live exit
+            order_result = await self._trader.place_market_order(
+                token_id=token_id,
+                side=exit_side,
+                amount=exit_amount,
+            )
+            if order_result:
+                result["status"] = "exited"
+                result["order_result"] = order_result
+                logger.info(
+                    "Copy exit (LIVE)",
+                    title=signal.get("title", "")[:40],
+                    exit_side=exit_side,
+                    exit_amount=exit_amount,
+                    reduction=f"{signal.get('reduction_pct', 100)}%",
+                    order_id=order_result.get("id", ""),
+                )
+            else:
+                result["status"] = "exit_failed"
+                logger.warning(
+                    "Copy exit FAILED",
+                    title=signal.get("title", "")[:40],
+                )
+                return result
+
+        # Update tracking
+        self._total_deployed = max(0, self._total_deployed - exit_amount)
+        if is_full_exit:
+            del self._our_copies[market_id]
+        else:
+            # Reduce our tracked position amount
+            self._our_copies[market_id]["amount"] = round(full_amount - exit_amount, 2)
+
+        return result
+
     # ── Run Cycle ────────────────────────────────────────────────
 
     async def run_cycle(self) -> list[dict[str, Any]]:
@@ -343,10 +575,17 @@ class CopyTrader:
             logger.debug("No tracked wallets configured")
             return []
 
-        signals = await self.scan_for_new_trades()
+        entry_signals, exit_signals = await self.scan_for_new_trades()
         executed: list[dict[str, Any]] = []
 
-        for signal in signals:
+        # Process exits first (free up capital before new entries)
+        for signal in exit_signals:
+            result = await self.execute_exit(signal)
+            if result and result.get("status") in ("exited", "paper_exited"):
+                executed.append(result)
+
+        # Process entries
+        for signal in entry_signals:
             result = await self.execute_copy_trade(signal)
             if result and result.get("status") in ("filled", "paper_filled"):
                 executed.append(result)
@@ -364,8 +603,17 @@ class CopyTrader:
             "active_copies": len(self._our_copies),
             "total_deployed": round(self._total_deployed, 2),
             "bankroll": self._bankroll,
-            "deployment_pct": round(self._total_deployed / self._bankroll * 100, 1) if self._bankroll > 0 else 0,
+            "deployment_pct": round(
+                self._total_deployed / self._bankroll * 100, 1
+            )
+            if self._bankroll > 0
+            else 0,
             "paper_mode": self._paper_mode,
+            "first_scan_done": self._first_scan_done,
+            "wallet_portfolios": {
+                w[:10]: f"${v:,.0f}"
+                for w, v in self._wallet_portfolio_value.items()
+            },
         }
 
 

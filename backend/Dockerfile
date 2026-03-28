@@ -15,7 +15,8 @@ COPY pyproject.toml poetry.lock ./
 
 # Install dependencies (no virtualenv inside container)
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --no-root --only main
+    poetry install --no-interaction --no-ansi --no-root --only main && \
+    pip install --no-cache-dir py-clob-client==0.34.6
 
 # Copy app code
 COPY . .

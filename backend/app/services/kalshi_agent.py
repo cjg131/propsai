@@ -216,6 +216,20 @@ class KalshiAgent:
         # Polymarket cross-reference
         self.polymarket = get_polymarket_data()
 
+        # Polymarket trading + copy trading + cross-platform arbitrage
+        try:
+            from app.services.polymarket_trader import get_polymarket_trader
+            from app.services.copy_trader import get_copy_trader
+            from app.services.cross_platform_arb import get_cross_platform_arb
+            self.poly_trader = get_polymarket_trader()
+            self.copy_trader = get_copy_trader()
+            self.cross_arb = get_cross_platform_arb()
+        except Exception as e:
+            logger.warning(f"Polymarket services not available: {e}")
+            self.poly_trader = None
+            self.copy_trader = None
+            self.cross_arb = None
+
         # Kalshi WebSocket for real-time price updates
         self.ws: KalshiWebSocket = get_kalshi_ws()
 
@@ -233,6 +247,8 @@ class KalshiAgent:
         self._crypto_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
         self._health_task: asyncio.Task | None = None
+        self._copy_trade_task: asyncio.Task | None = None
+        self._cross_arb_task: asyncio.Task | None = None
         self._last_api_check_ok: bool = True
         self._consecutive_api_failures: int = 0
 
@@ -4929,6 +4945,12 @@ class KalshiAgent:
         self._crypto_task = asyncio.create_task(self._crypto_loop(sleep_first=True))
         self._main_task = asyncio.create_task(self._main_strategy_loop(sleep_first=True))
 
+        # Polymarket loops
+        if self.copy_trader is not None:
+            self._copy_trade_task = asyncio.create_task(self._copy_trade_loop(sleep_first=True))
+        if self.cross_arb is not None:
+            self._cross_arb_task = asyncio.create_task(self._cross_arb_loop(sleep_first=True))
+
         # Start health watchdog
         self._health_task = asyncio.create_task(self._health_watchdog())
 
@@ -4961,6 +4983,8 @@ class KalshiAgent:
                     "main": (self._main_task, self._main_strategy_loop),
                     "monitor": (self._monitor_task, self._monitor_loop),
                     "arbitrage": (getattr(self, "_arbitrage_task", None), self._arbitrage_loop),
+                    "copy_trade": (getattr(self, "_copy_trade_task", None), self._copy_trade_loop),
+                    "cross_arb": (getattr(self, "_cross_arb_task", None), self._cross_arb_loop),
                 }
                 for name, (task, loop_fn) in task_map.items():
                     if task is not None and task.done():
@@ -4983,6 +5007,10 @@ class KalshiAgent:
                             self._monitor_task = new_task
                         elif name == "arbitrage":
                             self._arbitrage_task = new_task
+                        elif name == "copy_trade":
+                            self._copy_trade_task = new_task
+                        elif name == "cross_arb":
+                            self._cross_arb_task = new_task
                         recovered.append(name)
 
                 if recovered:
@@ -5073,6 +5101,74 @@ class KalshiAgent:
                 logger.error("Arbitrage loop error", error=str(e))
 
             await asyncio.sleep(30)
+
+    async def _copy_trade_loop(self, sleep_first: bool = False) -> None:
+        """Copy trading loop — monitors whale wallets every 45 seconds."""
+        if sleep_first:
+            await asyncio.sleep(60)
+        while self._running:
+            try:
+                if not self.engine.kill_switch and self.copy_trader is not None:
+                    executed = await self.copy_trader.run_cycle()
+                    if executed:
+                        self.engine.log_event(
+                            "info",
+                            f"Copy trader: executed {len(executed)} trades",
+                            strategy="copy_trade",
+                        )
+                        for trade in executed:
+                            title = trade.get("signal", {}).get("title", "")[:40]
+                            amount = trade.get("usdc_amount", 0)
+                            self.engine.log_event(
+                                "info",
+                                f"Copy trade: {title} | ${amount}",
+                                strategy="copy_trade",
+                            )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.engine.log_event("error", f"Copy trade loop error: {e}", strategy="copy_trade")
+                logger.error("Copy trade loop error", error=str(e))
+
+            await asyncio.sleep(45)
+
+    async def _cross_arb_loop(self, sleep_first: bool = False) -> None:
+        """Cross-platform arbitrage loop — scans Kalshi vs Polymarket every 60 seconds."""
+        if sleep_first:
+            await asyncio.sleep(90)
+        while self._running:
+            try:
+                if not self.engine.kill_switch and self.cross_arb is not None:
+                    # Fetch current Kalshi open markets for matching
+                    kalshi_data = await self.kalshi._get(
+                        "/markets", params={"limit": 200, "status": "open"}
+                    )
+                    kalshi_markets = kalshi_data.get("markets", []) if kalshi_data else []
+
+                    if kalshi_markets:
+                        executed = await self.cross_arb.run_cycle(kalshi_markets)
+                        if executed:
+                            self.engine.log_event(
+                                "info",
+                                f"Cross-platform arb: executed {len(executed)} arb trades",
+                                strategy="cross_arb",
+                            )
+                            for arb in executed:
+                                opp = arb.get("opportunity", {})
+                                self.engine.log_event(
+                                    "info",
+                                    f"Arb: {opp.get('kalshi_title', '')[:40]} | "
+                                    f"profit={opp.get('profit_cents', 0):.1f}¢ | "
+                                    f"ROI={opp.get('roi_pct', 0):.1f}%",
+                                    strategy="cross_arb",
+                                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.engine.log_event("error", f"Cross-arb loop error: {e}", strategy="cross_arb")
+                logger.error("Cross-arb loop error", error=str(e))
+
+            await asyncio.sleep(60)
 
     def _get_weather_loop_interval(self) -> int:
         """Adaptive weather loop interval based on nearest same-day market settlement.

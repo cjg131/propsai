@@ -54,16 +54,25 @@ class PolymarketTrader:
             from py_clob_client.client import ClobClient
 
             if self._api_key and self._api_secret and self._api_passphrase:
-                # Use existing L2 credentials
+                # Use existing L2 credentials — build ApiCreds object
+                try:
+                    from py_clob_client.clob_types import ApiCreds
+                    creds_obj = ApiCreds(
+                        api_key=self._api_key,
+                        api_secret=self._api_secret,
+                        api_passphrase=self._api_passphrase,
+                    )
+                except ImportError:
+                    creds_obj = {
+                        "apiKey": self._api_key,
+                        "secret": self._api_secret,
+                        "passphrase": self._api_passphrase,
+                    }
                 self._clob_client = ClobClient(
                     host=CLOB_BASE,
                     chain_id=CHAIN_ID,
                     key=self._private_key,
-                    creds={
-                        "apiKey": self._api_key,
-                        "secret": self._api_secret,
-                        "passphrase": self._api_passphrase,
-                    },
+                    creds=creds_obj,
                 )
             elif self._private_key:
                 # Will derive/create credentials from private key
@@ -108,17 +117,13 @@ class PolymarketTrader:
                     self._api_secret = creds.get("secret", "")
                     self._api_passphrase = creds.get("passphrase", "")
 
-                # Re-init client with new creds
+                # Re-init client with derived creds object
                 from py_clob_client.client import ClobClient
                 self._clob_client = ClobClient(
                     host=CLOB_BASE,
                     chain_id=CHAIN_ID,
                     key=self._private_key,
-                    creds={
-                        "apiKey": self._api_key,
-                        "secret": self._api_secret,
-                        "passphrase": self._api_passphrase,
-                    },
+                    creds=creds,  # Pass the ApiCreds object directly
                 )
 
                 logger.info("Polymarket API credentials derived successfully")

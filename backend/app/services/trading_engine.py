@@ -2852,7 +2852,7 @@ def get_trading_engine() -> TradingEngine:
     global _engine
     if _engine is None:
         _load_env_defaults()
-        paper_mode = os.environ.get("PAPER_MODE", "true").lower() != "false"
+        paper_mode = os.environ.get("KALSHI_PAPER_MODE", "false").lower() != "false"
         bankroll = float(os.environ.get("BANKROLL", "2000"))
         _engine = TradingEngine(paper_mode=paper_mode, bankroll=bankroll)
     return _engine

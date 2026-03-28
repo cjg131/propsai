@@ -59,7 +59,7 @@ class CopyTrader:
         self._scan_interval: float = 45.0  # seconds between scans
         self._bankroll: float = float(os.getenv("POLYMARKET_BANKROLL", "250"))
         self._total_deployed: float = 0.0
-        self._paper_mode: bool = os.getenv("PAPER_MODE", "true").lower() == "true"
+        self._paper_mode: bool = os.getenv("POLYMARKET_PAPER_MODE", "true").lower() == "true"
         self._first_scan_done: bool = False  # First scan is snapshot-only
 
     def _load_tracked_wallets(self) -> list[str]:

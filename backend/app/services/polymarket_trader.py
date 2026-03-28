@@ -368,7 +368,10 @@ class PolymarketTrader:
             return None
 
         try:
-            balance = await asyncio.to_thread(self._clob_client.get_balance)
+            balance = await asyncio.to_thread(self._clob_client.get_balance_allowance)
+            # May return dict or numeric depending on SDK version
+            if isinstance(balance, dict):
+                return float(balance.get("balance", balance.get("allowance", 0)))
             return float(balance) if balance is not None else None
         except Exception as e:
             logger.debug(f"Failed to get balance: {e}")
